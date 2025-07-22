@@ -104,15 +104,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn start_node(data_dir: PathBuf, port: u16, listen_addr: Option<String>) -> Result<()> {
+async fn start_node(data_dir: PathBuf, _port: u16, listen_addr: Option<String>) -> Result<()> {
     println!("🚀 Starting Numi blockchain node...");
     
     // Initialize storage
-    let storage = BlockchainStorage::new(&data_dir)?;
+    let _storage = BlockchainStorage::new(&data_dir)?;
     println!("✅ Storage initialized at {:?}", data_dir);
     
     // Initialize blockchain
-    let mut blockchain = NumiBlockchain::new()?;
+    let blockchain = NumiBlockchain::new()?;
     println!("✅ Blockchain initialized");
     
     // Initialize network with libp2p
@@ -122,7 +122,7 @@ async fn start_node(data_dir: PathBuf, port: u16, listen_addr: Option<String>) -
     println!("✅ Network started on {}", network_addr);
     
     // Initialize miner
-    let miner = Miner::new()?;
+    let _miner = Miner::new()?;
     println!("✅ Miner initialized");
     
     println!("🎯 Node is running! Press Ctrl+C to stop.");
@@ -145,10 +145,10 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let mut blockchain = NumiBlockchain::load_from_storage(&storage).await?;
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Create or load miner keypair
-    let keypair = if let Some(key_str) = miner_key {
+    let keypair = if let Some(_key_str) = miner_key {
         // In a real implementation, you'd load the keypair from the string
         Dilithium3Keypair::new()?
     } else {
@@ -200,7 +200,7 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
     Ok(())
 }
 
-async fn submit_transaction(data_dir: PathBuf, from: String, to: String, amount: u64) -> Result<()> {
+async fn submit_transaction(data_dir: PathBuf, _from: String, to: String, amount: u64) -> Result<()> {
     println!("📤 Submitting transaction...");
     
     // Initialize storage and blockchain

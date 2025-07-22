@@ -1,18 +1,16 @@
 use std::path::Path;
-use sled::{Db, Tree};
-use serde::{Deserialize, Serialize};
+
 use crate::block::Block;
 use crate::transaction::Transaction;
-use crate::blockchain::{AccountState, ChainState};
-use crate::error::BlockchainError;
-use crate::Result;
+use crate::blockchain::{ChainState, AccountState};
+use crate::{Result, BlockchainError};
 
 pub struct BlockchainStorage {
-    db: Db,
-    blocks: Tree,
-    transactions: Tree,
-    accounts: Tree,
-    state: Tree,
+    db: sled::Db,
+    blocks: sled::Tree,
+    transactions: sled::Tree,
+    accounts: sled::Tree,
+    state: sled::Tree,
 }
 
 impl BlockchainStorage {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use crate::crypto::{Hash, blake3_hash, blake3_hash_hex, Dilithium3Signature};
-use crate::transaction::{Transaction, TransactionId};
+use crate::transaction::Transaction;
 use crate::error::BlockchainError;
 use crate::Result;
 

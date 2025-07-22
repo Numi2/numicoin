@@ -20,6 +20,8 @@ use crate::storage::BlockchainStorage;
 use crate::transaction::{Transaction, TransactionType};
 use crate::crypto::Dilithium3Keypair;
 use crate::mempool::ValidationResult;
+use crate::network::NetworkManager;
+use crate::miner::Miner;
 use crate::{Result, BlockchainError};
 
 // AI Agent Note: This is a production-ready RPC server implementation
@@ -331,16 +333,35 @@ pub struct RpcServer {
     stats: Arc<RwLock<RpcStats>>,
     start_time: Instant,
     blocked_ips: Arc<DashMap<SocketAddr, Instant>>,
+    network_manager: Arc<NetworkManager>,
+    miner: Arc<Miner>,
 }
 
 impl RpcServer {
     /// Create new RPC server with security configuration
-    pub fn new(blockchain: NumiBlockchain, storage: BlockchainStorage) -> Self {
+    pub fn new(blockchain: NumiBlockchain, storage: BlockchainStorage) -> Result<Self> {
         Self::with_config(
             blockchain,
             storage,
             RateLimitConfig::default(),
             AuthConfig::default(),
+        )
+    }
+
+    /// Create new RPC server with network and miner components
+    pub fn with_components(
+        blockchain: NumiBlockchain,
+        storage: BlockchainStorage,
+        network_manager: NetworkManager,
+        miner: Miner,
+    ) -> Result<Self> {
+        Self::with_config_and_components(
+            blockchain,
+            storage,
+            RateLimitConfig::default(),
+            AuthConfig::default(),
+            network_manager,
+            miner,
         )
     }
     
@@ -350,7 +371,26 @@ impl RpcServer {
         storage: BlockchainStorage,
         rate_limit_config: RateLimitConfig,
         auth_config: AuthConfig,
-    ) -> Self {
+    ) -> Result<Self> {
+        Self::with_config_and_components(
+            blockchain,
+            storage,
+            rate_limit_config,
+            auth_config,
+            NetworkManager::new()?,
+            Miner::new()?,
+        )
+    }
+
+    /// Create RPC server with custom configuration and components
+    pub fn with_config_and_components(
+        blockchain: NumiBlockchain,
+        storage: BlockchainStorage,
+        rate_limit_config: RateLimitConfig,
+        auth_config: AuthConfig,
+        network_manager: NetworkManager,
+        miner: Miner,
+    ) -> Result<Self> {
         let stats = RpcStats {
             total_requests: 0,
             successful_requests: 0,
@@ -362,7 +402,7 @@ impl RpcServer {
             average_response_time_ms: 0.0,
         };
         
-        Self {
+        Ok(Self {
             blockchain: Arc::new(RwLock::new(blockchain)),
             storage: Arc::new(storage),
             rate_limiter: Arc::new(DashMap::new()),
@@ -371,7 +411,9 @@ impl RpcServer {
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
-        }
+            network_manager: Arc::new(RwLock::new(network_manager)),
+            miner: Arc::new(RwLock::new(miner)),
+        })
     }
     
     /// Start the RPC server with all security middleware
@@ -568,6 +610,16 @@ impl RpcServer {
             _ => {}
         }
     }
+
+    pub async fn get_peer_count(&self) -> usize {
+        let network_manager = self.network_manager.read();
+        network_manager.get_peer_count().await
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        let network_manager = self.network_manager.read();
+        network_manager.is_syncing()
+    }
 }
 
 /// Custom rejection for rate limiting
@@ -581,6 +633,19 @@ fn with_rpc_server(
     rpc_server: Arc<RpcServer>,
 ) -> impl Filter<Extract = (Arc<RpcServer>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || rpc_server.clone())
+}
+
+/// Calculate transaction fee based on size and type
+fn calculate_transaction_fee(transaction: &Transaction) -> f64 {
+    let tx_size = bincode::serialize(transaction).map(|b| b.len()).unwrap_or(0);
+    
+    // Base fee per transaction
+    let base_fee = 1000u64;
+    // Size fee: 10 satoshis per byte
+    let size_fee = tx_size as u64 * 10;
+    
+    let total_fee = base_fee + size_fee;
+    total_fee as f64 / 1_000_000_000.0 // Convert to NUMI
 }
 
 /// Status endpoint handler
@@ -597,8 +662,8 @@ async fn handle_status(
         best_block_hash: hex::encode(state.best_block_hash),
         mempool_transactions: blockchain.get_pending_transaction_count(),
         mempool_size_bytes: blockchain.get_mempool_stats().total_size_bytes,
-        network_peers: 0, // TODO: Get from network manager
-        is_syncing: false, // TODO: Implement sync status
+        network_peers: rpc_server.get_peer_count().await,
+        is_syncing: rpc_server.is_syncing(),
         chain_work: format!("{}", state.cumulative_difficulty),
     };
     
@@ -666,8 +731,9 @@ async fn handle_block(
         match hex::decode(&hash_or_height) {
             Ok(hash_bytes) => {
                 if hash_bytes.len() == 32 {
-                    // TODO: Implement get_block_by_hash
-                    None
+                    let mut hash_array = [0u8; 32];
+                    hash_array.copy_from_slice(&hash_bytes);
+                    blockchain.get_block_by_hash(&hash_array)
                 } else {
                     None
                 }
@@ -694,7 +760,7 @@ async fn handle_block(
                     from: hex::encode(&tx.from),
                     tx_type,
                     amount: amount as f64 / 1_000_000_000.0,
-                    fee: 0.0, // TODO: Implement transaction fees
+                    fee: calculate_transaction_fee(tx),
                 }
             }).collect();
             
@@ -786,18 +852,65 @@ async fn handle_mine(
 ) -> std::result::Result<warp::reply::Json, Rejection> {
     let start_time = Instant::now();
     
-    // TODO: Implement actual mining with the new miner
-    // This is a placeholder implementation
-    let response = MiningResponse {
-        message: "Mining not yet implemented in RPC".to_string(),
-        block_height: 0,
-        block_hash: "0".repeat(64),
-        mining_time_ms: start_time.elapsed().as_millis() as u64,
-        hash_rate: 0,
-    };
+    // Get current blockchain state
+    let blockchain = rpc_server.blockchain.read();
+    let current_height = blockchain.get_current_height();
+    let current_difficulty = blockchain.get_current_difficulty();
+    let previous_hash = blockchain.get_latest_block_hash();
+    let pending_transactions = blockchain.get_transactions_for_block(1_000_000, 1000); // 1MB, 1000 txs max
     
-    rpc_server.increment_stat("successful_requests").await;
-    Ok(warp::reply::json(&ApiResponse::success(response)))
+    // Get miner and start mining
+    let mut miner = rpc_server.miner.write();
+    
+    let mining_result = miner.mine_block(
+        current_height + 1,
+        previous_hash,
+        pending_transactions,
+        current_difficulty,
+        0, // start_nonce
+    );
+    
+    match mining_result {
+        Ok(Some(result)) => {
+            let mining_time = start_time.elapsed();
+            
+            // Add the mined block to the blockchain
+            let block_added = blockchain.add_block(result.block.clone()).await;
+            
+            let response = MiningResponse {
+                message: if block_added.is_ok() { 
+                    "Block mined and added successfully".to_string() 
+                } else { 
+                    "Block mined but failed to add to blockchain".to_string() 
+                },
+                block_height: result.block.header.height,
+                block_hash: hex::encode(result.block.calculate_hash()),
+                mining_time_ms: mining_time.as_millis() as u64,
+                hash_rate: result.hash_rate,
+            };
+            
+            rpc_server.increment_stat("successful_requests").await;
+            Ok(warp::reply::json(&ApiResponse::success(response)))
+        }
+        Ok(None) => {
+            let response = MiningResponse {
+                message: "Mining stopped or timed out".to_string(),
+                block_height: 0,
+                block_hash: "0".repeat(64),
+                mining_time_ms: start_time.elapsed().as_millis() as u64,
+                hash_rate: 0,
+            };
+            
+            rpc_server.increment_stat("successful_requests").await;
+            Ok(warp::reply::json(&ApiResponse::success(response)))
+        }
+        Err(e) => {
+            rpc_server.increment_stat("failed_requests").await;
+            Ok(warp::reply::json(&ApiResponse::<()>::error(
+                format!("Mining failed: {}", e)
+            )))
+        }
+    }
 }
 
 /// Statistics endpoint handler (admin only)

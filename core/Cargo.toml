@@ -4,26 +4,31 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Quantum-safe cryptography (placeholder - would need proper liboqs integration)
-# liboqs = "0.8.0"
+# Quantum-safe cryptography - TODO: Replace with real liboqs when available
+# liboqs = "0.8.0" # Will be implemented in separate task
+pqcrypto-dilithium = "0.5" # Temporary quantum-safe crypto
+oqs = { version = "0.9", optional = true } # Real liboqs integration
 
 # Hashing and cryptography
 blake3 = "1.5"
 argon2 = "0.5"
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2.5" # Constant-time operations
+rand = "0.8" # Cryptographically secure randomness
+
+# Networking with libp2p for production P2P
+libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "macros", "floodsub", "yamux", "mdns", "identify", "ping", "kad"] }
+tokio = { version = "1.0", features = ["full"] }
+
+# Database and storage with better error handling
+sled = "0.34"
+rocksdb = "0.22" # High-performance storage backend
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
-
-# Networking (Future: libp2p integration)
-# libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "macros", "floodsub", "yamux"] }
-tokio = { version = "1.0", features = ["full"] }
-
-# Database and storage
-sled = "0.34"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -33,14 +38,37 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10"
 clap = { version = "4.0", features = ["derive"] }
-rand = "0.8"
+num_cpus = "1.16" # CPU core detection for mining
 
 # Async runtime
 async-trait = "0.1"
+futures = "0.3"
 
-# Web framework for RPC API
-warp = "0.3"
+# Web framework for RPC API with security features
+warp = { version = "0.3", features = ["tls"] }
+tower = "0.4" # Middleware for rate limiting
+tower-http = { version = "0.4", features = ["cors", "trace", "timeout"] }
+
+# Performance and concurrency
+rayon = "1.8" # For parallel mining
+parking_lot = "0.12" # Faster RwLock
+dashmap = "5.5" # Concurrent HashMap
+
+# Encryption for key storage
+aes-gcm = "0.10"
+scrypt = "0.11"
+zeroize = { version = "1.6", features = ["zeroize_derive"] }
+
+# Networking and security
+dns-lookup = "2.0"
+trust-dns-resolver = "0.23"
 
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.8"
+proptest = "1.4" # Property-based testing
+
+[features]
+default = ["std"]
+std = []
+real-liboqs = ["oqs"] # Enable when real liboqs is available

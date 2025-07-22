@@ -370,4 +370,24 @@ impl NetworkManager {
     pub fn get_local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
+
+    /// Check if the node is currently syncing
+    pub fn is_syncing(&self) -> bool {
+        self.is_syncing
+    }
+
+    /// Set syncing status
+    pub fn set_syncing(&mut self, syncing: bool) {
+        self.is_syncing = syncing;
+    }
+
+    /// Get current chain height
+    pub fn get_chain_height(&self) -> u64 {
+        self.chain_height
+    }
+
+    /// Set current chain height
+    pub fn set_chain_height(&mut self, height: u64) {
+        self.chain_height = height;
+    }
 } 

@@ -151,8 +151,8 @@ impl Miner {
             difficulty: 1,
             is_mining: false,
             blocks_mined: 0,
-            mining_time: Duration::ZERO,
-            start_time: Instant::now(),
+            mining_time_secs: 0,
+            start_timestamp: chrono::Utc::now().timestamp() as u64,
             threads_active: 0,
             average_block_time: 0.0,
             power_efficiency: 0.0,
@@ -254,8 +254,8 @@ impl Miner {
         let mining_timeout = Duration::from_secs(300); // 5 minutes timeout
         let result = match result_rx.recv_timeout(mining_timeout) {
             Ok(mining_result) => {
-                log::info!("🎉 Block mined successfully by thread {} in {:?}!", 
-                          mining_result.thread_id, mining_result.mining_time);
+                log::info!("🎉 Block mined successfully by thread {} in {} seconds!", 
+                          mining_result.thread_id, mining_result.mining_time_secs);
                 
                 // Stop all threads
                 self.should_stop.store(true, Ordering::Relaxed);
@@ -272,7 +272,7 @@ impl Miner {
                     block,
                     nonce: mining_result.nonce,
                     hash_rate: mining_result.hash_rate,
-                    mining_time: mining_result.mining_time,
+                    mining_time_secs: mining_result.mining_time_secs,
                     thread_id: mining_result.thread_id,
                     total_attempts: mining_result.total_attempts,
                 }))
@@ -355,7 +355,7 @@ impl Miner {
                             block,
                             nonce,
                             hash_rate,
-                            mining_time,
+                            mining_time_secs: mining_time.as_secs(),
                             thread_id,
                             total_attempts: local_hashes,
                         };
@@ -433,7 +433,7 @@ impl Miner {
     fn update_mining_stats(&self, difficulty: u32, start_time: Instant, mining_active: bool) {
         let mut stats = self.stats.write();
         stats.difficulty = difficulty;
-        stats.start_time = start_time;
+        stats.start_timestamp = chrono::Utc::now().timestamp() as u64;
         stats.is_mining = mining_active;
         stats.threads_active = if mining_active { self.config.thread_count } else { 0 };
     }
@@ -442,13 +442,13 @@ impl Miner {
     fn update_final_stats(&self, result: &MiningResult) {
         let mut stats = self.stats.write();
         stats.blocks_mined += 1;
-        stats.mining_time += result.mining_time;
+        stats.mining_time_secs += result.mining_time_secs;
         stats.is_mining = false;
         stats.threads_active = 0;
         
         // Calculate average block time
         if stats.blocks_mined > 0 {
-            stats.average_block_time = stats.mining_time.as_secs_f64() / stats.blocks_mined as f64;
+            stats.average_block_time = stats.mining_time_secs as f64 / stats.blocks_mined as f64;
         }
         
         // Estimate power efficiency (theoretical)

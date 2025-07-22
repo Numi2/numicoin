@@ -128,7 +128,7 @@ impl TransactionMempool {
 
     /// Add transaction to mempool with full validation
     pub async fn add_transaction(&self, transaction: Transaction) -> Result<ValidationResult> {
-        let tx_id = transaction.get_hash_hex();
+        let tx_id = transaction.id;
         let sender = &transaction.from;
         
         // Check if transaction already exists
@@ -169,7 +169,7 @@ impl TransactionMempool {
         let priority = TransactionPriority {
             fee_rate,
             age_penalty: 0, // Will increase over time
-            tx_id: tx_id.clone(),
+            tx_id,
         };
 
         let entry = MempoolEntry {
@@ -182,8 +182,8 @@ impl TransactionMempool {
         };
 
         // Add to all data structures atomically
-        self.transactions.insert(tx_id.clone(), entry);
-        self.priority_queue.write().insert(priority, tx_id.clone());
+        self.transactions.insert(tx_id, entry);
+        self.priority_queue.write().insert(priority, tx_id);
         
         // Update account tracking
         self.account_nonces.insert(sender.clone(), transaction.nonce);
@@ -369,6 +369,13 @@ impl TransactionMempool {
             }
             TransactionType::Unstake { .. } => {
                 // TODO: Validate unstaking conditions
+            }
+            TransactionType::MiningReward { .. } => {
+                // Mining rewards are system-generated and pre-validated
+            }
+            TransactionType::Governance { .. } => {
+                // Governance transactions have special validation rules
+                // TODO: Implement governance validation
             }
         }
         

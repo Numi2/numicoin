@@ -4,6 +4,9 @@ use blake3::Hasher;
 use argon2::{Argon2, Params, PasswordHasher, PasswordVerifier, Algorithm, Version};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+use pqcrypto_traits::sign::{PublicKey, SecretKey, DetachedSignature};
+use rand::RngCore;
+use pqcrypto_traits::sign::VerificationError;
 
 use crate::error::BlockchainError;
 use crate::Result;
@@ -87,7 +90,7 @@ impl Dilithium3Keypair {
         let sig = pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature)
             .map_err(|e| BlockchainError::CryptographyError(format!("Signature error: {:?}", e)))?;
         
-        Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&sig, message, &pk))
+        Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&sig, message, &pk).is_ok())
     }
     
     /// Get public key bytes
@@ -335,7 +338,7 @@ pub fn target_to_difficulty(target: &[u8]) -> u32 {
 }
 
 /// Secure key derivation using BLAKE3 with salt
-pub fn derive_key(seed: &[u8], salt: &[u8], info: &[u8]) -> Hash {
+pub fn derive_key(seed: &[u8], salt: &str, info: &[u8]) -> Hash {
     let mut hasher = Hasher::new_derive_key(salt);
     hasher.update(seed);
     hasher.update(info);

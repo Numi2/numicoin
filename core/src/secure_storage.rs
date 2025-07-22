@@ -221,7 +221,7 @@ impl SecureKeyStore {
         
         // Create password hash for verification
         let salt = generate_random_bytes(self.kdf_config.salt_length);
-        let password_hash = derive_key(password.as_bytes(), &salt, b"keystore-auth");
+        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth");
         self.password_hash = Some(password_hash);
         
         log::info!("🔐 Secure key store initialized");
@@ -389,19 +389,30 @@ impl SecureKeyStore {
     pub fn get_keypair(&mut self, id: &str, password: &str) -> Result<Dilithium3Keypair> {
         self.verify_password(password)?;
         
-        let entry = self.keys.get_mut(id)
-            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+        // First, get the salt and check expiration without mutable borrow
+        let salt = {
+            let entry = self.keys.get(id)
+                .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+            
+            // Check if key has expired
+            if entry.is_expired() {
+                return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
+            }
+            
+            entry.salt.clone()
+        };
         
-        // Check if key has expired
-        if entry.is_expired() {
-            return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
+        // Now get mutable access for updating access time
+        if let Some(entry) = self.keys.get_mut(id) {
+            entry.touch();
         }
         
-        // Update access time
-        entry.touch();
+        // Get the entry data for decryption
+        let entry = self.keys.get(id)
+            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
         
         // Derive key from password
-        let key = self.derive_key_from_password(password, &entry.salt)?;
+        let key = self.derive_key_from_password(password, &salt)?;
         
         // Reconstruct full encrypted data (encrypted_data + auth_tag)
         let mut full_encrypted_data = entry.encrypted_data.clone();
@@ -585,7 +596,7 @@ impl SecureKeyStore {
         // For password verification, we'd need to store the salt used for the password hash
         // This is a simplified implementation - in production, store the salt separately
         let test_salt = vec![0u8; 32]; // Placeholder
-        let test_hash = derive_key(password.as_bytes(), &test_salt, b"keystore-auth");
+        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&test_salt), b"keystore-auth");
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {

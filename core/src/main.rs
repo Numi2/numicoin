@@ -331,8 +331,12 @@ async fn start_rpc_server(data_dir: PathBuf, port: u16) -> Result<()> {
     let storage = BlockchainStorage::new(&data_dir)?;
     let blockchain = NumiBlockchain::load_from_storage(&storage)?;
     
-    // Create and start RPC server
-    let rpc_server = RpcServer::new(blockchain, storage);
+    // Initialize network and miner
+    let network_manager = NetworkManager::new()?;
+    let miner = Miner::new()?;
+    
+    // Create and start RPC server with components
+    let rpc_server = RpcServer::with_components(blockchain, storage, network_manager, miner)?;
     rpc_server.start(port).await?;
     
     Ok(())

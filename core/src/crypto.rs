@@ -1,12 +1,11 @@
 use std::fmt;
 
 use blake3::Hasher;
-use argon2::{Argon2, Params, PasswordHasher, PasswordVerifier, Algorithm, Version};
+use argon2::{Argon2, Params, Algorithm, Version};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 use pqcrypto_traits::sign::{PublicKey, SecretKey, DetachedSignature};
 use rand::RngCore;
-use pqcrypto_traits::sign::VerificationError;
 
 use crate::error::BlockchainError;
 use crate::Result;

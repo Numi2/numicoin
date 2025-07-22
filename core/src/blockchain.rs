@@ -1,14 +1,14 @@
-use std::collections::{HashMap, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::block::{Block, BlockHash, BlockHeader};
-use crate::transaction::{Transaction, TransactionType, TransactionId};
+use crate::block::{Block, BlockHash};
+use crate::transaction::{Transaction, TransactionType};
 use crate::crypto::{Dilithium3Keypair, generate_difficulty_target, verify_pow};
 use crate::mempool::{TransactionMempool, ValidationResult};
 use crate::error::BlockchainError;

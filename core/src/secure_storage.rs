@@ -4,12 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::crypto::{Dilithium3Keypair, derive_key, generate_random_bytes, Hash};
 use crate::{Result, BlockchainError};
@@ -529,7 +528,7 @@ impl SecureKeyStore {
         self.verify_password(password)?;
         
         // Save current state to backup location
-        let current_path = self.storage_path.clone();
+        let _current_path = self.storage_path.clone();
         let backup_store = SecureKeyStore {
             storage_path: backup_path.as_ref().to_path_buf(),
             keys: self.keys.clone(),

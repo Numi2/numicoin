@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_transaction_creation() {
         let keypair = Dilithium3Keypair::new().unwrap();
-        let mut tx = Transaction::new(
+        let tx = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
                 to: vec![1, 2, 3, 4],

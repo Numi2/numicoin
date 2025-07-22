@@ -36,4 +36,17 @@ impl fmt::Display for BlockchainError {
     }
 }
 
+// Add From implementations for error conversions
+impl From<Box<bincode::ErrorKind>> for BlockchainError {
+    fn from(err: Box<bincode::ErrorKind>) -> Self {
+        BlockchainError::SerializationError(format!("Bincode error: {:?}", err))
+    }
+}
+
+impl From<std::io::Error> for BlockchainError {
+    fn from(err: std::io::Error) -> Self {
+        BlockchainError::StorageError(format!("IO error: {}", err))
+    }
+}
+
 impl std::error::Error for BlockchainError {} 

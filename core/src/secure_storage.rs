@@ -389,19 +389,27 @@ impl SecureKeyStore {
     pub fn get_keypair(&mut self, id: &str, password: &str) -> Result<Dilithium3Keypair> {
         self.verify_password(password)?;
         
-        let entry = self.keys.get_mut(id)
-            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+        // First, get the salt and check expiration without mutable borrow
+        let salt = {
+            let entry = self.keys.get(id)
+                .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+            
+            // Check if key has expired
+            if entry.is_expired() {
+                return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
+            }
+            
+            entry.salt.clone()
+        };
         
-        // Check if key has expired
-        if entry.is_expired() {
-            return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
+        // Now get mutable access for updating access time
+        if let Some(entry) = self.keys.get_mut(id) {
+            entry.touch();
         }
         
-        // Clone salt to avoid borrow checker issues
-        let salt = entry.salt.clone();
-        
-        // Update access time
-        entry.touch();
+        // Get the entry data for decryption
+        let entry = self.keys.get(id)
+            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
         
         // Derive key from password
         let key = self.derive_key_from_password(password, &salt)?;

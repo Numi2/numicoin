@@ -59,17 +59,11 @@ impl Dilithium3Keypair {
                        DILITHIUM3_SECKEY_SIZE, secret_key.len())));
         }
         
-        // Derive public key from secret key
-        let sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(secret_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {:?}", e)))?;
-        
-        // Extract public key
-        let pk = pqcrypto_dilithium::dilithium3::public_key_from_secret_key(&sk);
-        
-        Ok(Self {
-            public_key: pk.as_bytes().to_vec(),
-            secret_key: secret_key.to_vec(),
-        })
+        // AI Agent Note: In Dilithium, the public key cannot be easily derived from just the secret key
+        // This is a limitation of the current pqcrypto-dilithium crate
+        // For now, we'll return an error - proper key storage should save both keys
+        Err(BlockchainError::CryptographyError(
+            "Cannot derive public key from secret key in pqcrypto-dilithium. Store both keys.".to_string()))
     }
     
     /// Sign message with Dilithium3 - returns detached signature
@@ -128,7 +122,7 @@ impl Dilithium3Signature {
 }
 
 /// Argon2id configuration for Proof of Work
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Argon2Config {
     /// Memory cost in KiB (default: 65536 = 64MB)
     pub memory_cost: u32,

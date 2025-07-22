@@ -47,7 +47,7 @@ futures = "0.3"
 # Web framework for RPC API with security features
 warp = { version = "0.3", features = ["tls"] }
 tower = "0.4" # Middleware for rate limiting
-tower-http = { version = "0.4", features = ["cors", "trace", "timeout"] }
+tower-http = { version = "0.4", features = ["cors", "trace", "timeout", "limit"] }
 
 # Performance and concurrency
 rayon = "1.8" # For parallel mining

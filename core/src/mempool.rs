@@ -128,8 +128,8 @@ impl TransactionMempool {
 
     /// Add transaction to mempool with full validation
     pub async fn add_transaction(&self, transaction: Transaction) -> Result<ValidationResult> {
-        let tx_id = transaction.get_hash();
-        let sender = &transaction.sender;
+        let tx_id = transaction.get_hash_hex();
+        let sender = &transaction.from;
         
         // Check if transaction already exists
         if self.transactions.contains_key(&tx_id) {
@@ -237,7 +237,7 @@ impl TransactionMempool {
                 self.priority_queue.write().remove(&entry.priority);
                 
                 // Update account tracking
-                let sender = &entry.transaction.sender;
+                let sender = &entry.transaction.from;
                 if let Some(mut account_txs) = self.transactions_by_account.get_mut(sender) {
                     account_txs.remove(tx_id);
                     if account_txs.is_empty() {
@@ -345,7 +345,7 @@ impl TransactionMempool {
         }
         
         // Check nonce (prevent replay attacks)
-        if let Some(last_nonce) = self.account_nonces.get(&transaction.sender) {
+        if let Some(last_nonce) = self.account_nonces.get(&transaction.from) {
             if transaction.nonce <= *last_nonce {
                 return Ok(ValidationResult::InvalidNonce {
                     expected: *last_nonce + 1,

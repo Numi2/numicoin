@@ -1,49 +1,26 @@
-use thiserror::Error;
+use std::fmt;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockchainError {
-    #[error("Invalid block: {0}")]
     InvalidBlock(String),
-    
-    #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
-    
-    #[error("Invalid signature: {0}")]
-    InvalidSignature(String),
-    
-    #[error("Insufficient balance: {0}")]
-    InsufficientBalance(String),
-    
-    #[error("Invalid nonce: expected {expected}, got {got}")]
-    InvalidNonce { expected: u64, got: u64 },
-    
-    #[error("Block not found: {0}")]
-    BlockNotFound(String),
-    
-    #[error("Transaction not found: {0}")]
-    TransactionNotFound(String),
-    
-    #[error("Storage error: {0}")]
     StorageError(String),
-    
-    #[error("Network error: {0}")]
     NetworkError(String),
-    
-    #[error("Mining error: {0}")]
-    MiningError(String),
-    
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
-    
-    #[error("Crypto error: {0}")]
-    CryptoError(String),
-    
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    
-    #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
-    
-    #[error("Bincode error: {0}")]
-    BincodeError(#[from] bincode::Error),
-} 
+    ConsensusError(String),
+    CryptographyError(String), // AI Agent Note: Added for crypto operations and key management
+}
+
+impl fmt::Display for BlockchainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockchainError::InvalidBlock(msg) => write!(f, "Invalid block: {}", msg),
+            BlockchainError::InvalidTransaction(msg) => write!(f, "Invalid transaction: {}", msg),
+            BlockchainError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            BlockchainError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            BlockchainError::ConsensusError(msg) => write!(f, "Consensus error: {}", msg),
+            BlockchainError::CryptographyError(msg) => write!(f, "Cryptography error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for BlockchainError {} 

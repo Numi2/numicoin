@@ -32,8 +32,8 @@ pub struct MiningStats {
     pub difficulty: u32,          // Current difficulty
     pub is_mining: bool,          // Mining active status
     pub blocks_mined: u64,        // Total blocks successfully mined
-    pub mining_time: Duration,    // Total mining time
-    pub start_time: Instant,      // When mining started
+    pub mining_time_secs: u64,    // Total mining time in seconds
+    pub start_timestamp: u64,     // When mining started (unix timestamp)
     pub threads_active: usize,    // Number of active mining threads
     pub average_block_time: f64,  // Average time to mine a block
     pub power_efficiency: f64,    // Theoretical hashes per watt
@@ -106,7 +106,7 @@ pub struct MiningResult {
     pub block: Block,
     pub nonce: u64,
     pub hash_rate: u64,
-    pub mining_time: Duration,
+    pub mining_time_secs: u64,
     pub thread_id: usize,
     pub total_attempts: u64,
 }

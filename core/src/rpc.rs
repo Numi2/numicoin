@@ -324,10 +324,10 @@ pub struct MiningResponse {
 /// Production-ready RPC server with comprehensive security
 pub struct RpcServer {
     blockchain: Arc<RwLock<NumiBlockchain>>,
-    storage: Arc<BlockchainStorage>,
+    _storage: Arc<BlockchainStorage>,
     rate_limiter: Arc<DashMap<SocketAddr, RateLimitEntry>>,
     rate_limit_config: RateLimitConfig,
-    auth_config: AuthConfig,
+    _auth_config: AuthConfig,
     stats: Arc<RwLock<RpcStats>>,
     start_time: Instant,
     blocked_ips: Arc<DashMap<SocketAddr, Instant>>,
@@ -404,10 +404,10 @@ impl RpcServer {
         
         Ok(Self {
             blockchain: Arc::new(RwLock::new(blockchain)),
-            storage: Arc::new(storage),
+            _storage: Arc::new(storage),
             rate_limiter: Arc::new(DashMap::new()),
             rate_limit_config,
-            auth_config,
+            _auth_config: auth_config,
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),

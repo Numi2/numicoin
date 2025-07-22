@@ -87,7 +87,7 @@ pub struct TransactionMempool {
     max_transactions: usize,         // Maximum number of transactions
     min_fee_rate: u64,              // Minimum fee rate per byte
     max_tx_age: Duration,           // Maximum transaction age before expiry
-    max_account_txs: usize,         // Maximum pending transactions per account
+    _max_account_txs: usize,         // Maximum pending transactions per account
     
     /// Anti-spam protection
     account_submission_rates: Arc<DashMap<Vec<u8>, Vec<Instant>>>,
@@ -113,7 +113,7 @@ impl TransactionMempool {
             max_transactions: 100_000,             // 100k transactions
             min_fee_rate: 1000,                    // 1000 satoshis per byte
             max_tx_age: Duration::from_secs(3600), // 1 hour
-            max_account_txs: 1000,                 // 1000 pending txs per account
+            _max_account_txs: 1000,                 // 1000 pending txs per account
             
             // Anti-spam: 100 submissions per hour per account
             account_submission_rates: Arc::new(DashMap::new()),

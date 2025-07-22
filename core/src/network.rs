@@ -86,7 +86,7 @@ pub struct NetworkManagerHandle {
     message_sender: mpsc::UnboundedSender<NetworkMessage>,
     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
     banned_peers: Arc<RwLock<HashSet<PeerId>>>,
-    local_peer_id: PeerId,
+    _local_peer_id: PeerId,
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
 }
@@ -208,7 +208,7 @@ impl NetworkManager {
             message_sender: self.message_sender.clone(),
             peers: self.peers.clone(),
             banned_peers: self.banned_peers.clone(),
-            local_peer_id: self.local_peer_id,
+            _local_peer_id: self.local_peer_id,
             chain_height: self.chain_height.clone(),
             is_syncing: self.is_syncing.clone(),
         }

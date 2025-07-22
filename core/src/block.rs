@@ -290,13 +290,16 @@ mod tests {
     #[test]
     fn test_genesis_block() {
         let keypair = Dilithium3Keypair::new().unwrap();
-        let block = Block::new(
+        let mut block = Block::new(
             0,
             [0u8; 32],
             vec![],
             1,
             keypair.public_key.clone(),
         );
+        
+        // Sign the genesis block before validation
+        block.sign(&keypair).unwrap();
         
         assert!(block.is_genesis());
         assert!(block.validate(None).is_ok());

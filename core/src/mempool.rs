@@ -389,7 +389,7 @@ impl TransactionMempool {
     fn calculate_fee_rate(&self, _transaction: &Transaction, size_bytes: usize) -> u64 {
         // Simple fee calculation - in production, extract from transaction
         let base_fee = 1000; // Base fee per transaction
-        let size_fee = size_bytes as u64 * 10; // 10 satoshis per byte
+        let size_fee = size_bytes as u64 * 1000; // 1000 satoshis per byte for testing
         (base_fee + size_fee) / size_bytes as u64
     }
 

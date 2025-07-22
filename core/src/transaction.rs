@@ -104,7 +104,7 @@ impl Transaction {
         if self.nonce != current_nonce {
             return Err(BlockchainError::InvalidNonce {
                 expected: current_nonce,
-                got: self.nonce,
+                found: self.nonce,
             });
         }
         

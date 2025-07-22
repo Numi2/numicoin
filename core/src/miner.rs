@@ -1,9 +1,8 @@
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use parking_lot::RwLock;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHash};
@@ -131,7 +130,7 @@ pub struct Miner {
     global_nonce: Arc<AtomicU64>,
     
     /// Active thread handles
-    thread_handles: Vec<thread::JoinHandle<()>>,
+    thread_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Miner {
@@ -229,7 +228,7 @@ impl Miner {
             let block_template = block.clone();
             let difficulty_target = difficulty_target.clone();
             
-            let handle = thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 Self::mining_thread_worker(
                     thread_id,
                     block_template,
@@ -251,7 +250,7 @@ impl Miner {
         let stats_monitor = self.spawn_stats_monitor();
         
         // Wait for mining result or timeout
-        let mining_timeout = Duration::from_secs(300); // 5 minutes timeout
+        let mining_timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
         let result = match result_rx.recv_timeout(mining_timeout) {
             Ok(mining_result) => {
                 log::info!("🎉 Block mined successfully by thread {} in {} seconds!", 
@@ -322,7 +321,7 @@ impl Miner {
         while is_mining.load(Ordering::Relaxed) && !should_stop.load(Ordering::Relaxed) {
             // Handle pause state
             while is_paused.load(Ordering::Relaxed) && !should_stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
             
             if should_stop.load(Ordering::Relaxed) {
@@ -385,7 +384,7 @@ impl Miner {
                         if temp > config.thermal_throttle_temp {
                             log::warn!("🌡️ CPU temperature {}°C exceeds limit, throttling thread {}", 
                                      temp, thread_id);
-                            thread::sleep(Duration::from_millis(100));
+                            std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                     }
                 }
@@ -398,7 +397,7 @@ impl Miner {
     /// Update thread-specific mining statistics
     fn update_thread_stats(
         stats: &Arc<RwLock<MiningStats>>,
-        thread_id: usize,
+        _thread_id: usize,
         hashes: u64,
         start_time: Instant,
     ) {
@@ -413,14 +412,14 @@ impl Miner {
     }
     
     /// Spawn statistics monitoring thread
-    fn spawn_stats_monitor(&self) -> thread::JoinHandle<()> {
+    fn spawn_stats_monitor(&self) -> std::thread::JoinHandle<()> {
         let stats = Arc::clone(&self.stats);
         let is_mining = Arc::clone(&self.is_mining);
         let update_interval = self.config.stats_update_interval;
         
-        thread::spawn(move || {
+        std::thread::spawn(move || {
             while is_mining.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(update_interval));
+                std::thread::sleep(std::time::Duration::from_secs(update_interval));
                 
                 let stats = stats.read();
                 log::info!("📊 Mining stats: {} H/s, {} total hashes, {} threads", 
@@ -430,7 +429,7 @@ impl Miner {
     }
     
     /// Update mining statistics
-    fn update_mining_stats(&self, difficulty: u32, start_time: Instant, mining_active: bool) {
+    fn update_mining_stats(&self, difficulty: u32, _start_time: Instant, mining_active: bool) {
         let mut stats = self.stats.write();
         stats.difficulty = difficulty;
         stats.start_timestamp = chrono::Utc::now().timestamp() as u64;
@@ -523,27 +522,27 @@ impl Miner {
     }
     
     /// Estimate time to mine next block based on current hash rate
-    pub fn estimate_block_time(&self, difficulty: u32) -> Duration {
+    pub fn estimate_block_time(&self, difficulty: u32) -> std::time::Duration {
         let stats = self.stats.read();
         if stats.hash_rate == 0 {
-            return Duration::from_secs(u64::MAX); // Unknown
+            return std::time::Duration::from_secs(u64::MAX); // Unknown
         }
         
         // Rough estimate based on difficulty and current hash rate
         let target_hashes = 2u64.pow(difficulty.min(64));
         let estimated_seconds = target_hashes / stats.hash_rate;
         
-        Duration::from_secs(estimated_seconds)
+        std::time::Duration::from_secs(estimated_seconds)
     }
     
     // Hardware monitoring and optimization methods
     
     /// Set CPU affinity for mining thread (Linux only)
     #[cfg(target_os = "linux")]
-    fn set_cpu_affinity(thread_id: usize) {
+    fn set_cpu_affinity(_thread_id: usize) {
         // Implementation would use libc to set CPU affinity
         // This is a placeholder for the actual implementation
-        log::debug!("Setting CPU affinity for thread {} (not implemented)", thread_id);
+        log::debug!("Setting CPU affinity for thread {} (not implemented)", _thread_id);
     }
     
     #[cfg(not(target_os = "linux"))]
@@ -611,7 +610,7 @@ mod tests {
         // Create simple transaction
         let transaction = crate::transaction::Transaction::new(
             keypair.public_key_bytes().to_vec(),
-            TransactionType::MiningReward {
+            crate::transaction::TransactionType::MiningReward {
                 block_height: 1,
                 amount: 1000,
             },

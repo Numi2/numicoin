@@ -158,11 +158,11 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
     println!("🔑 Mining with public key: {}", hex::encode(&keypair.public_key));
     
     // Get pending transactions
-    let pending_txs = blockchain.get_pending_transactions();
+    let pending_txs = blockchain.get_transactions_for_block(1_000_000, 1000);
     println!("📝 Found {} pending transactions", pending_txs.len());
     
     // Start mining
-    let miner = Miner::new()?;
+    let mut miner = Miner::new()?;
     let start_time = std::time::Instant::now();
     
     let mining_result = miner.mine_block(
@@ -183,7 +183,7 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
             println!("⚡ Hash rate: {} H/s", result.hash_rate);
             
             // Add block to blockchain
-            blockchain.add_block(result.block)?;
+            blockchain.add_block(result.block).await?;
             
             // Save to storage
             blockchain.save_to_storage(&storage)?;
@@ -228,7 +228,7 @@ async fn submit_transaction(data_dir: PathBuf, from: String, to: String, amount:
     transaction.sign(&sender_keypair)?;
     
     // Submit transaction
-    blockchain.add_transaction(transaction.clone())?;
+    blockchain.add_transaction(transaction.clone()).await?;
     
     println!("✅ Transaction submitted successfully!");
     println!("🆔 Transaction ID: {}", transaction.get_hash_hex());
@@ -258,13 +258,16 @@ async fn show_status(data_dir: PathBuf) -> Result<()> {
     println!("⛏️ Active miners: {}", state.active_miners);
     
     // Get latest block info
-    let latest_block = blockchain.get_latest_block();
-    println!("🔗 Latest block hash: {}", latest_block.get_hash_hex());
-    println!("📝 Latest block transactions: {}", latest_block.get_transaction_count());
+    if let Some(latest_block) = blockchain.get_latest_block() {
+        println!("🔗 Latest block hash: {}", latest_block.get_hash_hex());
+        println!("📝 Latest block transactions: {}", latest_block.get_transaction_count());
+    } else {
+        println!("🔗 No blocks found");
+    }
     
     // Get pending transactions
-    let pending_txs = blockchain.get_pending_transactions();
-    println!("⏳ Pending transactions: {}", pending_txs.len());
+    let pending_txs = blockchain.get_pending_transaction_count();
+    println!("⏳ Pending transactions: {}", pending_txs);
     
     Ok(())
 }
@@ -329,7 +332,7 @@ async fn start_rpc_server(data_dir: PathBuf, port: u16) -> Result<()> {
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let blockchain = NumiBlockchain::load_from_storage(&storage)?;
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Initialize network and miner
     let network_manager = NetworkManager::new()?;

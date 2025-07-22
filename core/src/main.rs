@@ -116,7 +116,7 @@ async fn start_node(data_dir: PathBuf, port: u16, listen_addr: Option<String>) -
     println!("✅ Blockchain initialized");
     
     // Initialize network with libp2p
-    let mut network = NetworkManager::new();
+    let mut network = NetworkManager::new()?;
     let network_addr = listen_addr.unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string());
     network.start(&network_addr).await?;
     println!("✅ Network started on {}", network_addr);
@@ -127,7 +127,7 @@ async fn start_node(data_dir: PathBuf, port: u16, listen_addr: Option<String>) -
     
     println!("🎯 Node is running! Press Ctrl+C to stop.");
     println!("📊 Chain height: {}", blockchain.get_current_height());
-    println!("🔗 Connected peers: {}", network.get_peer_count());
+    println!("🔗 Connected peers: {}", network.get_peer_count().await);
     
     // Keep the node running
     loop {
@@ -145,7 +145,7 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let mut blockchain = NumiBlockchain::load_from_storage(&storage)?;
+    let mut blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Create or load miner keypair
     let keypair = if let Some(key_str) = miner_key {
@@ -205,7 +205,7 @@ async fn submit_transaction(data_dir: PathBuf, from: String, to: String, amount:
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let blockchain = NumiBlockchain::load_from_storage(&storage)?;
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Create keypair for sender (in real implementation, load from wallet)
     let sender_keypair = Dilithium3Keypair::new()?;
@@ -245,7 +245,7 @@ async fn show_status(data_dir: PathBuf) -> Result<()> {
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let blockchain = NumiBlockchain::load_from_storage(&storage)?;
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Get chain state
     let state = blockchain.get_chain_state();
@@ -275,7 +275,7 @@ async fn show_balance(data_dir: PathBuf, address: String) -> Result<()> {
     
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&data_dir)?;
-    let blockchain = NumiBlockchain::load_from_storage(&storage)?;
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Parse address
     let pubkey = hex::decode(&address)

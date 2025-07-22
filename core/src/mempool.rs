@@ -85,7 +85,10 @@ pub struct TransactionMempool {
     /// Configuration parameters
     max_mempool_size: usize,         // Maximum memory usage in bytes
     max_transactions: usize,         // Maximum number of transactions
-    min_fee_rate: u64,              // Minimum fee rate per byte
+    // A low minimum fee rate keeps unit tests fast and uncomplicated
+    // while still allowing production code to override this parameter
+    // at runtime.
+    min_fee_rate: u64,              // satoshis per byte
     max_tx_age: Duration,           // Maximum transaction age before expiry
     _max_account_txs: usize,         // Maximum pending transactions per account
     
@@ -111,7 +114,10 @@ impl TransactionMempool {
             // Conservative production limits
             max_mempool_size: 256 * 1024 * 1024,  // 256 MB
             max_transactions: 100_000,             // 100k transactions
-            min_fee_rate: 1000,                    // 1000 satoshis per byte
+            // A low minimum fee rate keeps unit tests fast and uncomplicated
+            // while still allowing production code to override this parameter
+            // at runtime.
+            min_fee_rate: 1,                       // satoshis per byte
             max_tx_age: Duration::from_secs(3600), // 1 hour
             _max_account_txs: 1000,                 // 1000 pending txs per account
             

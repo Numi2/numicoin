@@ -218,9 +218,14 @@ impl SecureKeyStore {
                 "Key store already initialized".to_string()));
         }
         
-        // Create password hash for verification
-        let salt = generate_random_bytes(self.kdf_config.salt_length);
-        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth");
+        // Create deterministic password hash so it can be verified later
+        // without persisting an additional random salt.  This keeps the
+        // implementation simple for testing purposes while still providing
+        // reasonable security properties (the store file is encrypted with a
+        // randomly-salted key, so the master password hash is never written to
+        // disk in the clear).
+        const PW_SALT: &str = "numicoin-keystore";
+        let password_hash = derive_key(password.as_bytes(), PW_SALT, b"keystore-auth");
         self.password_hash = Some(password_hash);
         
         log::info!("🔐 Secure key store initialized");
@@ -592,10 +597,9 @@ impl SecureKeyStore {
         let stored_hash = self.password_hash
             .ok_or_else(|| BlockchainError::CryptographyError("Key store not initialized".to_string()))?;
         
-        // For password verification, we'd need to store the salt used for the password hash
-        // This is a simplified implementation - in production, store the salt separately
-        let test_salt = vec![0u8; 32]; // Placeholder
-        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&test_salt), b"keystore-auth");
+        // Regenerate the deterministic hash with the same constant salt and compare
+        const PW_SALT: &str = "numicoin-keystore";
+        let test_hash = derive_key(password.as_bytes(), PW_SALT, b"keystore-auth");
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {

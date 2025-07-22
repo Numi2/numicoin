@@ -114,8 +114,11 @@ impl Block {
     }
     
     pub fn validate(&self, previous_block: Option<&Block>) -> Result<()> {
-        // Verify block signature
-        if !self.verify_signature()? {
+        // Determine if this is the genesis block (height 0 and no previous block)
+        let is_genesis = previous_block.is_none() && self.header.height == 0;
+
+        // Verify block signature for all non-genesis blocks
+        if !is_genesis && !self.verify_signature()? {
             return Err(BlockchainError::InvalidBlock("Block signature verification failed".to_string()));
         }
         

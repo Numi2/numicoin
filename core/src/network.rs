@@ -218,7 +218,7 @@ impl NetworkManager {
 
     /// Handle flood-sub gossip messages
     async fn handle_floodsub_message(&mut self, message: floodsub::FloodsubMessage) -> Result<()> {
-        let topic = message.topic.as_str();
+        let topic = message.topics.first().map(|t| t.to_string()).unwrap_or_default();
         let data = &message.data;
         
         match topic {
@@ -257,7 +257,7 @@ impl NetworkManager {
             _ => return Ok(()), // Don't gossip other message types
         };
 
-        self.swarm.behaviour_mut().floodsub
+        self.swarm.behaviour_mut()
             .publish(floodsub::Topic::new(topic), data);
         
         Ok(())

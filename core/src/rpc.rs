@@ -333,7 +333,8 @@ pub struct RpcServer {
     stats: Arc<RwLock<RpcStats>>,
     start_time: Instant,
     blocked_ips: Arc<DashMap<SocketAddr, Instant>>,
-    network_manager: Arc<NetworkManager>,
+    // TODO: NetworkManager temporarily removed due to thread safety issues
+    // network_manager: Arc<RwLock<NetworkManager>>,
     miner: Arc<RwLock<Miner>>,
 }
 
@@ -411,7 +412,8 @@ impl RpcServer {
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
-            network_manager: Arc::new(network_manager),
+            // TODO: NetworkManager temporarily removed due to thread safety issues
+            // network_manager: Arc::new(RwLock::new(network_manager)),
             miner: Arc::new(RwLock::new(miner)),
         })
     }
@@ -612,11 +614,13 @@ impl RpcServer {
     }
 
         pub async fn get_peer_count(&self) -> usize {
-        self.network_manager.get_peer_count().await
+        // TODO: NetworkManager temporarily removed due to thread safety issues
+        0
     }
     
     pub fn is_syncing(&self) -> bool {
-        self.network_manager.is_syncing()
+        // TODO: NetworkManager temporarily removed due to thread safety issues
+        false
     }
 }
 

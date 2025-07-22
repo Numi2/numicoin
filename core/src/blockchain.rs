@@ -240,7 +240,8 @@ impl NumiBlockchain {
         let was_reorganization = self.connect_block(block).await?;
         
         // Process any orphan blocks that might now be valid
-        self.process_orphan_blocks().await?;
+        // Use Box::pin to avoid recursion issues
+        Box::pin(self.process_orphan_blocks()).await?;
         
         Ok(was_reorganization)
     }
@@ -442,7 +443,20 @@ impl NumiBlockchain {
         let tx_hashes: Vec<_> = block.transactions.iter()
             .map(|tx| tx.get_hash_hex())
             .collect();
-        self.mempool.remove_transactions(&tx_hashes).await;
+        // Convert String hashes to TransactionId format
+        let tx_ids: Vec<[u8; 32]> = tx_hashes.iter()
+            .filter_map(|hash| hex::decode(hash).ok())
+            .filter_map(|bytes| {
+                if bytes.len() == 32 {
+                    let mut id = [0u8; 32];
+                    id.copy_from_slice(&bytes);
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.mempool.remove_transactions(&tx_ids).await;
         
         Ok(())
     }
@@ -496,7 +510,8 @@ impl NumiBlockchain {
                         log::info!("🎯 Processing orphan block {} (parent now available)",
                                   hex::encode(&orphan_hash));
                         
-                        match self.process_block_internal(orphan.block, true).await {
+                        let block = orphan.block.clone();
+                        match self.process_block_internal(block, true).await {
                             Ok(_) => {
                                 processed_any = true;
                             }

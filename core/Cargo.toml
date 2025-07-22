@@ -7,6 +7,7 @@ edition = "2021"
 # Quantum-safe cryptography - TODO: Replace with real liboqs when available
 # liboqs = "0.8.0" # Will be implemented in separate task
 pqcrypto-dilithium = "0.5" # Temporary quantum-safe crypto
+pqcrypto-traits = "0.3" # Required traits for pqcrypto
 oqs = { version = "0.9", optional = true } # Real liboqs integration
 
 # Hashing and cryptography

@@ -2849,6 +2849,7 @@ dependencies = [
  "oqs",
  "parking_lot 0.12.4",
  "pqcrypto-dilithium",
+ "pqcrypto-traits",
  "proptest",
  "rand 0.8.5",
  "rayon",

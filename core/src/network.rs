@@ -76,17 +76,9 @@ impl PeerInfo {
     }
 }
 
-/// Simplified network behavior
-pub struct SimpleNetworkBehaviour {
-    pub floodsub: Floodsub,
-}
-
-// AI Agent Note: Due to extensive libp2p API changes, we'll use a simplified approach
-// This will compile but may need updates for full functionality
-#[derive(libp2p::NetworkBehaviour)]
-struct SimpleNetworkBehaviour {
-    floodsub: Floodsub,
-}
+/// Simplified network behavior - using Floodsub directly for now
+/// TODO: Implement proper NetworkBehaviour when libp2p API stabilizes
+pub type SimpleNetworkBehaviour = Floodsub;
 
 /// Production-ready P2P network manager (simplified version)
 pub struct NetworkManager {
@@ -116,13 +108,10 @@ impl NetworkManager {
             .boxed();
 
         // Initialize flood-sub for gossip protocol
-        let mut floodsub = Floodsub::new(local_peer_id);
-        floodsub.subscribe(floodsub::Topic::new(TOPIC_BLOCKS));
-        floodsub.subscribe(floodsub::Topic::new(TOPIC_TRANSACTIONS));
-        floodsub.subscribe(floodsub::Topic::new(TOPIC_PEER_INFO));
-
-        // Combine behaviors
-        let behaviour = SimpleNetworkBehaviour { floodsub };
+        let mut behaviour = Floodsub::new(local_peer_id);
+        behaviour.subscribe(floodsub::Topic::new(TOPIC_BLOCKS));
+        behaviour.subscribe(floodsub::Topic::new(TOPIC_TRANSACTIONS));
+        behaviour.subscribe(floodsub::Topic::new(TOPIC_PEER_INFO));
 
         // Create swarm with config
         let config = libp2p::swarm::Config::with_tokio_executor();
@@ -229,7 +218,7 @@ impl NetworkManager {
 
     /// Handle flood-sub gossip messages
     async fn handle_floodsub_message(&mut self, message: floodsub::FloodsubMessage) -> Result<()> {
-        let topic = message.topic.as_str();
+        let topic = message.topics.first().map(|t| t.to_string()).unwrap_or_default();
         let data = &message.data;
         
         match topic {
@@ -268,7 +257,7 @@ impl NetworkManager {
             _ => return Ok(()), // Don't gossip other message types
         };
 
-        self.swarm.behaviour_mut().floodsub
+        self.swarm.behaviour_mut()
             .publish(floodsub::Topic::new(topic), data);
         
         Ok(())

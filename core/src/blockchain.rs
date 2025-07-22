@@ -1036,6 +1036,11 @@ impl NumiBlockchain {
         }
     }
     
+    /// Get block by hash
+    pub fn get_block_by_hash(&self, hash: BlockHash) -> Option<Block> {
+        self.blocks.get(&hash).map(|meta| meta.block.clone())
+    }
+    
     /// Get account state
     pub fn get_account_state(&self, public_key: &[u8]) -> Result<AccountState> {
         self.accounts.get(public_key)

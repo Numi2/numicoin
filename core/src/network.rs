@@ -370,4 +370,9 @@ impl NetworkManager {
     pub fn get_local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
+
+    /// Return current syncing status flag
+    pub fn is_syncing(&self) -> bool {
+        self.is_syncing
+    }
 } 

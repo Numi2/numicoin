@@ -17,6 +17,7 @@ use warp::{Filter, Reply, Rejection, http::StatusCode};
 
 use crate::blockchain::NumiBlockchain;
 use crate::storage::BlockchainStorage;
+use crate::network::NetworkManager;
 use crate::transaction::{Transaction, TransactionType};
 use crate::crypto::Dilithium3Keypair;
 use crate::mempool::ValidationResult;
@@ -331,6 +332,7 @@ pub struct RpcServer {
     stats: Arc<RwLock<RpcStats>>,
     start_time: Instant,
     blocked_ips: Arc<DashMap<SocketAddr, Instant>>,
+    network_manager: Option<Arc<NetworkManager>>, // Optional link to the P2P layer
 }
 
 impl RpcServer {
@@ -371,7 +373,15 @@ impl RpcServer {
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
+            network_manager: None,
         }
+    }
+
+    /// Create RPC server wired to the networking layer
+    pub fn new_with_network(blockchain: NumiBlockchain, storage: BlockchainStorage, network: NetworkManager) -> Self {
+        let mut server = Self::new(blockchain, storage);
+        server.network_manager = Some(Arc::new(network));
+        server
     }
     
     /// Start the RPC server with all security middleware
@@ -590,6 +600,16 @@ async fn handle_status(
     let blockchain = rpc_server.blockchain.read();
     let state = blockchain.get_chain_state();
     
+    // Gather network information if available
+    let (network_peers, is_syncing) = if let Some(net) = &rpc_server.network_manager {
+        (
+            net.get_peer_count().await,
+            net.is_syncing(),
+        )
+    } else {
+        (0usize, false)
+    };
+
     let response = StatusResponse {
         total_blocks: state.total_blocks,
         total_supply: state.total_supply as f64 / 1_000_000_000.0,
@@ -597,8 +617,8 @@ async fn handle_status(
         best_block_hash: hex::encode(state.best_block_hash),
         mempool_transactions: blockchain.get_pending_transaction_count(),
         mempool_size_bytes: blockchain.get_mempool_stats().total_size_bytes,
-        network_peers: 0, // TODO: Get from network manager
-        is_syncing: false, // TODO: Implement sync status
+        network_peers,
+        is_syncing,
         chain_work: format!("{}", state.cumulative_difficulty),
     };
     
@@ -666,8 +686,9 @@ async fn handle_block(
         match hex::decode(&hash_or_height) {
             Ok(hash_bytes) => {
                 if hash_bytes.len() == 32 {
-                    // TODO: Implement get_block_by_hash
-                    None
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&hash_bytes);
+                    blockchain.get_block_by_hash(arr)
                 } else {
                     None
                 }

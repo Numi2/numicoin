@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -28,7 +28,7 @@ pub struct MiningResult {
 pub struct Miner {
     keypair: Dilithium3Keypair,
     is_mining: Arc<AtomicBool>,
-    stats: Arc<MiningStats>,
+    stats: Arc<Mutex<MiningStats>>,
 }
 
 impl Miner {
@@ -46,7 +46,7 @@ impl Miner {
         Ok(Self {
             keypair,
             is_mining: Arc::new(AtomicBool::new(false)),
-            stats: Arc::new(stats),
+            stats: Arc::new(Mutex::new(stats)),
         })
     }
     
@@ -138,14 +138,14 @@ impl Miner {
             let miner = Miner {
                 keypair,
                 is_mining,
-                stats: Arc::new(MiningStats {
+                stats: Arc::new(Mutex::new(MiningStats {
                     hash_rate: 0,
                     total_hashes: 0,
                     current_nonce: 0,
                     difficulty: 1,
                     is_mining: false,
                     start_time: Instant::now(),
-                }),
+                })),
             };
             
             let result = miner.mine_block(height, previous_hash, transactions, difficulty, start_nonce);
@@ -164,12 +164,24 @@ impl Miner {
     }
     
     pub fn get_stats(&self) -> MiningStats {
-        self.stats.as_ref().clone()
+        // If locking fails just return default stats
+        self.stats.lock().map(|s| s.clone()).unwrap_or(MiningStats {
+            hash_rate: 0,
+            total_hashes: 0,
+            current_nonce: 0,
+            difficulty: 0,
+            is_mining: false,
+            start_time: Instant::now(),
+        })
     }
     
-    fn update_stats(&self, _hash_rate: u64, _total_hashes: u64, _current_nonce: u64, _difficulty: u32) {
-        // In a real implementation, you'd want to use a proper atomic update mechanism
-        // For now, we'll just ignore the updates to avoid mutability issues
+    fn update_stats(&self, hash_rate: u64, total_hashes: u64, current_nonce: u64, difficulty: u32) {
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.hash_rate = hash_rate;
+            stats.total_hashes = total_hashes;
+            stats.current_nonce = current_nonce;
+            stats.difficulty = difficulty;
+        }
     }
     
     pub fn get_keypair(&self) -> &Dilithium3Keypair {

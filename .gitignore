@@ -1,4 +1,4 @@
-# Rust build artifacts
+git# Rust build artifacts
 target/
 **/target/
 **/*.rs.bk
@@ -44,6 +44,7 @@ build/
 *.sqlite
 *.sqlite3
 data/
+librockdb/
 
 # Temporary files
 tmp/

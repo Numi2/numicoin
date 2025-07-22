@@ -572,7 +572,7 @@ unsafe impl Sync for Miner {}
 mod tests {
     use super::*;
     use crate::crypto::Dilithium3Keypair;
-    use crate::transaction::TransactionType;
+
     
     #[test]
     fn test_miner_creation() {

@@ -7,7 +7,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::transaction::{Transaction, TransactionId, TransactionType};
-use crate::crypto::{Hash, Dilithium3Keypair};
 use crate::{Result, BlockchainError};
 
 // AI Agent Note: This is a production-ready transaction mempool implementation
@@ -387,7 +386,7 @@ impl TransactionMempool {
         bincode::serialize(transaction).map(|bytes| bytes.len()).unwrap_or(512)
     }
 
-    fn calculate_fee_rate(&self, transaction: &Transaction, size_bytes: usize) -> u64 {
+    fn calculate_fee_rate(&self, _transaction: &Transaction, size_bytes: usize) -> u64 {
         // Simple fee calculation - in production, extract from transaction
         let base_fee = 1000; // Base fee per transaction
         let size_fee = size_bytes as u64 * 10; // 10 satoshis per byte

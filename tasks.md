@@ -144,3 +144,47 @@ impl NetworkManager {
 - **Full Featured**: 8-12 weeks (All phases)
 
 The current implementation has a solid foundation, but needs these networking and consensus components to handle real-world usage with multiple miners. The RPC API and basic blockchain logic are already working well!
+
+## 🔄 New Tasks Discovered (2025-07-22)
+
+### Bug Fixes (HIGH)
+- [ ] Fix `Miner::update_stats` thread-safety **(DONE – 2025-07-22)**
+- [ ] Correct average-block-time calculation in `update_chain_state` **(DONE – 2025-07-22)**
+
+### Networking / Consensus (CRITICAL)
+- [ ] Replace in-memory channel with libp2p Swarm (TCP + Noise)
+- [ ] Implement peer discovery (mDNS + DNS seeds + bootstrap list)
+- [ ] Block/tx flood‐sub, block-sync (headers first, then bodies)
+- [ ] Fork-choice, orphan pool & full re-org handling
+
+### Transaction Pool (HIGH)
+- [ ] Dedicated mempool with validation, fee-rate sorting, size limits, eviction
+- [ ] Gossip of pending txs to peers
+
+### Cryptography & PoW (HIGH)
+- [ ] Integrate liboqs Dilithium3 real keygen / sign / verify
+- [ ] Implement full Argon2id PoW (configurable mem/time cost) with test vectors
+
+### Security Hardening (HIGH)
+- [ ] Encrypted key-store for node & wallet keys
+- [ ] RPC rate-limiting & authentication, peer-score / banning
+- [ ] Input validation on all network messages & RPC routes
+
+### Storage / Sync (MEDIUM)
+- [ ] Snapshot / fast-sync checkpoints
+- [ ] Database corruption detection & repair; background compaction
+
+### Wallet & RPC (MEDIUM)
+- [ ] WebSocket subscriptions for new blocks / txs
+- [ ] Hook Next.js wallet to live RPC (remove mock chain)
+
+### Mining (MEDIUM)
+- [ ] Multi-thread / Rayon mining
+- [ ] Configurable reward schedule & halving logic
+
+### Testing & CI (MEDIUM)
+- [ ] Multi-node simulation (100+ blocks, forks, re-orgs)
+- [ ] Fuzzing / property tests for block & tx validation
+- [ ] GitHub Actions: clippy, audit, benches
+
+---

@@ -379,14 +379,21 @@ impl NumiBlockchain {
     fn update_chain_state(&mut self, block: &Block) -> Result<()> {
         let mut state = self.state.write().unwrap();
         
+        // Capture previous timestamp before updating
+        let prev_timestamp = state.last_block_time;
+
+        // Update block count first
         state.total_blocks += 1;
-        state.last_block_time = block.header.timestamp;
-        
-        // Calculate average block time
+
+        // Calculate average block time based on previous block timestamp
         if state.total_blocks > 1 {
-            let time_diff = (block.header.timestamp - state.last_block_time).num_seconds() as u64;
+            let time_diff = (block.header.timestamp - prev_timestamp).num_seconds() as u64;
+            // Simple moving-average between the previous average and the new interval
             state.average_block_time = (state.average_block_time + time_diff) / 2;
         }
+
+        // Finally, update the last block timestamp
+        state.last_block_time = block.header.timestamp;
         
         // Adjust difficulty (simplified)
         if state.average_block_time < 25 {

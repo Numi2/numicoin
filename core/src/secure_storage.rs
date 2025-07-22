@@ -221,7 +221,7 @@ impl SecureKeyStore {
         
         // Create password hash for verification
         let salt = generate_random_bytes(self.kdf_config.salt_length);
-        let password_hash = derive_key(password.as_bytes(), &salt, b"keystore-auth");
+        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth");
         self.password_hash = Some(password_hash);
         
         log::info!("🔐 Secure key store initialized");
@@ -397,11 +397,14 @@ impl SecureKeyStore {
             return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
         }
         
+        // Clone salt to avoid borrow checker issues
+        let salt = entry.salt.clone();
+        
         // Update access time
         entry.touch();
         
         // Derive key from password
-        let key = self.derive_key_from_password(password, &entry.salt)?;
+        let key = self.derive_key_from_password(password, &salt)?;
         
         // Reconstruct full encrypted data (encrypted_data + auth_tag)
         let mut full_encrypted_data = entry.encrypted_data.clone();
@@ -585,7 +588,7 @@ impl SecureKeyStore {
         // For password verification, we'd need to store the salt used for the password hash
         // This is a simplified implementation - in production, store the salt separately
         let test_salt = vec![0u8; 32]; // Placeholder
-        let test_hash = derive_key(password.as_bytes(), &test_salt, b"keystore-auth");
+        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&test_salt), b"keystore-auth");
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {

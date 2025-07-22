@@ -7,7 +7,14 @@ pub enum BlockchainError {
     StorageError(String),
     NetworkError(String),
     ConsensusError(String),
-    CryptographyError(String), // AI Agent Note: Added for crypto operations and key management
+    CryptographyError(String),
+    // AI Agent Note: Added missing error variants for production readiness
+    SerializationError(String),
+    InvalidSignature(String),
+    InvalidNonce { expected: u64, found: u64 },
+    InsufficientBalance(String),
+    BlockNotFound(String),
+    MiningError(String),
 }
 
 impl fmt::Display for BlockchainError {
@@ -19,6 +26,12 @@ impl fmt::Display for BlockchainError {
             BlockchainError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             BlockchainError::ConsensusError(msg) => write!(f, "Consensus error: {}", msg),
             BlockchainError::CryptographyError(msg) => write!(f, "Cryptography error: {}", msg),
+            BlockchainError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            BlockchainError::InvalidSignature(msg) => write!(f, "Invalid signature: {}", msg),
+            BlockchainError::InvalidNonce { expected, found } => write!(f, "Invalid nonce: expected {}, found {}", expected, found),
+            BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {}", msg),
+            BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {}", msg),
+            BlockchainError::MiningError(msg) => write!(f, "Mining error: {}", msg),
         }
     }
 }

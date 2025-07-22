@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use futures::prelude::*;
 use libp2p::{
     core::upgrade,
-    floodsub::{self, Behaviour as Floodsub, Event as FloodsubEvent},
+    floodsub::{self, Behaviour as Floodsub, Event as FloodsubEvent, Topic},
     identity,
     swarm::{Swarm, SwarmEvent},
     tcp, noise, yamux,
@@ -80,6 +80,17 @@ impl PeerInfo {
 /// TODO: Implement proper NetworkBehaviour when libp2p API stabilizes
 pub type SimpleNetworkBehaviour = Floodsub;
 
+/// Thread-safe network manager wrapper for RPC compatibility
+#[derive(Clone)]
+pub struct NetworkManagerHandle {
+    message_sender: mpsc::UnboundedSender<NetworkMessage>,
+    peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
+    banned_peers: Arc<RwLock<HashSet<PeerId>>>,
+    local_peer_id: PeerId,
+    chain_height: Arc<RwLock<u64>>,
+    is_syncing: Arc<RwLock<bool>>,
+}
+
 /// Production-ready P2P network manager (simplified version)
 pub struct NetworkManager {
     swarm: Swarm<SimpleNetworkBehaviour>,
@@ -88,8 +99,62 @@ pub struct NetworkManager {
     message_sender: mpsc::UnboundedSender<NetworkMessage>,
     message_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
     local_peer_id: PeerId,
-    chain_height: u64,
-    is_syncing: bool,
+    chain_height: Arc<RwLock<u64>>,
+    is_syncing: Arc<RwLock<bool>>,
+}
+
+impl NetworkManagerHandle {
+    /// Get the number of connected peers
+    pub async fn get_peer_count(&self) -> usize {
+        self.peers.read().await.len()
+    }
+
+    /// Check if the node is currently syncing
+    pub async fn is_syncing(&self) -> bool {
+        *self.is_syncing.read().await
+    }
+
+    /// Get current chain height
+    pub async fn get_chain_height(&self) -> u64 {
+        *self.chain_height.read().await
+    }
+
+    /// Broadcast a block to the network
+    pub async fn broadcast_block(&self, block: Block) -> Result<()> {
+        let message = NetworkMessage::NewBlock(block);
+        self.message_sender.send(message)
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {}", e)))?;
+        Ok(())
+    }
+
+    /// Broadcast a transaction to the network
+    pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
+        let message = NetworkMessage::NewTransaction(transaction);
+        self.message_sender.send(message)
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {}", e)))?;
+        Ok(())
+    }
+
+    /// Update peer reputation
+    pub async fn update_peer_reputation(&self, peer_id: PeerId, delta: i32) {
+        let mut peers = self.peers.write().await;
+        if let Some(peer) = peers.get_mut(&peer_id) {
+            peer.reputation += delta;
+            peer.last_seen = Instant::now();
+            
+            // Ban peer if reputation drops too low
+            if peer.reputation < -100 {
+                peer.is_banned = true;
+                peer.ban_until = Some(Instant::now() + Duration::from_secs(3600)); // 1 hour ban
+                log::warn!("🚫 Peer {} banned due to low reputation: {}", peer_id, peer.reputation);
+            }
+        }
+    }
+
+    /// Check if a peer is banned
+    pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
+        self.banned_peers.read().await.contains(peer_id)
+    }
 }
 
 impl NetworkManager {
@@ -107,11 +172,17 @@ impl NetworkManager {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        // Initialize flood-sub for gossip protocol
+        // Initialize flood-sub for gossip protocol with updated Topic API
         let mut behaviour = Floodsub::new(local_peer_id);
-        behaviour.subscribe(floodsub::Topic::new(TOPIC_BLOCKS));
-        behaviour.subscribe(floodsub::Topic::new(TOPIC_TRANSACTIONS));
-        behaviour.subscribe(floodsub::Topic::new(TOPIC_PEER_INFO));
+        
+        // Create topics using the new API
+        let blocks_topic = Topic::new(TOPIC_BLOCKS);
+        let transactions_topic = Topic::new(TOPIC_TRANSACTIONS);
+        let peer_info_topic = Topic::new(TOPIC_PEER_INFO);
+        
+        behaviour.subscribe(blocks_topic);
+        behaviour.subscribe(transactions_topic);
+        behaviour.subscribe(peer_info_topic);
 
         // Create swarm with config
         let config = libp2p::swarm::Config::with_tokio_executor();
@@ -126,9 +197,21 @@ impl NetworkManager {
             message_sender,
             message_receiver,
             local_peer_id,
-            chain_height: 0,
-            is_syncing: false,
+            chain_height: Arc::new(RwLock::new(0)),
+            is_syncing: Arc::new(RwLock::new(false)),
         })
+    }
+
+    /// Create a thread-safe handle for RPC server
+    pub fn create_handle(&self) -> NetworkManagerHandle {
+        NetworkManagerHandle {
+            message_sender: self.message_sender.clone(),
+            peers: self.peers.clone(),
+            banned_peers: self.banned_peers.clone(),
+            local_peer_id: self.local_peer_id,
+            chain_height: self.chain_height.clone(),
+            is_syncing: self.is_syncing.clone(),
+        }
     }
 
     /// Start the network manager and bind to listening address
@@ -197,7 +280,7 @@ impl NetworkManager {
                 self.handle_floodsub_message(msg).await?;
             }
             SwarmEvent::NewListenAddr { address, .. } => {
-                log::info!("📡 Listening on: {}", address);
+                log::info!("🌐 New listen address: {}", address);
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.on_peer_connected(peer_id).await;
@@ -205,152 +288,155 @@ impl NetworkManager {
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 self.on_peer_disconnected(peer_id).await;
             }
-            SwarmEvent::OutgoingConnectionError { error, .. } => {
-                log::warn!("❌ Outgoing connection error: {}", error);
-            }
-            SwarmEvent::IncomingConnectionError { error, .. } => {
-                log::warn!("❌ Incoming connection error: {}", error);
-            }
             _ => {}
         }
         Ok(())
     }
 
-    /// Handle flood-sub gossip messages
+    /// Handle incoming floodsub messages
     async fn handle_floodsub_message(&mut self, message: floodsub::FloodsubMessage) -> Result<()> {
-        let topic = message.topics.first().map(|t| t.to_string()).unwrap_or_default();
-        let data = &message.data;
-        
-        match topic {
+        // Extract topic string - use debug formatting
+        let topic_str = if let Some(topic) = message.topics.first() {
+            format!("{:?}", topic)
+        } else {
+            String::new()
+        };
+        let data = message.data;
+
+        match topic_str.as_str() {
             TOPIC_BLOCKS => {
-                if let Ok(msg) = bincode::deserialize::<NetworkMessage>(data) {
-                    log::info!("📦 Received block message from peer");
-                    // TODO: Forward to blockchain for processing
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::NewBlock(block) = network_message {
+                        log::info!("📦 Received new block: {}", hex::encode(&block.calculate_hash()));
+                        // TODO: Process new block
+                    }
                 }
             }
             TOPIC_TRANSACTIONS => {
-                if let Ok(msg) = bincode::deserialize::<NetworkMessage>(data) {
-                    log::info!("💰 Received transaction message from peer");
-                    // TODO: Forward to mempool for validation
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::NewTransaction(tx) = network_message {
+                        log::info!("💸 Received new transaction: {}", hex::encode(&tx.id));
+                        // TODO: Process new transaction
+                    }
                 }
             }
             TOPIC_PEER_INFO => {
-                if let Ok(msg) = bincode::deserialize::<NetworkMessage>(data) {
-                    log::debug!("👥 Received peer info from network");
-                    // TODO: Update peer information
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::PeerInfo { chain_height, peer_id } = network_message {
+                        log::debug!("👥 Peer info: {} at height {}", peer_id, chain_height);
+                        // TODO: Update peer information
+                    }
                 }
             }
             _ => {
-                log::debug!("📨 Unknown message topic: {}", topic);
+                log::debug!("📨 Unknown message topic: {}", topic_str);
             }
         }
-        
         Ok(())
     }
 
-    /// Handle outgoing messages to network
+    /// Handle outgoing messages
     async fn handle_outgoing_message(&mut self, message: NetworkMessage) -> Result<()> {
         let (topic, data) = match &message {
             NetworkMessage::NewBlock(_) => (TOPIC_BLOCKS, bincode::serialize(&message)?),
             NetworkMessage::NewTransaction(_) => (TOPIC_TRANSACTIONS, bincode::serialize(&message)?),
             NetworkMessage::PeerInfo { .. } => (TOPIC_PEER_INFO, bincode::serialize(&message)?),
-            _ => return Ok(()), // Don't gossip other message types
+            _ => return Ok(()), // Skip other message types for now
         };
 
-        self.swarm.behaviour_mut()
-            .publish(floodsub::Topic::new(topic), data);
+        self.swarm
+            .behaviour_mut()
+            .publish(Topic::new(topic), data);
         
         Ok(())
     }
 
-    /// Broadcast block to network
+    /// Broadcast a block to the network
     pub async fn broadcast_block(&self, block: Block) -> Result<()> {
         let message = NetworkMessage::NewBlock(block);
         self.message_sender.send(message)
-            .map_err(|_| BlockchainError::NetworkError("Failed to send block message".to_string()))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {}", e)))?;
         Ok(())
     }
 
-    /// Broadcast transaction to network
+    /// Broadcast a transaction to the network
     pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
         let message = NetworkMessage::NewTransaction(transaction);
         self.message_sender.send(message)
-            .map_err(|_| BlockchainError::NetworkError("Failed to send transaction message".to_string()))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {}", e)))?;
         Ok(())
     }
 
-    /// Handle new peer connection
+    /// Handle peer connection
     async fn on_peer_connected(&self, peer_id: PeerId) {
-        log::info!("👋 Peer connected: {}", peer_id);
-        
+        log::info!("🔗 Peer connected: {}", peer_id);
         let mut peers = self.peers.write().await;
-        let peer_info = peers.entry(peer_id).or_insert_with(PeerInfo::new);
-        peer_info.last_seen = Instant::now();
-        peer_info.connection_count += 1;
+        peers.entry(peer_id).or_insert_with(PeerInfo::new);
     }
 
     /// Handle peer disconnection
     async fn on_peer_disconnected(&self, peer_id: PeerId) {
-        log::info!("👋 Peer disconnected: {}", peer_id);
-        
-        let mut peers = self.peers.write().await;
-        if let Some(peer_info) = peers.get_mut(&peer_id) {
-            peer_info.connection_count = peer_info.connection_count.saturating_sub(1);
-        }
+        log::info!("🔌 Peer disconnected: {}", peer_id);
+        // Keep peer info for potential reconnection
     }
 
-    /// Update peer reputation score
+    /// Update peer reputation
     pub async fn update_peer_reputation(&self, peer_id: PeerId, delta: i32) {
         let mut peers = self.peers.write().await;
-        if let Some(peer_info) = peers.get_mut(&peer_id) {
-            peer_info.reputation += delta;
+        if let Some(peer) = peers.get_mut(&peer_id) {
+            peer.reputation += delta;
+            peer.last_seen = Instant::now();
             
-            // Auto-ban peers with very low reputation
-            if peer_info.reputation < -100 {
-                peer_info.is_banned = true;
-                peer_info.ban_until = Some(Instant::now() + Duration::from_secs(3600)); // 1 hour ban
-                log::warn!("🚫 Peer {} banned due to low reputation", peer_id);
+            // Ban peer if reputation drops too low
+            if peer.reputation < -100 {
+                peer.is_banned = true;
+                peer.ban_until = Some(Instant::now() + Duration::from_secs(3600)); // 1 hour ban
+                log::warn!("🚫 Peer {} banned due to low reputation: {}", peer_id, peer.reputation);
             }
         }
     }
 
     /// Check if a peer is banned
     pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
-        let banned_peers = self.banned_peers.read().await;
-        banned_peers.contains(peer_id)
+        self.banned_peers.read().await.contains(peer_id)
     }
 
     /// Perform periodic maintenance tasks
     async fn perform_maintenance(&mut self) {
-        // Clean up old peer information
+        let now = Instant::now();
         let mut peers = self.peers.write().await;
-        let cutoff_time = Instant::now() - Duration::from_secs(300); // 5 minutes
-        
-        peers.retain(|peer_id, info| {
-            if info.last_seen < cutoff_time && info.connection_count == 0 {
-                log::debug!("🧹 Cleaning up stale peer: {}", peer_id);
-                false
-            } else {
-                true
-            }
-        });
+        let mut banned_peers = self.banned_peers.write().await;
 
-        // Unban expired peers
-        peers.retain(|peer_id, info| {
-            if let Some(ban_until) = info.ban_until {
-                if Instant::now() > ban_until {
-                    info.is_banned = false;
-                    info.ban_until = None;
-                    log::info!("✅ Peer {} unbanned", peer_id);
+        // Remove old peer entries
+        peers.retain(|_, peer| {
+            if peer.is_banned {
+                if let Some(ban_until) = peer.ban_until {
+                    if now > ban_until {
+                        peer.is_banned = false;
+                        peer.ban_until = None;
+                        peer.reputation = 0; // Reset reputation after ban expires
+                        log::info!("✅ Peer ban expired, reputation reset");
+                    }
                 }
             }
-            true
+            
+            // Remove peers not seen for more than 1 hour
+            now.duration_since(peer.last_seen) < Duration::from_secs(3600)
         });
 
-        log::debug!("🧹 Maintenance complete. Active peers: {}", peers.len());
+        // Update banned peers set
+        banned_peers.clear();
+        for (peer_id, peer) in peers.iter() {
+            if peer.is_banned {
+                banned_peers.insert(*peer_id);
+            }
+        }
+
+        log::debug!("🧹 Maintenance: {} active peers, {} banned peers", 
+                   peers.len(), banned_peers.len());
     }
 
-    /// Get current peer count
+    /// Get the number of connected peers
     pub async fn get_peer_count(&self) -> usize {
         self.peers.read().await.len()
     }
@@ -361,22 +447,22 @@ impl NetworkManager {
     }
 
     /// Check if the node is currently syncing
-    pub fn is_syncing(&self) -> bool {
-        self.is_syncing
+    pub async fn is_syncing(&self) -> bool {
+        *self.is_syncing.read().await
     }
 
     /// Set syncing status
-    pub fn set_syncing(&mut self, syncing: bool) {
-        self.is_syncing = syncing;
+    pub async fn set_syncing(&mut self, syncing: bool) {
+        *self.is_syncing.write().await = syncing;
     }
 
     /// Get current chain height
-    pub fn get_chain_height(&self) -> u64 {
-        self.chain_height
+    pub async fn get_chain_height(&self) -> u64 {
+        *self.chain_height.read().await
     }
 
     /// Set current chain height
-    pub fn set_chain_height(&mut self, height: u64) {
-        self.chain_height = height;
+    pub async fn set_chain_height(&mut self, height: u64) {
+        *self.chain_height.write().await = height;
     }
 } 

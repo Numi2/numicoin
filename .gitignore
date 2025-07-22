@@ -1,9 +1,19 @@
-git# Rust build artifacts
+# Rust build artifacts
 target/
 **/target/
 **/*.rs.bk
 *.pdb
 Cargo.lock
+
+# Large build artifacts and libraries
+**/debug/
+**/release/
+*.a
+*.so
+*.dylib
+*.dll
+librocksdb*
+librockdb*
 
 # IDE and editor files
 .vscode/

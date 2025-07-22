@@ -279,6 +279,9 @@ mod tests {
             nonce: 1,
             staked_amount: 500,
             last_stake_time: Utc::now(),
+            transaction_count: 5,
+            total_received: 2000,
+            total_sent: 1000,
         };
         
         let public_key = vec![1, 2, 3, 4];

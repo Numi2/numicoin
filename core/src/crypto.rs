@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_key_derivation() {
         let seed = b"test seed data";
-        let salt = b"test salt";
+        let salt = "test salt";
         let info = b"test info";
         
         let key1 = derive_key(seed, salt, info);

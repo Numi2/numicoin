@@ -16,19 +16,19 @@ pub struct BlockchainStorage {
 impl BlockchainStorage {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db = sled::open(path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open database: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open database: {e}")))?;
         
         let blocks = db.open_tree("blocks")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open blocks tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open blocks tree: {e}")))?;
         
         let transactions = db.open_tree("transactions")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open transactions tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open transactions tree: {e}")))?;
         
         let accounts = db.open_tree("accounts")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open accounts tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open accounts tree: {e}")))?;
         
         let state = db.open_tree("state")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open state tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open state tree: {e}")))?;
         
         Ok(Self {
             db,
@@ -42,10 +42,10 @@ impl BlockchainStorage {
     pub fn save_block(&self, block: &Block) -> Result<()> {
         let height_bytes = block.header.height.to_le_bytes();
         let block_data = bincode::serialize(block)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize block: {}", e)))?;
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize block: {e}")))?;
         
         self.blocks.insert(height_bytes, block_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save block: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save block: {e}")))?;
         
         Ok(())
     }
@@ -54,10 +54,10 @@ impl BlockchainStorage {
         let height_bytes = height.to_le_bytes();
         
         if let Some(block_data) = self.blocks.get(height_bytes)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load block: {}", e)))? {
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load block: {e}")))? {
             
             let block = bincode::deserialize(&block_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {e}")))?;
             
             Ok(Some(block))
         } else {
@@ -67,20 +67,20 @@ impl BlockchainStorage {
     
     pub fn save_transaction(&self, tx_id: &[u8; 32], transaction: &Transaction) -> Result<()> {
         let tx_data = bincode::serialize(transaction)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {e}")))?;
         
         self.transactions.insert(tx_id, tx_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save transaction: {e}")))?;
         
         Ok(())
     }
     
     pub fn load_transaction(&self, tx_id: &[u8; 32]) -> Result<Option<Transaction>> {
         if let Some(tx_data) = self.transactions.get(tx_id)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load transaction: {}", e)))? {
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load transaction: {e}")))? {
             
             let transaction = bincode::deserialize(&tx_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize transaction: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize transaction: {e}")))?;
             
             Ok(Some(transaction))
         } else {
@@ -90,20 +90,20 @@ impl BlockchainStorage {
     
     pub fn save_account(&self, public_key: &[u8], account: &AccountState) -> Result<()> {
         let account_data = bincode::serialize(account)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize account: {}", e)))?;
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize account: {e}")))?;
         
         self.accounts.insert(public_key, account_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save account: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save account: {e}")))?;
         
         Ok(())
     }
     
     pub fn load_account(&self, public_key: &[u8]) -> Result<Option<AccountState>> {
         if let Some(account_data) = self.accounts.get(public_key)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load account: {}", e)))? {
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load account: {e}")))? {
             
             let account = bincode::deserialize(&account_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {e}")))?;
             
             Ok(Some(account))
         } else {
@@ -113,20 +113,20 @@ impl BlockchainStorage {
     
     pub fn save_chain_state(&self, state: &ChainState) -> Result<()> {
         let state_data = bincode::serialize(state)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize chain state: {}", e)))?;
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize chain state: {e}")))?;
         
         self.state.insert(b"chain_state", state_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save chain state: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save chain state: {e}")))?;
         
         Ok(())
     }
     
     pub fn load_chain_state(&self) -> Result<Option<ChainState>> {
         if let Some(state_data) = self.state.get(b"chain_state")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load chain state: {}", e)))? {
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load chain state: {e}")))? {
             
             let state = bincode::deserialize(&state_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize chain state: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize chain state: {e}")))?;
             
             Ok(Some(state))
         } else {
@@ -139,10 +139,10 @@ impl BlockchainStorage {
         
         for result in self.blocks.iter() {
             let (_, block_data) = result
-                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate blocks: {}", e)))?;
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate blocks: {e}")))?;
             
             let block: Block = bincode::deserialize(&block_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {e}")))?;
             
             blocks.push(block);
         }
@@ -158,10 +158,10 @@ impl BlockchainStorage {
         
         for result in self.accounts.iter() {
             let (public_key, account_data) = result
-                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate accounts: {}", e)))?;
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate accounts: {e}")))?;
             
             let account = bincode::deserialize(&account_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {}", e)))?;
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {e}")))?;
             
             accounts.push((public_key.to_vec(), account));
         }
@@ -172,21 +172,21 @@ impl BlockchainStorage {
     pub fn delete_block(&self, height: u64) -> Result<()> {
         let height_bytes = height.to_le_bytes();
         self.blocks.remove(height_bytes)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete block: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete block: {e}")))?;
         
         Ok(())
     }
     
     pub fn delete_transaction(&self, tx_id: &[u8; 32]) -> Result<()> {
         self.transactions.remove(tx_id)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete transaction: {e}")))?;
         
         Ok(())
     }
     
     pub fn delete_account(&self, public_key: &[u8]) -> Result<()> {
         self.accounts.remove(public_key)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete account: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete account: {e}")))?;
         
         Ok(())
     }
@@ -198,14 +198,14 @@ impl BlockchainStorage {
     
     pub fn flush(&self) -> Result<()> {
         self.db.flush()
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush database: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush database: {e}")))?;
         
         Ok(())
     }
     
     pub fn get_database_size(&self) -> Result<u64> {
         let size = self.db.size_on_disk()
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to get database size: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to get database size: {e}")))?;
         
         Ok(size)
     }

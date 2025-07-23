@@ -367,7 +367,7 @@ impl Miner {
                         // Continue mining
                     }
                     Err(e) => {
-                        log::error!("PoW verification error in thread {}: {}", thread_id, e);
+                        log::error!("PoW verification error in thread {}: {:?}", thread_id, e);
                         continue;
                     }
                 }

@@ -123,7 +123,7 @@ impl NetworkManagerHandle {
     pub async fn broadcast_block(&self, block: Block) -> Result<()> {
         let message = NetworkMessage::NewBlock(block);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {e}")))?;
         Ok(())
     }
 
@@ -131,7 +131,7 @@ impl NetworkManagerHandle {
     pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
         let message = NetworkMessage::NewTransaction(transaction);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {e}")))?;
         Ok(())
     }
 
@@ -163,7 +163,7 @@ impl NetworkManager {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
 
-        log::info!("🔑 Local peer ID: {}", local_peer_id);
+        log::info!("🔑 Local peer ID: {local_peer_id}");
 
         // Create transport with noise encryption and yamux multiplexing
         let transport = tcp::tokio::Transport::default()
@@ -217,12 +217,12 @@ impl NetworkManager {
     /// Start the network manager and bind to listening address
     pub async fn start(&mut self, listen_addr: &str) -> Result<()> {
         let addr: Multiaddr = listen_addr.parse()
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid listen address: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Invalid listen address: {e}")))?;
 
         self.swarm.listen_on(addr.clone())
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {e}")))?;
 
-        log::info!("🌐 Network listening on: {}", addr);
+        log::info!("🌐 Network listening on: {addr}");
         
         // Connect to bootstrap nodes
         self.bootstrap().await?;
@@ -235,7 +235,7 @@ impl NetworkManager {
         for &bootstrap_addr in BOOTSTRAP_NODES {
             if let Ok(addr) = bootstrap_addr.parse::<Multiaddr>() {
                 match self.swarm.dial(addr.clone()) {
-                    Ok(_) => log::info!("📞 Dialing bootstrap node: {}", addr),
+                    Ok(_) => log::info!("📞 Dialing bootstrap node: {addr}"),
                     Err(e) => log::warn!("❌ Failed to dial bootstrap node {}: {}", addr, e),
                 }
             }
@@ -252,7 +252,7 @@ impl NetworkManager {
                 // Handle swarm events
                 event = self.swarm.select_next_some() => {
                     if let Err(e) = self.handle_swarm_event(event).await {
-                        log::error!("Error handling swarm event: {}", e);
+                        log::error!("Error handling swarm event: {e:?}");
                     }
                 }
                 
@@ -260,7 +260,7 @@ impl NetworkManager {
                 message = self.message_receiver.recv() => {
                     if let Some(msg) = message {
                         if let Err(e) = self.handle_outgoing_message(msg).await {
-                            log::error!("Error handling outgoing message: {}", e);
+                            log::error!("Error handling outgoing message: {e:?}");
                         }
                     }
                 }
@@ -280,7 +280,7 @@ impl NetworkManager {
                 self.handle_floodsub_message(msg).await?;
             }
             SwarmEvent::NewListenAddr { address, .. } => {
-                log::info!("🌐 New listen address: {}", address);
+                log::info!("🌐 New listen address: {address}");
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.on_peer_connected(peer_id).await;
@@ -307,7 +307,7 @@ impl NetworkManager {
             TOPIC_BLOCKS => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::NewBlock(block) = network_message {
-                        log::info!("📦 Received new block: {}", hex::encode(&block.calculate_hash()));
+                        log::info!("📦 Received new block: {}", hex::encode(block.calculate_hash()));
                         // TODO: Process new block
                     }
                 }
@@ -315,7 +315,7 @@ impl NetworkManager {
             TOPIC_TRANSACTIONS => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::NewTransaction(tx) = network_message {
-                        log::info!("💸 Received new transaction: {}", hex::encode(&tx.id));
+                        log::info!("💸 Received new transaction: {}", hex::encode(tx.id));
                         // TODO: Process new transaction
                     }
                 }
@@ -329,7 +329,7 @@ impl NetworkManager {
                 }
             }
             _ => {
-                log::debug!("📨 Unknown message topic: {}", topic_str);
+                log::debug!("📨 Unknown message topic: {topic_str}");
             }
         }
         Ok(())
@@ -355,7 +355,7 @@ impl NetworkManager {
     pub async fn broadcast_block(&self, block: Block) -> Result<()> {
         let message = NetworkMessage::NewBlock(block);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {e}")))?;
         Ok(())
     }
 
@@ -363,20 +363,20 @@ impl NetworkManager {
     pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
         let message = NetworkMessage::NewTransaction(transaction);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {e}")))?;
         Ok(())
     }
 
     /// Handle peer connection
     async fn on_peer_connected(&self, peer_id: PeerId) {
-        log::info!("🔗 Peer connected: {}", peer_id);
+        log::info!("🔗 Peer connected: {peer_id}");
         let mut peers = self.peers.write().await;
         peers.entry(peer_id).or_insert_with(PeerInfo::new);
     }
 
     /// Handle peer disconnection
     async fn on_peer_disconnected(&self, peer_id: PeerId) {
-        log::info!("🔌 Peer disconnected: {}", peer_id);
+        log::info!("🔌 Peer disconnected: {peer_id}");
         // Keep peer info for potential reconnection
     }
 

@@ -134,7 +134,7 @@ impl TransactionMempool {
     /// Add transaction to mempool with full validation
     pub async fn add_transaction(&self, transaction: Transaction) -> Result<ValidationResult> {
         let tx_id = transaction.id;
-        let sender = &transaction.from;
+        let sender = transaction.from.clone();
         
         // Check if transaction already exists
         if self.transactions.contains_key(&tx_id) {
@@ -149,7 +149,7 @@ impl TransactionMempool {
         }
 
         // Check spam protection
-        if !self.check_submission_rate_limit(sender).await {
+        if !self.check_submission_rate_limit(&sender).await {
             return Ok(ValidationResult::AccountSpamming { 
                 rate_limit: self.max_submissions_per_hour as u64 
             });
@@ -177,8 +177,9 @@ impl TransactionMempool {
             tx_id,
         };
 
+        let transaction_nonce = transaction.nonce;
         let entry = MempoolEntry {
-            transaction: transaction.clone(),
+            transaction,
             added_at: Instant::now(),
             size_bytes: tx_size,
             fee_rate,
@@ -191,7 +192,7 @@ impl TransactionMempool {
         self.priority_queue.write().insert(priority, tx_id);
         
         // Update account tracking
-        self.account_nonces.insert(sender.clone(), transaction.nonce);
+        self.account_nonces.insert(sender.clone(), transaction_nonce);
         self.transactions_by_account
             .entry(sender.clone())
             .or_default()
@@ -201,7 +202,7 @@ impl TransactionMempool {
         *self.current_size_bytes.write() += tx_size;
         
         // Record submission for rate limiting
-        self.record_submission(sender).await;
+        self.record_submission(&sender).await;
 
         log::info!("✅ Transaction {} added to mempool (fee_rate: {})", 
                   hex::encode(tx_id), fee_rate);

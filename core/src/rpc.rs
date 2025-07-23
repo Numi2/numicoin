@@ -440,7 +440,7 @@ impl RpcServer {
                 .allow_headers([warp::http::header::CONTENT_TYPE]))
             .service(warp::service(routes.clone()));
         
-        log::info!("🚀 Starting secure RPC server on port {}", port);
+        log::info!("🚀 Starting secure RPC server on port {port}");
         log::info!("🔒 Security features enabled:");
         log::info!("   ✓ Rate limiting: {} req/min", rpc_server.rate_limit_config.requests_per_minute);
         log::info!("   ✓ Request body limit: 1MB");
@@ -596,7 +596,7 @@ impl RpcServer {
                 stats.uptime_seconds = self.start_time.elapsed().as_secs();
             }
             
-            log::debug!("🧹 Cleaned up rate limiting data. Active entries: {}, Blocked IPs: {}", 
+            log::debug!("🧹 Cleaned up rate limiting data. Active entries: {}, Blocked IPs: {}",
                        self.rate_limiter.len(), self.blocked_ips.len());
         }
     }
@@ -671,7 +671,7 @@ async fn handle_status(
             state.total_blocks,
             state.total_supply,
             state.current_difficulty,
-            state.best_block_hash.clone(),
+            state.best_block_hash,
             state.cumulative_difficulty,
             blockchain.get_pending_transaction_count(),
             mempool_stats.total_size_bytes,
@@ -691,7 +691,7 @@ async fn handle_status(
         mempool_size_bytes,
         network_peers,
         is_syncing,
-        chain_work: format!("{}", cumulative_difficulty),
+        chain_work: format!("{cumulative_difficulty}"),
     };
     
     rpc_server.increment_stat("successful_requests").await;
@@ -793,18 +793,18 @@ async fn handle_block(
                 };
                 
                 TransactionSummary {
-                    id: hex::encode(&tx.id),
-                    from: hex::encode(&tx.from),
+                    id: hex::encode(tx.id),
+                    from: hex::encode(tx.from.clone()),
                     tx_type,
                     amount: amount as f64 / 1_000_000_000.0,
-                    fee: calculate_transaction_fee(tx) as f64 / 1_000_000_000.0,
+                    fee: calculate_transaction_fee(tx) / 1_000_000_000.0,
                 }
             }).collect();
 
             let response = BlockResponse {
                 height: block.header.height,
-                hash: hex::encode(&block.calculate_hash()),
-                previous_hash: hex::encode(&block.header.previous_hash),
+                hash: hex::encode(block.calculate_hash()),
+                previous_hash: hex::encode(block.header.previous_hash),
                 timestamp: block.header.timestamp,
                 transactions: transaction_summaries,
                 transaction_count: block.transactions.len(),
@@ -878,7 +878,7 @@ async fn handle_transaction(
     );
 
     // Process transaction with proper thread-safe pattern
-    let tx_id = hex::encode(&transaction.id);
+    let tx_id = hex::encode(transaction.id);
     
     // Add transaction to blockchain - temporarily use sync pattern to fix Send issue
     let validation_result: Result<ValidationResult> = {
@@ -899,14 +899,14 @@ async fn handle_transaction(
         status: match &validation_result {
             Ok(ValidationResult::Valid) => "accepted".to_string(),
             Ok(ValidationResult::InvalidSignature) => "rejected: invalid signature".to_string(),
-            Ok(ValidationResult::InvalidNonce { expected, got }) => format!("rejected: invalid nonce (expected {}, got {})", expected, got),
-            Ok(ValidationResult::InsufficientBalance { required, available }) => format!("rejected: insufficient balance (required {}, available {})", required, available),
+            Ok(ValidationResult::InvalidNonce { expected, got }) => format!("rejected: invalid nonce (expected {expected}, got {got})"),
+            Ok(ValidationResult::InsufficientBalance { required, available }) => format!("rejected: insufficient balance (required {required}, available {available})"),
             Ok(ValidationResult::DuplicateTransaction) => "rejected: duplicate transaction".to_string(),
             Ok(ValidationResult::TransactionTooLarge) => "rejected: transaction too large".to_string(),
-            Ok(ValidationResult::FeeTooLow { minimum, got }) => format!("rejected: fee too low (minimum {}, got {})", minimum, got),
-            Ok(ValidationResult::AccountSpamming { rate_limit }) => format!("rejected: account spamming (rate limit: {})", rate_limit),
+            Ok(ValidationResult::FeeTooLow { minimum, got }) => format!("rejected: fee too low (minimum {minimum}, got {got})"),
+            Ok(ValidationResult::AccountSpamming { rate_limit }) => format!("rejected: account spamming (rate limit: {rate_limit})"),
             Ok(ValidationResult::TransactionExpired) => "rejected: transaction expired".to_string(),
-            Err(e) => format!("rejected: error - {}", e),
+            Err(e) => format!("rejected: error - {e}"),
         },
         validation_result: format!("{:?}", validation_result),
     };
@@ -969,7 +969,7 @@ async fn handle_mine(
                     "Block mined but failed to add to blockchain".to_string() 
                 },
                 block_height: mining_result.block.header.height,
-                block_hash: hex::encode(&mining_result.block.calculate_hash()),
+                block_hash: hex::encode(mining_result.block.calculate_hash()),
                 mining_time_ms: mining_time.as_millis() as u64,
                 hash_rate: mining_result.hash_rate,
             };
@@ -986,7 +986,7 @@ async fn handle_mine(
         Err(e) => {
             rpc_server.increment_stat("failed_requests").await;
             Ok(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Mining failed: {}", e)
+                format!("Mining failed: {e}")
             )))
         }
     }

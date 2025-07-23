@@ -217,14 +217,14 @@ impl NumiBlockchain {
         
         // Basic block validation
         if let Err(e) = self.validate_block_basic(&block).await {
-            log::warn!("❌ Block {} failed basic validation: {}", hex::encode(&block_hash), e);
+            log::warn!("❌ Block {} failed basic validation: {}", hex::encode(block_hash), e);
             return Err(e);
         }
         
         // Verify proof of work (skip for genesis and loading from storage)
         if validate_pow && !block.is_genesis() {
             if let Err(e) = self.verify_proof_of_work(&block) {
-                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(&block_hash), e);
+                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(block_hash), e);
                 return Err(e);
             }
         }
@@ -291,7 +291,7 @@ impl NumiBlockchain {
             log::info!("🔄 New best chain found, performing reorganization");
             return self.reorganize_to_block(block_hash).await;
         } else {
-            log::debug!("📦 Block {} added to side chain", hex::encode(&block_hash));
+            log::debug!("📦 Block {} added to side chain", hex::encode(block_hash));
             return Ok(false);
         }
     }
@@ -429,8 +429,8 @@ impl NumiBlockchain {
         for transaction in &block.transactions {
             if let Err(e) = self.validate_transaction_in_context(transaction).await {
                 return Err(BlockchainError::InvalidTransaction(
-                    format!("Transaction {} invalid in block context: {}", 
-                           hex::encode(&transaction.get_hash_hex()), e)));
+                    format!("Transaction {} invalid in block context: {}",
+                           hex::encode(transaction.get_hash_hex()), e)));
             }
         }
         
@@ -475,7 +475,7 @@ impl NumiBlockchain {
         }
         
         // Add to orphan pool
-        let previous_hash = hex::encode(&block.header.previous_hash);
+        let previous_hash = hex::encode(block.header.previous_hash);
         let orphan = OrphanBlock {
             block,
             arrival_time: Utc::now(),
@@ -484,7 +484,7 @@ impl NumiBlockchain {
         
         self.orphan_pool.insert(block_hash, orphan);
         log::info!("👻 Block {} added to orphan pool (parent: {})",
-                  hex::encode(&block_hash),
+                  hex::encode(block_hash),
                   previous_hash);
         
         Ok(false)
@@ -508,7 +508,7 @@ impl NumiBlockchain {
                     // Check if parent now exists
                     if self.blocks.contains_key(&parent_hash) || orphan.block.is_genesis() {
                         log::info!("🎯 Processing orphan block {} (parent now available)",
-                                  hex::encode(&orphan_hash));
+                                  hex::encode(orphan_hash));
                         
                         let block = orphan.block.clone();
                         match self.process_block_internal(block, true).await {
@@ -565,7 +565,7 @@ impl NumiBlockchain {
         // Process genesis block
         futures::executor::block_on(self.process_block_internal(genesis_block, false))?;
         
-        log::info!("🌱 Genesis block created: {}", hex::encode(&self.genesis_hash));
+        log::info!("🌱 Genesis block created: {}", hex::encode(self.genesis_hash));
         Ok(())
     }
 
@@ -635,8 +635,8 @@ impl NumiBlockchain {
     async fn validate_transaction_in_context(&self, transaction: &Transaction) -> Result<()> {
         // Get current account state
         let account_state = self.accounts.get(&transaction.from)
-            .map(|state| state.clone())
-            .unwrap_or_else(|| AccountState {
+            .map(|state| state)
+            .map(|r| r.clone()).unwrap_or_else(|| AccountState {
                 balance: 0,
                 nonce: 0,
                 staked_amount: 0,
@@ -649,7 +649,7 @@ impl NumiBlockchain {
         // Validate nonce
         if transaction.nonce != account_state.nonce + 1 {
             return Err(BlockchainError::InvalidTransaction(
-                format!("Invalid nonce: expected {}, got {}", 
+                format!("Invalid nonce: expected {}, got {}",
                        account_state.nonce + 1, transaction.nonce)));
         }
         
@@ -696,8 +696,8 @@ impl NumiBlockchain {
         
         // Get or create sender account
         let mut sender_state = self.accounts.get(&sender_key)
-            .map(|state| state.clone())
-            .unwrap_or_else(|| AccountState {
+            .map(|state| state)
+            .map(|r| r.clone()).unwrap_or_else(|| AccountState {
                 balance: 0,
                 nonce: 0,
                 staked_amount: 0,
@@ -717,21 +717,21 @@ impl NumiBlockchain {
                 
                 // Add to recipient
                 let mut recipient_state = self.accounts.get(to)
-                    .map(|state| state.clone())
-                    .unwrap_or_else(|| AccountState {
-                        balance: 0,
-                        nonce: 0,
-                        staked_amount: 0,
-                        last_stake_time: Utc::now(),
-                        transaction_count: 0,
-                        total_received: 0,
-                        total_sent: 0,
-                    });
+                    .map(|state| state)
+                    .map(|r| r.clone()).unwrap_or_else(|| AccountState {
+                balance: 0,
+                nonce: 0,
+                staked_amount: 0,
+                last_stake_time: Utc::now(),
+                transaction_count: 0,
+                total_received: 0,
+                total_sent: 0,
+            });
                 
                 recipient_state.balance += amount;
                 recipient_state.total_received += amount;
                 
-                self.accounts.insert(to.clone(), recipient_state);
+                self.accounts.insert(to.clone(), recipient_state.clone());
             }
             
             TransactionType::Stake { amount } => {
@@ -764,7 +764,7 @@ impl NumiBlockchain {
             }
         }
         
-        self.accounts.insert(sender_key, sender_state);
+        self.accounts.insert(sender_key, sender_state.clone());
         Ok(())
     }
     
@@ -772,7 +772,8 @@ impl NumiBlockchain {
     async fn undo_transaction(&self, transaction: &Transaction) -> Result<()> {
         let sender_key = transaction.from.clone();
         
-        if let Some(mut sender_state) = self.accounts.get(&sender_key).map(|s| s.clone()) {
+        if let Some(sender_state) = self.accounts.get(&sender_key).map(|s| s.clone()) {
+            let mut sender_state = sender_state;
             match &transaction.transaction_type {
                 TransactionType::Transfer { to, amount } => {
                     // Restore sender balance
@@ -782,7 +783,8 @@ impl NumiBlockchain {
                     sender_state.total_sent -= amount;
                     
                     // Deduct from recipient
-                    if let Some(mut recipient_state) = self.accounts.get(to).map(|s| s.clone()) {
+                    if let Some(recipient_state) = self.accounts.get(to).map(|s| s.clone()) {
+                        let mut recipient_state = recipient_state;
                         recipient_state.balance -= amount;
                         recipient_state.total_received -= amount;
                         self.accounts.insert(to.clone(), recipient_state);
@@ -955,7 +957,7 @@ impl NumiBlockchain {
                 
                 // Validate block height
                 if block.header.height != i as u64 {
-                    log::error!("❌ Block height mismatch at index {}: expected {}, got {}", 
+                    log::error!("❌ Block height mismatch at index {}: expected {}, got {:?}",
                                i, i, block.header.height);
                     return false;
                 }
@@ -964,14 +966,14 @@ impl NumiBlockchain {
                 if i > 0 {
                     let prev_hash = main_chain[i - 1];
                     if block.header.previous_hash != prev_hash {
-                        log::error!("❌ Previous hash mismatch at height {}", block.header.height);
+                        log::error!("❌ Previous hash mismatch at height {:?}", block.header.height);
                         return false;
                     }
                 }
                 
                 // Validate block structure
                 if let Err(e) = futures::executor::block_on(self.validate_block_basic(block)) {
-                    log::error!("❌ Block {} failed validation: {}", block.header.height, e);
+                    log::error!("❌ Block {} failed validation: height {}, error {:?}", i, block.header.height, e);
                     return false;
                 }
             } else {

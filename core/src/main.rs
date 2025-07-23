@@ -155,7 +155,7 @@ async fn mine_block(data_dir: PathBuf, miner_key: Option<String>) -> Result<()> 
         Dilithium3Keypair::new()?
     };
     
-    println!("🔑 Mining with public key: {}", hex::encode(&keypair.public_key));
+    println!("🔑 Mining with public key: {}", hex::encode(keypair.public_key.clone()));
     
     // Get pending transactions
     let pending_txs = blockchain.get_transactions_for_block(1_000_000, 1000);
@@ -212,7 +212,7 @@ async fn submit_transaction(data_dir: PathBuf, _from: String, to: String, amount
     
     // Parse recipient address (in real implementation, validate format)
     let recipient_pubkey = hex::decode(&to)
-        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid recipient address: {}", e)))?;
+        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid recipient address: {e}")))?;
     
     // Create transaction
     let mut transaction = Transaction::new(
@@ -228,11 +228,12 @@ async fn submit_transaction(data_dir: PathBuf, _from: String, to: String, amount
     transaction.sign(&sender_keypair)?;
     
     // Submit transaction
-    blockchain.add_transaction(transaction.clone()).await?;
+    let tx_id = transaction.get_hash_hex();
+    blockchain.add_transaction(transaction).await?;
     
     println!("✅ Transaction submitted successfully!");
-    println!("🆔 Transaction ID: {}", transaction.get_hash_hex());
-    println!("📤 From: {}", hex::encode(&sender_keypair.public_key));
+    println!("🆔 Transaction ID: {}", tx_id);
+    println!("📤 From: {}", hex::encode(sender_keypair.public_key.clone()));
     println!("📥 To: {}", to);
     println!("💰 Amount: {} NUMI", amount as f64 / 1_000_000_000.0);
     
@@ -282,7 +283,7 @@ async fn show_balance(data_dir: PathBuf, address: String) -> Result<()> {
     
     // Parse address
     let pubkey = hex::decode(&address)
-        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid address: {}", e)))?;
+        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid address: {e}")))?;
     
     // Get balance
     let balance = blockchain.get_balance(&pubkey);

@@ -57,7 +57,7 @@ impl Dilithium3Keypair {
     pub fn from_secret_key(secret_key: &[u8]) -> Result<Self> {
         if secret_key.len() != DILITHIUM3_SECKEY_SIZE {
             return Err(BlockchainError::CryptographyError(
-                format!("Invalid secret key size: expected {}, got {}", 
+                format!("Invalid secret key size: expected {}, got {}",
                        DILITHIUM3_SECKEY_SIZE, secret_key.len())));
         }
         
@@ -234,14 +234,14 @@ pub fn argon2id_pow_hash(data: &[u8], salt: &[u8], config: &Argon2Config) -> Res
         config.time_cost,
         config.parallelism,
         Some(config.output_length),
-    ).map_err(|e| BlockchainError::CryptographyError(format!("Argon2 params error: {}", e)))?;
+    ).map_err(|e| BlockchainError::CryptographyError(format!("Argon2 params error: {e}")))?;
     
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     
     // Perform Argon2id hashing
     let mut output = vec![0u8; config.output_length];
     argon2.hash_password_into(data, salt, &mut output)
-        .map_err(|e| BlockchainError::CryptographyError(format!("Argon2id hash error: {}", e)))?;
+        .map_err(|e| BlockchainError::CryptographyError(format!("Argon2id hash error: {e}")))?;
     
     Ok(output)
 }

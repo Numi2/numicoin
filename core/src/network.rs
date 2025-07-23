@@ -10,6 +10,8 @@ use libp2p::{
     swarm::{Swarm, SwarmEvent},
     tcp, noise, yamux,
     Multiaddr, PeerId, Transport,
+    mdns::{tokio::Behaviour as Mdns, Event as MdnsEvent},
+    swarm::NetworkBehaviour,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
@@ -18,11 +20,7 @@ use crate::block::Block;
 use crate::transaction::Transaction;
 use crate::{Result, BlockchainError};
 
-// AI Agent Note: This is a simplified network implementation for compilation.
-// The complex P2P features (Kademlia, mDNS, advanced peer management) have been
-// temporarily simplified to get the codebase compiling. Future versions should
-// restore the full production-ready networking with proper peer discovery,
-// DHT routing, and sophisticated peer management.
+
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
 const TOPIC_TRANSACTIONS: &str = "numi/transactions/1.0.0";
@@ -76,9 +74,20 @@ impl PeerInfo {
     }
 }
 
-/// Simplified network behavior - using Floodsub directly for now
-/// TODO: Implement proper NetworkBehaviour when libp2p API stabilizes
-pub type SimpleNetworkBehaviour = Floodsub;
+// Composite behaviour combining Floodsub for pub-sub and mDNS for local peer discovery.
+// More protocols (e.g. Kademlia, Identify, Ping) can be added later.
+
+#[derive(NetworkBehaviour)]
+pub struct NumiBehaviour {
+    pub floodsub: Floodsub,
+    pub mdns: Mdns,
+}
+
+// Re-export the behaviour type used throughout the file so later code needs only minimal changes.
+pub type SimpleNetworkBehaviour = NumiBehaviour;
+// The derive macro creates an enum `<StructName>Event` that groups the events of all sub-behaviours.
+// We'll use it for pattern matching in the swarm event handler.
+type NumiBehaviourEvent = <NumiBehaviour as NetworkBehaviour>::ToSwarm;
 
 /// Thread-safe network manager wrapper for RPC compatibility
 #[derive(Clone)]
@@ -172,17 +181,26 @@ impl NetworkManager {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        // Initialize flood-sub for gossip protocol with updated Topic API
-        let mut behaviour = Floodsub::new(local_peer_id);
-        
-        // Create topics using the new API
+        // --- Build the composite behaviour (Floodsub + mDNS) ---
+
+        // Floodsub for gossip based messaging
+        let mut floodsub = Floodsub::new(local_peer_id);
+
+        // Subscribe to the Numicoin topics
         let blocks_topic = Topic::new(TOPIC_BLOCKS);
         let transactions_topic = Topic::new(TOPIC_TRANSACTIONS);
         let peer_info_topic = Topic::new(TOPIC_PEER_INFO);
-        
-        behaviour.subscribe(blocks_topic);
-        behaviour.subscribe(transactions_topic);
-        behaviour.subscribe(peer_info_topic);
+
+        floodsub.subscribe(blocks_topic.clone());
+        floodsub.subscribe(transactions_topic.clone());
+        floodsub.subscribe(peer_info_topic.clone());
+
+        // mDNS for local peer discovery
+        let mdns = Mdns::new(Default::default(), local_peer_id)
+            .map_err(|e| BlockchainError::NetworkError(format!("mDNS init failed: {}", e)))?;
+
+        // Compose the behaviour
+        let behaviour = NumiBehaviour { floodsub, mdns };
 
         // Create swarm with config
         let config = libp2p::swarm::Config::with_tokio_executor();
@@ -274,10 +292,20 @@ impl NetworkManager {
     }
 
     /// Handle events from libp2p swarm
-    async fn handle_swarm_event(&mut self, event: SwarmEvent<FloodsubEvent>) -> Result<()> {
+    async fn handle_swarm_event(&mut self, event: SwarmEvent<NumiBehaviourEvent>) -> Result<()> {
         match event {
-            SwarmEvent::Behaviour(FloodsubEvent::Message(msg)) => {
+            SwarmEvent::Behaviour(NumiBehaviourEvent::Floodsub(FloodsubEvent::Message(msg))) => {
                 self.handle_floodsub_message(msg).await?;
+            }
+            SwarmEvent::Behaviour(NumiBehaviourEvent::Mdns(MdnsEvent::Discovered(list))) => {
+                for (peer, _addr) in list {
+                    self.swarm.behaviour_mut().floodsub.add_node_to_partial_view(peer);
+                }
+            }
+            SwarmEvent::Behaviour(NumiBehaviourEvent::Mdns(MdnsEvent::Expired(list))) => {
+                for (peer, _addr) in list {
+                    self.swarm.behaviour_mut().floodsub.remove_node_from_partial_view(&peer);
+                }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 log::info!("🌐 New listen address: {}", address);
@@ -346,6 +374,7 @@ impl NetworkManager {
 
         self.swarm
             .behaviour_mut()
+            .floodsub
             .publish(Topic::new(topic), data);
         
         Ok(())

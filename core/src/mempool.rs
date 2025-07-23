@@ -99,6 +99,12 @@ pub struct TransactionMempool {
     last_cleanup: Arc<RwLock<Instant>>,
 }
 
+impl Default for TransactionMempool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionMempool {
     /// Create new mempool with production-ready configuration
     pub fn new() -> Self {
@@ -188,7 +194,7 @@ impl TransactionMempool {
         self.account_nonces.insert(sender.clone(), transaction.nonce);
         self.transactions_by_account
             .entry(sender.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(tx_id);
 
         // Update stats
@@ -198,7 +204,7 @@ impl TransactionMempool {
         self.record_submission(sender).await;
 
         log::info!("✅ Transaction {} added to mempool (fee_rate: {})", 
-                  hex::encode(&tx_id), fee_rate);
+                  hex::encode(tx_id), fee_rate);
 
         Ok(ValidationResult::Valid)
     }
@@ -309,7 +315,7 @@ impl TransactionMempool {
         // Find expired transactions
         for entry in self.transactions.iter() {
             if now.duration_since(entry.added_at) > self.max_tx_age {
-                expired_tx_ids.push(entry.key().clone());
+                expired_tx_ids.push(*entry.key());
             }
         }
         
@@ -414,25 +420,25 @@ impl TransactionMempool {
         let mut evicted_size = 0;
         let mut to_evict = Vec::new();
         
-        let priority_queue = self.priority_queue.read();
-        
-        // Find lowest priority transactions to evict
-        for (priority, tx_id) in priority_queue.iter() {
-            if priority.fee_rate >= fee_rate {
-                break; // Don't evict higher priority transactions
-            }
+        {
+            let priority_queue = self.priority_queue.read();
             
-            if let Some(entry) = self.transactions.get(tx_id) {
-                to_evict.push(tx_id.clone());
-                evicted_size += entry.size_bytes;
+            // Find lowest priority transactions to evict
+            for (priority, tx_id) in priority_queue.iter() {
+                if priority.fee_rate >= fee_rate {
+                    break; // Don't evict higher priority transactions
+                }
                 
-                if evicted_size >= tx_size {
-                    break;
+                if let Some(entry) = self.transactions.get(tx_id) {
+                    to_evict.push(*tx_id);
+                    evicted_size += entry.size_bytes;
+                    
+                    if evicted_size >= tx_size {
+                        break;
+                    }
                 }
             }
-        }
-        
-        drop(priority_queue);
+        } // Lock is dropped here
         
         if evicted_size >= tx_size {
             log::info!("🔄 Evicting {} transactions to make space", to_evict.len());
@@ -449,7 +455,7 @@ impl TransactionMempool {
         
         let mut rates = self.account_submission_rates
             .entry(sender.to_vec())
-            .or_insert_with(Vec::new);
+            .or_default();
         
         // Remove old entries
         rates.retain(|&timestamp| timestamp > hour_ago);
@@ -462,7 +468,7 @@ impl TransactionMempool {
         let now = Instant::now();
         self.account_submission_rates
             .entry(sender.to_vec())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(now);
     }
 

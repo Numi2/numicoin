@@ -190,7 +190,17 @@ pub struct SecureKeyStore {
 impl SecureKeyStore {
     /// Create new secure key store
     pub fn new<P: AsRef<Path>>(storage_path: P) -> Result<Self> {
-        Self::with_config(storage_path, KeyDerivationConfig::default())
+        // Heavy Scrypt settings make unit tests painfully slow.  We therefore
+        // fall back to the much faster development profile when the code is
+        // compiled in test mode.  Production builds continue to use the high-
+        // security defaults.
+        #[cfg(test)]
+        let cfg = KeyDerivationConfig::development();
+
+        #[cfg(not(test))]
+        let cfg = KeyDerivationConfig::default();
+
+        Self::with_config(storage_path, cfg)
     }
     
     /// Create key store with custom configuration
@@ -258,8 +268,13 @@ impl SecureKeyStore {
         let nonce = &encrypted_data[32..44];
         let encrypted_content = &encrypted_data[44..];
         
-        // Derive key from password
-        let key = self.derive_key_from_password(password, salt)?;
+        // Derive the same deterministic password hash used during
+        // `save_to_disk` and use its hex representation as the input to the
+        // KDF.  This ensures that encryption and decryption paths are
+        // symmetrical.
+        const PW_SALT: &str = "numicoin-keystore";
+        let pwd_hash = derive_key(password.as_bytes(), PW_SALT, b"keystore-auth");
+        let key = self.derive_key_from_password(&hex::encode(&pwd_hash), salt)?;
         
         // Decrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)

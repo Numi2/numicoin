@@ -6,10 +6,10 @@ edition = "2021"
 [dependencies]
 # Quantum-safe cryptography - TODO: Replace with real liboqs when available
 # liboqs = "0.8.0" # Will be implemented in separate task
-pqcrypto-dilithium = "0.5" # Temporary quantum-safe crypto
+pqcrypto-dilithium = { version = "0.5", optional = true } # Temporary quantum-safe crypto
 pqcrypto-traits = "0.3" # Required traits for pqcrypto
 oqs = { version = "0.9", optional = true } # Real liboqs integration
-base64ct = "=1.7.1" # Pin to stable version
+base64ct = "1.7.1" # Allow semver-compatible patch releases without pinning
 
 # Hashing and cryptography
 blake3 = "1.4"
@@ -20,12 +20,11 @@ subtle = "2.4" # Constant-time operations
 rand = "0.8" # Cryptographically secure randomness
 
 # Networking with libp2p for production P2P
-libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "macros", "floodsub", "yamux", "mdns", "identify", "ping", "kad"] }
+libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "macros", "floodsub", "yamux", "mdns", "identify", "ping", "kad"] } # TODO: Upgrade to 0.58+
 tokio = { version = "1.0", features = ["full"] }
 
 # Database and storage with better error handling
 sled = "0.34"
-rocksdb = "0.22" # High-performance storage backend
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -77,6 +76,11 @@ tempfile = "3.8"
 proptest = "1.4" # Property-based testing
 
 [features]
-default = ["std"]
+default = ["std", "temporary-pqcrypto"]
 std = []
-real-liboqs = ["oqs"] # Enable when real liboqs is available
+
+# Use temporary pqcrypto implementation until real liboqs is ready
+temporary-pqcrypto = ["pqcrypto-dilithium"]
+
+# Enable when real liboqs is available (disables temporary pqcrypto)
+real-liboqs = ["oqs"]

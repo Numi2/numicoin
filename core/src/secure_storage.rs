@@ -242,7 +242,7 @@ impl SecureKeyStore {
         Ok(())
     }
     
-    /// Load key store from disk
+    /// Load key store from disk with decryption
     pub fn load_from_disk(&mut self, password: &str) -> Result<()> {
         if !self.storage_path.exists() {
             return Err(BlockchainError::StorageError(
@@ -263,8 +263,14 @@ impl SecureKeyStore {
         let nonce = &encrypted_data[32..44];
         let encrypted_content = &encrypted_data[44..];
         
+        // First, we need to initialize the store to get the password hash
+        // For loading, we'll use a temporary approach to derive the key
+        let temp_salt = vec![0u8; 32];
+        let temp_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&temp_salt), b"keystore-auth");
+        let derived_password = format!("keystore_{}", hex::encode(&temp_hash));
+        
         // Derive key from password
-        let key = self.derive_key_from_password(password, salt)?;
+        let key = self.derive_key_from_password(&derived_password, salt)?;
         
         // Decrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)
@@ -309,8 +315,11 @@ impl SecureKeyStore {
         let salt = generate_random_bytes(32);
         let nonce = generate_random_bytes(12);
         
-        // Derive key (we use the password hash as pseudo-password for storage)
-        let key = self.derive_key_from_password(&hex::encode(&password_hash), &salt)?;
+        // For persistence, we need to use a consistent encryption method
+        // Since we don't have the original password here, we'll use a derived key from the password hash
+        // This is a simplified approach - in production, you'd want to store the password securely
+        let derived_password = format!("keystore_{}", hex::encode(&password_hash));
+        let key = self.derive_key_from_password(&derived_password, &salt)?;
         
         // Encrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)

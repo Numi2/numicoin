@@ -73,3 +73,6 @@ proptest = "1.4" # Property-based testing
 default = ["std"]
 std = []
 real-liboqs = ["oqs"] # Enable when real liboqs is available
+
+[patch.crates-io]
+base64ct = "=1.7.1"

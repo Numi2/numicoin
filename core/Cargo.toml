@@ -60,9 +60,9 @@ aes-gcm = "0.10"
 scrypt = "0.11"
 zeroize = { version = "1.4", features = ["zeroize_derive"] }
 
-# Networking and security
+# Networking and security - Updated to fix vulnerabilities
 dns-lookup = "2.0"
-trust-dns-resolver = "0.23"
+hickory-resolver = "0.24" # Updated from trust-dns-resolver
 
 [dev-dependencies]
 criterion = "0.5"

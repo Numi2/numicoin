@@ -91,7 +91,7 @@ impl Transaction {
         };
         
         bincode::serialize(&tx_for_signing)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {}", e)))
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {e}")))
     }
     
     pub fn validate(&self, current_balance: u64, current_nonce: u64) -> Result<()> {
@@ -119,7 +119,7 @@ impl Transaction {
         
         if required_amount > current_balance {
             return Err(BlockchainError::InsufficientBalance(
-                format!("Required: {}, Available: {}", required_amount, current_balance)
+                format!("Required: {required_amount}, Available: {current_balance}")
             ));
         }
         

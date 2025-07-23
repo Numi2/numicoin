@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::transaction::{Transaction, TransactionId, TransactionType};
 use crate::{Result, BlockchainError};
 
-// AI Agent Note: This is a production-ready transaction mempool implementation
+// AI Agent Note: This is a production not ready. transaction mempool implementation
 // Features implemented:
 // - Fee-based transaction prioritization using BTreeMap
 // - Account nonce validation to prevent replay attacks
@@ -86,7 +86,7 @@ pub struct TransactionMempool {
     max_mempool_size: usize,         // Maximum memory usage in bytes
     max_transactions: usize,         // Maximum number of transactions
     min_fee_rate: u64,              // Minimum fee rate per byte
-    max_tx_age: Duration,           // Maximum transaction age before expiry
+    max_tx_age: Duration,           // aMaximum transaction age before expiry
     _max_account_txs: usize,         // Maximum pending transactions per account
     
     /// Anti-spam protection
@@ -367,7 +367,7 @@ impl TransactionMempool {
                 }
                 // TODO: Check balance (requires blockchain state access)
             }
-            TransactionType::Stake { amount } => {
+            TransactionType::Stake { amount, validator: _ } => {
                 if *amount < 1_000_000_000 { // Minimum 1 NUMI stake
                     return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
                 }
@@ -381,6 +381,10 @@ impl TransactionMempool {
             TransactionType::Governance { .. } => {
                 // Governance transactions have special validation rules
                 // TODO: Implement governance validation
+            }
+            TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
+                // Contract operations are not yet implemented
+                return Err(BlockchainError::InvalidTransaction("Contract operations not supported".to_string()));
             }
         }
         

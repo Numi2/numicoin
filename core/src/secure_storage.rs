@@ -22,7 +22,9 @@ use crate::{Result, BlockchainError};
 // - Time-based key rotation and expiry policies
 // - Secure file I/O with atomic writes and integrity verification
 // - Protection against timing attacks through constant-time operations
-// - Backup and recovery mechanisms with encrypted exports
+// - No key recovery by design (security feature)
+// - Both public and private keys must be stored together
+// - No key derivation support for enhanced security
 
 /// Key derivation configuration for Scrypt
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +232,7 @@ impl SecureKeyStore {
         
         // Create password hash for verification using fixed salt for consistency
         let salt = vec![0u8; 32]; // Fixed salt for consistent verification
-        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth");
+        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth")?;
         self.password_hash = Some(password_hash);
         
         log::info!("🔐 Secure key store initialized");
@@ -266,7 +268,7 @@ impl SecureKeyStore {
         // First, we need to initialize the store to get the password hash
         // For loading, we'll use a temporary approach to derive the key
         let temp_salt = vec![0u8; 32];
-        let temp_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&temp_salt), b"keystore-auth");
+        let temp_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&temp_salt), b"keystore-auth")?;
         let derived_password = format!("keystore_{}", hex::encode(&temp_hash));
         
         // Derive key from password
@@ -276,8 +278,8 @@ impl SecureKeyStore {
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {}", e)))?;
         
-        let nonce = Nonce::from_slice(nonce);
-        let decrypted_data = cipher.decrypt(nonce, encrypted_content)
+        let nonce_slice = Nonce::from_slice(nonce);
+        let decrypted_data = cipher.decrypt(nonce_slice, encrypted_content)
             .map_err(|_| BlockchainError::CryptographyError("Decryption failed - invalid password or corrupted data".to_string()))?;
         
         // Deserialize key store data
@@ -312,8 +314,8 @@ impl SecureKeyStore {
             .map_err(|e| BlockchainError::StorageError(format!("Failed to serialize key store: {}", e)))?;
         
         // Generate encryption parameters
-        let salt = generate_random_bytes(32);
-        let nonce = generate_random_bytes(12);
+        let salt = generate_random_bytes(32)?;
+        let nonce = generate_random_bytes(12)?;
         
         // For persistence, we need to use a consistent encryption method
         // Since we don't have the original password here, we'll use a derived key from the password hash
@@ -356,8 +358,11 @@ impl SecureKeyStore {
             .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {}", e)))?;
         
         // Generate encryption parameters
-        let salt = generate_random_bytes(self.kdf_config.salt_length);
-        let nonce = generate_random_bytes(12);
+        // Use `?` to unwrap the `Result<Vec<u8>, BlockchainError>` returned by
+        // `generate_random_bytes`, ensuring `salt` and `nonce` are plain
+        // `Vec<u8>` values.
+        let salt = generate_random_bytes(self.kdf_config.salt_length)?;
+        let nonce = generate_random_bytes(12)?;
         
         // Derive key from password
         let key = self.derive_key_from_password(password, &salt)?;
@@ -615,7 +620,7 @@ impl SecureKeyStore {
         // Since we don't store the salt separately, we'll use a fixed salt for verification
         // In production, the salt should be stored with the password hash
         let verification_salt = vec![0u8; 32]; // Fixed salt for verification
-        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&verification_salt), b"keystore-auth");
+        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&verification_salt), b"keystore-auth")?;
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {

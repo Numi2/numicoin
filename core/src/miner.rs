@@ -11,8 +11,7 @@ use crate::crypto::{generate_difficulty_target, verify_pow, Dilithium3Keypair, A
 use crate::error::BlockchainError;
 use crate::{Result};
 
-// AI Agent Note: This is a production-ready mining implementation
-// Features implemented:
+// Features must be checked:
 // - Multi-threaded mining with Rayon for parallel nonce search
 // - Configurable mining parameters for different hardware
 // - Real-time mining statistics and performance monitoring

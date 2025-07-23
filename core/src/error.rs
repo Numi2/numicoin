@@ -15,6 +15,9 @@ pub enum BlockchainError {
     InsufficientBalance(String),
     BlockNotFound(String),
     MiningError(String),
+    InvalidArgument(String),
+    InvalidBackup(String),
+    IoError(String),
 }
 
 impl fmt::Display for BlockchainError {
@@ -32,20 +35,47 @@ impl fmt::Display for BlockchainError {
             BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {msg}"),
             BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {msg}"),
             BlockchainError::MiningError(msg) => write!(f, "Mining error: {msg}"),
+            BlockchainError::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
+            BlockchainError::InvalidBackup(msg) => write!(f, "Invalid backup: {msg}"),
+            BlockchainError::IoError(msg) => write!(f, "IO error: {msg}"),
         }
     }
 }
 
 // Add From implementations for error conversions
-impl From<bincode::Error> for BlockchainError {
-    fn from(err: bincode::Error) -> Self {
-        BlockchainError::SerializationError(format!("Bincode error: {err:?}"))
+impl From<std::io::Error> for BlockchainError {
+    fn from(err: std::io::Error) -> Self {
+        BlockchainError::IoError(err.to_string())
     }
 }
 
-impl From<std::io::Error> for BlockchainError {
-    fn from(err: std::io::Error) -> Self {
-        BlockchainError::StorageError(format!("IO error: {err}"))
+impl From<serde_json::Error> for BlockchainError {
+    fn from(err: serde_json::Error) -> Self {
+        BlockchainError::SerializationError(err.to_string())
+    }
+}
+
+impl From<bincode::Error> for BlockchainError {
+    fn from(err: bincode::Error) -> Self {
+        BlockchainError::SerializationError(err.to_string())
+    }
+}
+
+impl From<toml::de::Error> for BlockchainError {
+    fn from(err: toml::de::Error) -> Self {
+        BlockchainError::SerializationError(err.to_string())
+    }
+}
+
+impl From<toml::ser::Error> for BlockchainError {
+    fn from(err: toml::ser::Error) -> Self {
+        BlockchainError::SerializationError(err.to_string())
+    }
+}
+
+impl From<std::path::StripPrefixError> for BlockchainError {
+    fn from(err: std::path::StripPrefixError) -> Self {
+        BlockchainError::InvalidArgument(err.to_string())
     }
 }
 

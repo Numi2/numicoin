@@ -9,6 +9,7 @@ edition = "2021"
 pqcrypto-dilithium = "0.5" # Temporary quantum-safe crypto
 pqcrypto-traits = "0.3" # Required traits for pqcrypto
 oqs = { version = "0.9", optional = true } # Real liboqs integration
+base64ct = "=1.7.1" # Pin to stable version
 
 # Hashing and cryptography
 blake3 = "1.4"
@@ -30,6 +31,7 @@ rocksdb = "0.22" # High-performance storage backend
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
+toml = "0.8" # Configuration file parsing
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -37,6 +39,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 log = "0.4"
+fs2 = "0.4" # File locking utility
 env_logger = "0.10"
 clap = { version = "4.0", features = ["derive"] }
 num_cpus = "1.16" # CPU core detection for mining
@@ -60,6 +63,10 @@ aes-gcm = "0.10"
 scrypt = "0.11"
 zeroize = { version = "1.4", features = ["zeroize_derive"] }
 
+# Backup and restore utilities
+tar = "0.4"
+flate2 = "1.0"
+
 # Networking and security - Updated to fix vulnerabilities
 dns-lookup = "2.0"
 hickory-resolver = "0.24" # Updated from trust-dns-resolver
@@ -73,6 +80,3 @@ proptest = "1.4" # Property-based testing
 default = ["std"]
 std = []
 real-liboqs = ["oqs"] # Enable when real liboqs is available
-
-[patch.crates-io]
-base64ct = "=1.7.1"

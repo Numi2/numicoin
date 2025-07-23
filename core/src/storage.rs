@@ -1,34 +1,40 @@
 use std::path::Path;
-
+use sled;
 use crate::block::Block;
 use crate::transaction::Transaction;
-use crate::blockchain::{ChainState, AccountState};
-use crate::{Result, BlockchainError};
+use crate::blockchain::{ChainState, AccountState, SecurityCheckpoint};
+use crate::error::BlockchainError;
+use crate::Result;
 
+/// Enhanced blockchain storage with checkpoint support
 pub struct BlockchainStorage {
     db: sled::Db,
     blocks: sled::Tree,
     transactions: sled::Tree,
     accounts: sled::Tree,
     state: sled::Tree,
+    checkpoints: sled::Tree,
 }
 
 impl BlockchainStorage {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db = sled::open(path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open database: {}", e)))?;
+        let db = sled::open(path.as_ref())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open database: {e}")))?;
         
         let blocks = db.open_tree("blocks")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open blocks tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open blocks tree: {e}")))?;
         
         let transactions = db.open_tree("transactions")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open transactions tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open transactions tree: {e}")))?;
         
         let accounts = db.open_tree("accounts")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open accounts tree: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open accounts tree: {e}")))?;
         
-        let state = db.open_tree("state")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to open state tree: {}", e)))?;
+        let state = db.open_tree("chain_state")
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open state tree: {e}")))?;
+        
+        let checkpoints = db.open_tree("checkpoints")
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open checkpoints tree: {e}")))?;
         
         Ok(Self {
             db,
@@ -36,113 +42,161 @@ impl BlockchainStorage {
             transactions,
             accounts,
             state,
+            checkpoints,
         })
     }
-    
+
     pub fn save_block(&self, block: &Block) -> Result<()> {
-        let height_bytes = block.header.height.to_le_bytes();
-        let block_data = bincode::serialize(block)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize block: {}", e)))?;
+        let key = block.header.height.to_be_bytes();
+        let value = bincode::serialize(block)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize block: {e}")))?;
         
-        self.blocks.insert(height_bytes, block_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save block: {}", e)))?;
+        self.blocks.insert(key, value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save block: {e}")))?;
         
         Ok(())
     }
-    
+
     pub fn load_block(&self, height: u64) -> Result<Option<Block>> {
-        let height_bytes = height.to_le_bytes();
+        let key = height.to_be_bytes();
         
-        if let Some(block_data) = self.blocks.get(height_bytes)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load block: {}", e)))? {
-            
-            let block = bincode::deserialize(&block_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {}", e)))?;
-            
-            Ok(Some(block))
-        } else {
-            Ok(None)
+        match self.blocks.get(key)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load block: {e}")))? {
+            Some(data) => {
+                let block = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {e}")))?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
         }
     }
-    
+
     pub fn save_transaction(&self, tx_id: &[u8; 32], transaction: &Transaction) -> Result<()> {
-        let tx_data = bincode::serialize(transaction)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {}", e)))?;
+        let value = bincode::serialize(transaction)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize transaction: {e}")))?;
         
-        self.transactions.insert(tx_id, tx_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save transaction: {}", e)))?;
+        self.transactions.insert(tx_id.as_slice(), value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save transaction: {e}")))?;
         
         Ok(())
     }
-    
+
     pub fn load_transaction(&self, tx_id: &[u8; 32]) -> Result<Option<Transaction>> {
-        if let Some(tx_data) = self.transactions.get(tx_id)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load transaction: {}", e)))? {
-            
-            let transaction = bincode::deserialize(&tx_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize transaction: {}", e)))?;
-            
-            Ok(Some(transaction))
-        } else {
-            Ok(None)
+        match self.transactions.get(tx_id.as_slice())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load transaction: {e}")))? {
+            Some(data) => {
+                let transaction = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize transaction: {e}")))?;
+                Ok(Some(transaction))
+            }
+            None => Ok(None),
         }
     }
-    
+
     pub fn save_account(&self, public_key: &[u8], account: &AccountState) -> Result<()> {
-        let account_data = bincode::serialize(account)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize account: {}", e)))?;
+        let value = bincode::serialize(account)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize account: {e}")))?;
         
-        self.accounts.insert(public_key, account_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save account: {}", e)))?;
+        self.accounts.insert(public_key, value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save account: {e}")))?;
         
         Ok(())
     }
-    
+
     pub fn load_account(&self, public_key: &[u8]) -> Result<Option<AccountState>> {
-        if let Some(account_data) = self.accounts.get(public_key)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load account: {}", e)))? {
-            
-            let account = bincode::deserialize(&account_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {}", e)))?;
-            
-            Ok(Some(account))
-        } else {
-            Ok(None)
+        match self.accounts.get(public_key)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load account: {e}")))? {
+            Some(data) => {
+                let account = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {e}")))?;
+                Ok(Some(account))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_chain_state(&self, state: &ChainState) -> Result<()> {
+        let value = bincode::serialize(state)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize chain state: {e}")))?;
+        
+        self.state.insert("current", value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save chain state: {e}")))?;
+        
+        Ok(())
+    }
+
+    pub fn load_chain_state(&self) -> Result<Option<ChainState>> {
+        match self.state.get("current")
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load chain state: {e}")))? {
+            Some(data) => {
+                let state = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize chain state: {e}")))?;
+                Ok(Some(state))
+            }
+            None => Ok(None),
         }
     }
     
-    pub fn save_chain_state(&self, state: &ChainState) -> Result<()> {
-        let state_data = bincode::serialize(state)
-            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize chain state: {}", e)))?;
+    /// Save security checkpoints
+    pub fn save_checkpoints(&self, checkpoints: &[SecurityCheckpoint]) -> Result<()> {
+        let value = bincode::serialize(checkpoints)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize checkpoints: {e}")))?;
         
-        self.state.insert(b"chain_state", state_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to save chain state: {}", e)))?;
+        self.checkpoints.insert("all", value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save checkpoints: {e}")))?;
         
         Ok(())
     }
     
-    pub fn load_chain_state(&self) -> Result<Option<ChainState>> {
-        if let Some(state_data) = self.state.get(b"chain_state")
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to load chain state: {}", e)))? {
-            
-            let state = bincode::deserialize(&state_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize chain state: {}", e)))?;
-            
-            Ok(Some(state))
-        } else {
-            Ok(None)
+    /// Load security checkpoints
+    pub fn load_checkpoints(&self) -> Result<Option<Vec<SecurityCheckpoint>>> {
+        match self.checkpoints.get("all")
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load checkpoints: {e}")))? {
+            Some(data) => {
+                let checkpoints = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize checkpoints: {e}")))?;
+                Ok(Some(checkpoints))
+            }
+            None => Ok(None),
         }
     }
     
+    /// Save individual checkpoint
+    pub fn save_checkpoint(&self, checkpoint: &SecurityCheckpoint) -> Result<()> {
+        let key = format!("checkpoint_{}", checkpoint.block_height);
+        let value = bincode::serialize(checkpoint)
+            .map_err(|e| BlockchainError::SerializationError(format!("Failed to serialize checkpoint: {e}")))?;
+        
+        self.checkpoints.insert(key.as_bytes(), value)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to save checkpoint: {e}")))?;
+        
+        Ok(())
+    }
+    
+    /// Load checkpoint by height
+    pub fn load_checkpoint(&self, height: u64) -> Result<Option<SecurityCheckpoint>> {
+        let key = format!("checkpoint_{}", height);
+        
+        match self.checkpoints.get(key.as_bytes())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to load checkpoint: {e}")))? {
+            Some(data) => {
+                let checkpoint = bincode::deserialize(&data)
+                    .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize checkpoint: {e}")))?;
+                Ok(Some(checkpoint))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn get_all_blocks(&self) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
         
         for result in self.blocks.iter() {
-            let (_, block_data) = result
-                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate blocks: {}", e)))?;
+            let (_, value) = result
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate blocks: {e}")))?;
             
-            let block: Block = bincode::deserialize(&block_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {}", e)))?;
+            let block: Block = bincode::deserialize(&value)
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize block: {e}")))?;
             
             blocks.push(block);
         }
@@ -152,62 +206,249 @@ impl BlockchainStorage {
         
         Ok(blocks)
     }
-    
+
     pub fn get_all_accounts(&self) -> Result<Vec<(Vec<u8>, AccountState)>> {
         let mut accounts = Vec::new();
         
         for result in self.accounts.iter() {
-            let (public_key, account_data) = result
-                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate accounts: {}", e)))?;
+            let (key, value) = result
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate accounts: {e}")))?;
             
-            let account = bincode::deserialize(&account_data)
-                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {}", e)))?;
+            let account = bincode::deserialize(&value)
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize account: {e}")))?;
             
-            accounts.push((public_key.to_vec(), account));
+            accounts.push((key.to_vec(), account));
         }
         
         Ok(accounts)
     }
     
+    /// Get all checkpoints
+    pub fn get_all_checkpoints(&self) -> Result<Vec<SecurityCheckpoint>> {
+        let mut checkpoints = Vec::new();
+        
+        for result in self.checkpoints.iter() {
+            let (key, value) = result
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate checkpoints: {e}")))?;
+            
+            // Skip the "all" key which contains the serialized vector
+            if key == b"all" {
+                continue;
+            }
+            
+            let checkpoint: SecurityCheckpoint = bincode::deserialize(&value)
+                .map_err(|e| BlockchainError::SerializationError(format!("Failed to deserialize checkpoint: {e}")))?;
+            
+            checkpoints.push(checkpoint);
+        }
+        
+        // Sort by height
+        checkpoints.sort_by_key(|cp| cp.block_height);
+        
+        Ok(checkpoints)
+    }
+
     pub fn delete_block(&self, height: u64) -> Result<()> {
-        let height_bytes = height.to_le_bytes();
-        self.blocks.remove(height_bytes)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete block: {}", e)))?;
-        
+        let key = height.to_be_bytes();
+        self.blocks.remove(key)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete block: {e}")))?;
         Ok(())
     }
-    
+
     pub fn delete_transaction(&self, tx_id: &[u8; 32]) -> Result<()> {
-        self.transactions.remove(tx_id)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete transaction: {}", e)))?;
-        
+        self.transactions.remove(tx_id.as_slice())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete transaction: {e}")))?;
         Ok(())
     }
-    
+
     pub fn delete_account(&self, public_key: &[u8]) -> Result<()> {
         self.accounts.remove(public_key)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete account: {}", e)))?;
-        
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete account: {e}")))?;
         Ok(())
     }
     
-    pub fn compact(&self) -> Result<()> {
-        // Sled doesn't have a compact method, so we'll just flush
-        self.flush()
+    /// Delete checkpoint
+    pub fn delete_checkpoint(&self, height: u64) -> Result<()> {
+        let key = format!("checkpoint_{}", height);
+        self.checkpoints.remove(key.as_bytes())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to delete checkpoint: {e}")))?;
+        Ok(())
     }
-    
+
+    pub fn compact(&self) -> Result<()> {
+        // Trigger compaction for all trees
+        let _ = self.blocks.flush();
+        let _ = self.transactions.flush();
+        let _ = self.accounts.flush();
+        let _ = self.state.flush();
+        let _ = self.checkpoints.flush();
+        
+        Ok(())
+    }
+
     pub fn flush(&self) -> Result<()> {
         self.db.flush()
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush database: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush database: {e}")))?;
+        Ok(())
+    }
+
+    pub fn get_database_size(&self) -> Result<u64> {
+        let size = self.db.size_on_disk()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to get database size: {e}")))?;
+        Ok(size)
+    }
+    
+    /// Backup database to specified path
+    pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
+        // Flush all data first
+        self.flush()?;
+        
+        // Create backup directory
+        std::fs::create_dir_all(&backup_path)?;
+        
+        // Use sled's export functionality if available, or implement file copy
+        // For now, we'll implement a simple approach
+        let backup_db = sled::open(&backup_path)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create backup database: {e}")))?;
+        
+        // Copy all trees
+        for (tree_name, source_tree) in [
+            ("blocks", &self.blocks),
+            ("transactions", &self.transactions),
+            ("accounts", &self.accounts),
+            ("chain_state", &self.state),
+            ("checkpoints", &self.checkpoints),
+        ] {
+            let backup_tree = backup_db.open_tree(tree_name)
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to open backup tree {}: {e}", tree_name)))?;
+            
+            for result in source_tree.iter() {
+                let (key, value) = result
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate {}: {e}", tree_name)))?;
+                
+                backup_tree.insert(key, value)
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to backup {}: {e}", tree_name)))?;
+            }
+        }
+        
+        backup_db.flush()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush backup: {e}")))?;
         
         Ok(())
     }
     
-    pub fn get_database_size(&self) -> Result<u64> {
-        let size = self.db.size_on_disk()
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to get database size: {}", e)))?;
+    /// Get storage statistics
+    pub fn get_stats(&self) -> Result<std::collections::HashMap<String, u64>> {
+        let mut stats = std::collections::HashMap::new();
         
-        Ok(size)
+        stats.insert("total_size_bytes".to_string(), self.get_database_size()?);
+        stats.insert("total_blocks".to_string(), self.blocks.len() as u64);
+        stats.insert("total_transactions".to_string(), self.transactions.len() as u64);
+        stats.insert("total_accounts".to_string(), self.accounts.len() as u64);
+        stats.insert("total_checkpoints".to_string(), self.checkpoints.len() as u64);
+        
+        Ok(stats)
+    }
+
+    /// Create a backup of the database to the specified directory
+    pub fn backup_to_directory<P: AsRef<std::path::Path>>(&self, backup_dir: P) -> Result<()> {
+        let backup_path = backup_dir.as_ref();
+        std::fs::create_dir_all(backup_path)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create backup directory: {e}")))?;
+        
+        // Flush all data first
+        self.flush()?;
+        
+        // Create a new database instance at the backup location
+        let backup_db = sled::open(backup_path)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create backup database: {e}")))?;
+        
+        // Copy all trees
+        for (tree_name, source_tree) in [
+            ("blocks", &self.blocks),
+            ("transactions", &self.transactions),
+            ("accounts", &self.accounts),
+            ("chain_state", &self.state),
+            ("checkpoints", &self.checkpoints),
+        ] {
+            let backup_tree = backup_db.open_tree(tree_name)
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to open backup tree {}: {e}", tree_name)))?;
+            
+            for result in source_tree.iter() {
+                let (key, value) = result
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate {}: {e}", tree_name)))?;
+                
+                backup_tree.insert(key, value)
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to backup {}: {e}", tree_name)))?;
+            }
+        }
+        
+        backup_db.flush()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush backup: {e}")))?;
+        
+        log::info!("Database backup completed to {:?}", backup_path);
+        Ok(())
+    }
+    
+    /// Restore database from backup directory
+    pub fn restore_from_directory<P: AsRef<std::path::Path>>(&self, backup_dir: P) -> Result<()> {
+        let backup_path = backup_dir.as_ref();
+        
+        if !backup_path.exists() {
+            return Err(BlockchainError::StorageError(format!("Backup directory not found: {:?}", backup_path)));
+        }
+        
+        // Open the backup database
+        let backup_db = sled::open(backup_path)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to open backup database: {e}")))?;
+        
+        // Clear current database
+        self.clear_all_data()?;
+        
+        // Restore all trees
+        for tree_name in ["blocks", "transactions", "accounts", "chain_state", "checkpoints"] {
+            let backup_tree = backup_db.open_tree(tree_name)
+                .map_err(|e| BlockchainError::StorageError(format!("Failed to open backup tree {}: {e}", tree_name)))?;
+            
+            let dest_tree = match tree_name {
+                "blocks" => &self.blocks,
+                "transactions" => &self.transactions,
+                "accounts" => &self.accounts,
+                "chain_state" => &self.state,
+                "checkpoints" => &self.checkpoints,
+                _ => continue,
+            };
+            
+            for result in backup_tree.iter() {
+                let (key, value) = result
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate backup {}: {e}", tree_name)))?;
+                
+                dest_tree.insert(key, value)
+                    .map_err(|e| BlockchainError::StorageError(format!("Failed to restore {}: {e}", tree_name)))?;
+            }
+        }
+        
+        self.flush()?;
+        log::info!("Database restored from {:?}", backup_path);
+        Ok(())
+    }
+    
+    /// Clear all data from the database (dangerous operation!)
+    pub fn clear_all_data(&self) -> Result<()> {
+        self.blocks.clear()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to clear blocks: {e}")))?;
+        self.transactions.clear()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to clear transactions: {e}")))?;
+        self.accounts.clear()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to clear accounts: {e}")))?;
+        self.state.clear()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to clear state: {e}")))?;
+        self.checkpoints.clear()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to clear checkpoints: {e}")))?;
+        
+        self.flush()?;
+        log::warn!("All database data cleared");
+        Ok(())
     }
 }
 

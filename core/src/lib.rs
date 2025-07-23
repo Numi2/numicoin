@@ -9,6 +9,7 @@ pub mod error;
 pub mod rpc;
 pub mod mempool;
 pub mod secure_storage;
+pub mod config;
 
 pub use block::{Block, BlockHeader};
 pub use transaction::{Transaction, TransactionType};
@@ -18,5 +19,6 @@ pub use error::BlockchainError;
 pub use rpc::RpcServer;
 pub use mempool::TransactionMempool;
 pub use secure_storage::SecureKeyStore;
+pub use config::{Config, NetworkConfig, MiningConfig, RpcConfig, SecurityConfig};
 
 pub type Result<T> = std::result::Result<T, BlockchainError>; 

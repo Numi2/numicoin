@@ -586,9 +586,8 @@ impl NumiBlockchain {
         
         // Validate all transactions
         for (i, transaction) in block.transactions.iter().enumerate() {
-            // AI Agent Note: Using placeholder values for basic validation
-            // In production, should look up actual account balance and nonce
-            if let Err(e) = transaction.validate(0, 0) {
+            // Validate in current blockchain context (balance, nonce, etc.)
+            if let Err(e) = self.validate_transaction_in_context(transaction).await {
                 return Err(BlockchainError::InvalidBlock(
                     format!("Transaction {} invalid: {}", i, e)));
             }

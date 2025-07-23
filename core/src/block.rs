@@ -220,8 +220,8 @@ mod tests {
     use crate::transaction::TransactionType;
     
     #[test]
-    fn test_block_creation() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_block_creation() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let transactions = vec![
             Transaction::new(
                 keypair.public_key.clone(),
@@ -244,11 +244,12 @@ mod tests {
         assert_eq!(block.header.height, 1);
         assert_eq!(block.header.difficulty, 2);
         assert_eq!(block.get_transaction_count(), 1);
+        Ok(())
     }
     
     #[test]
-    fn test_merkle_root_calculation() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_merkle_root_calculation() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let transactions = vec![
             Transaction::new(
                 keypair.public_key.clone(),
@@ -270,11 +271,12 @@ mod tests {
         
         let merkle_root = Block::calculate_merkle_root(&transactions);
         assert_ne!(merkle_root, [0u8; 32]);
+        Ok(())
     }
     
     #[test]
-    fn test_block_signing() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_block_signing() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let mut block = Block::new(
             1,
             [0u8; 32],
@@ -283,13 +285,14 @@ mod tests {
             keypair.public_key.clone(),
         );
         
-        block.sign(&keypair).unwrap();
-        assert!(block.verify_signature().unwrap());
+        block.sign(&keypair)?;
+        assert!(block.verify_signature()?);
+        Ok(())
     }
     
     #[test]
-    fn test_genesis_block() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_genesis_block() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let mut block = Block::new(
             0,
             [0u8; 32],
@@ -299,9 +302,10 @@ mod tests {
         );
         
         // Sign the genesis block before validation
-        block.sign(&keypair).unwrap();
+        block.sign(&keypair)?;
         
         assert!(block.is_genesis());
         assert!(block.validate(None).is_ok());
+        Ok(())
     }
 } 

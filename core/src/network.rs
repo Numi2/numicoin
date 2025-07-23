@@ -168,7 +168,8 @@ impl NetworkManager {
         // Create transport with noise encryption and yamux multiplexing
         let transport = tcp::tokio::Transport::default()
             .upgrade(upgrade::Version::V1Lazy)
-            .authenticate(noise::Config::new(&local_key).unwrap())
+            .authenticate(noise::Config::new(&local_key)
+                .map_err(|e| BlockchainError::NetworkError(format!("Failed to create noise config: {}", e)))?)
             .multiplex(yamux::Config::default())
             .boxed();
 

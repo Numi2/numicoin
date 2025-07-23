@@ -176,8 +176,8 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_transaction_creation() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_transaction_creation() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let tx = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -189,11 +189,12 @@ mod tests {
         
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.get_amount(), 100);
+        Ok(())
     }
     
     #[test]
-    fn test_transaction_signing() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_transaction_signing() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let mut tx = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -203,13 +204,14 @@ mod tests {
             1,
         );
         
-        tx.sign(&keypair).unwrap();
-        assert!(tx.verify_signature().unwrap());
+        tx.sign(&keypair)?;
+        assert!(tx.verify_signature()?);
+        Ok(())
     }
     
     #[test]
-    fn test_transaction_validation() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_transaction_validation() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let mut tx = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -219,9 +221,10 @@ mod tests {
             1,
         );
         
-        tx.sign(&keypair).unwrap();
+        tx.sign(&keypair)?;
         assert!(tx.validate(200, 1).is_ok());
         assert!(tx.validate(50, 1).is_err()); // Insufficient balance
         assert!(tx.validate(200, 2).is_err()); // Wrong nonce
+        Ok(())
     }
 } 

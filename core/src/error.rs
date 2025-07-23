@@ -15,6 +15,9 @@ pub enum BlockchainError {
     InsufficientBalance(String),
     BlockNotFound(String),
     MiningError(String),
+    // Additional error variants for comprehensive error handling
+    ConfigurationError(String),
+    ValidationError(String),
 }
 
 impl fmt::Display for BlockchainError {
@@ -32,6 +35,8 @@ impl fmt::Display for BlockchainError {
             BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {msg}"),
             BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {msg}"),
             BlockchainError::MiningError(msg) => write!(f, "Mining error: {msg}"),
+            BlockchainError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
+            BlockchainError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
         }
     }
 }

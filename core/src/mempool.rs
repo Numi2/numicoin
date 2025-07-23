@@ -501,9 +501,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transaction_addition() {
+    async fn test_transaction_addition() -> Result<()> {
         let mempool = TransactionMempool::new();
-        let keypair = Dilithium3Keypair::new().unwrap();
+        let keypair = Dilithium3Keypair::new()?;
         
         let mut transaction = Transaction::new(
             keypair.public_key.clone(),
@@ -513,19 +513,20 @@ mod tests {
             },
             1,
         );
-        transaction.sign(&keypair).unwrap();
+        transaction.sign(&keypair)?;
         
-        let result = mempool.add_transaction(transaction).await.unwrap();
+        let result = mempool.add_transaction(transaction).await?;
         assert_eq!(result, ValidationResult::Valid);
         
         let stats = mempool.get_stats();
         assert_eq!(stats.total_transactions, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_duplicate_transaction_rejection() {
+    async fn test_duplicate_transaction_rejection() -> Result<()> {
         let mempool = TransactionMempool::new();
-        let keypair = Dilithium3Keypair::new().unwrap();
+        let keypair = Dilithium3Keypair::new()?;
         
         let mut transaction = Transaction::new(
             keypair.public_key.clone(),
@@ -535,14 +536,15 @@ mod tests {
             },
             1,
         );
-        transaction.sign(&keypair).unwrap();
+        transaction.sign(&keypair)?;
         
         // Add first time - should succeed
-        let result1 = mempool.add_transaction(transaction.clone()).await.unwrap();
+        let result1 = mempool.add_transaction(transaction.clone()).await?;
         assert_eq!(result1, ValidationResult::Valid);
         
         // Add second time - should reject
-        let result2 = mempool.add_transaction(transaction).await.unwrap();
+        let result2 = mempool.add_transaction(transaction).await?;
         assert_eq!(result2, ValidationResult::DuplicateTransaction);
+        Ok(())
     }
 } 

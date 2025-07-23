@@ -575,10 +575,11 @@ mod tests {
 
     
     #[test]
-    fn test_miner_creation() {
-        let miner = Miner::new().unwrap();
+    fn test_miner_creation() -> Result<()> {
+        let miner = Miner::new()?;
         assert!(!miner.is_mining());
         assert!(!miner.is_paused());
+        Ok(())
     }
     
     #[test]
@@ -592,20 +593,21 @@ mod tests {
     }
     
     #[test]
-    fn test_mining_stats() {
-        let miner = Miner::new().unwrap();
+    fn test_mining_stats() -> Result<()> {
+        let miner = Miner::new()?;
         let stats = miner.get_stats();
         
         assert_eq!(stats.hash_rate, 0);
         assert_eq!(stats.total_hashes, 0);
         assert!(!stats.is_mining);
         assert_eq!(stats.blocks_mined, 0);
+        Ok(())
     }
     
     #[tokio::test]
-    async fn test_mining_simple_block() {
-        let mut miner = Miner::with_config(MiningConfig::low_power()).unwrap();
-        let keypair = Dilithium3Keypair::new().unwrap();
+    async fn test_mining_simple_block() -> Result<()> {
+        let mut miner = Miner::with_config(MiningConfig::low_power())?;
+        let keypair = Dilithium3Keypair::new()?;
         
         // Create simple transaction
         let transaction = crate::transaction::Transaction::new(
@@ -624,15 +626,16 @@ mod tests {
             vec![transaction],
             1, // Very low difficulty
             0,
-        ).unwrap();
+        )?;
         
         // Should eventually find a solution or timeout
         assert!(result.is_some() || result.is_none()); // Either works
+        Ok(())
     }
     
     #[test]
-    fn test_pause_resume() {
-        let miner = Miner::new().unwrap();
+    fn test_pause_resume() -> Result<()> {
+        let miner = Miner::new()?;
         
         // Initially not paused
         assert!(!miner.is_paused());
@@ -644,14 +647,16 @@ mod tests {
         // Resume when not paused should not change state
         miner.resume();
         assert!(!miner.is_paused());
+        Ok(())
     }
     
     #[test]
-    fn test_block_time_estimation() {
-        let miner = Miner::new().unwrap();
+    fn test_block_time_estimation() -> Result<()> {
+        let miner = Miner::new()?;
         
         // With zero hash rate, should return maximum duration
         let estimate = miner.estimate_block_time(10);
         assert!(estimate.as_secs() > 1000000); // Very large number
+        Ok(())
     }
 } 

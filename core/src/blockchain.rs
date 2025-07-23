@@ -586,9 +586,21 @@ impl NumiBlockchain {
         
         // Validate all transactions
         for (i, transaction) in block.transactions.iter().enumerate() {
-            // AI Agent Note: Using placeholder values for basic validation
-            // In production, should look up actual account balance and nonce
-            if let Err(e) = transaction.validate(0, 0) {
+            // Get current account state for proper validation
+            let account_state = self.accounts.get(&transaction.from)
+                .map(|state| state.clone())
+                .unwrap_or_else(|| AccountState {
+                    balance: 0,
+                    nonce: 0,
+                    staked_amount: 0,
+                    last_stake_time: Utc::now(),
+                    transaction_count: 0,
+                    total_received: 0,
+                    total_sent: 0,
+                });
+            
+            // Validate with actual account balance and nonce
+            if let Err(e) = transaction.validate(account_state.balance, account_state.nonce) {
                 return Err(BlockchainError::InvalidBlock(
                     format!("Transaction {} invalid: {}", i, e)));
             }
@@ -833,7 +845,7 @@ impl NumiBlockchain {
             state.total_blocks = best_block_meta.height + 1;
             state.cumulative_difficulty = best_block_meta.cumulative_difficulty;
             state.last_block_time = best_block_meta.block.header.timestamp;
-            state.current_difficulty = self.calculate_next_difficulty(best_block_meta.height);
+            state.current_difficulty = self.calculate_next_difficulty(best_block_meta.height)?;
             
             // Recalculate average block time
             self.update_average_block_time(best_block_meta.height).await;
@@ -866,18 +878,18 @@ impl NumiBlockchain {
     }
     
     /// Calculate next difficulty adjustment
-    fn calculate_next_difficulty(&self, height: u64) -> u32 {
+    fn calculate_next_difficulty(&self, height: u64) -> Result<u32> {
         if height < self.difficulty_adjustment_interval {
-            return 1; // Initial difficulty
+            return Ok(1); // Initial difficulty
         }
         
         if height % self.difficulty_adjustment_interval != 0 {
-            return self.state.read().current_difficulty; // No adjustment needed
+            return Ok(self.state.read().current_difficulty); // No adjustment needed
         }
         
         let block_times = self.block_times.read();
         if block_times.len() < self.difficulty_adjustment_interval as usize {
-            return self.state.read().current_difficulty;
+            return Ok(self.state.read().current_difficulty);
         }
         
         // Calculate average block time over adjustment interval
@@ -887,17 +899,20 @@ impl NumiBlockchain {
             .collect();
         
         if recent_times.len() < 2 {
-            return self.state.read().current_difficulty;
+            return Ok(self.state.read().current_difficulty);
         }
         
-        let time_diff = recent_times.first().unwrap().1 - recent_times.last().unwrap().1;
+        let time_diff = recent_times.first()
+            .ok_or_else(|| BlockchainError::ValidationError("No recent block times available".to_string()))?.1 
+            - recent_times.last()
+            .ok_or_else(|| BlockchainError::ValidationError("No recent block times available".to_string()))?.1;
         let actual_time = time_diff.num_seconds() as u64;
         let target_time = self.target_block_time.as_secs() * self.difficulty_adjustment_interval;
         
         let current_difficulty = self.state.read().current_difficulty;
         
         // Adjust difficulty based on actual vs target time
-        if actual_time < target_time / 2 {
+        let new_difficulty = if actual_time < target_time / 2 {
             // Blocks too fast - increase difficulty
             current_difficulty + 1
         } else if actual_time > target_time * 2 {
@@ -908,7 +923,9 @@ impl NumiBlockchain {
             let ratio = (target_time as f64) / (actual_time as f64);
             let adjustment = (current_difficulty as f64 * ratio) as u32;
             adjustment.max(1).min(current_difficulty + 5) // Limit large changes
-        }
+        };
+        
+        Ok(new_difficulty)
     }
     
     /// Update average block time tracking

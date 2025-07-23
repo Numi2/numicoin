@@ -53,7 +53,7 @@ impl Dilithium3Keypair {
         })
     }
     
-    /// Create keypair from existing secret key (for wallet loading)
+    /// Create keypair from existing secret key (requires both keys to be stored)
     pub fn from_secret_key(secret_key: &[u8]) -> Result<Self> {
         if secret_key.len() != DILITHIUM3_SECKEY_SIZE {
             return Err(BlockchainError::CryptographyError(
@@ -61,11 +61,32 @@ impl Dilithium3Keypair {
                        DILITHIUM3_SECKEY_SIZE, secret_key.len())));
         }
         
-        // AI Agent Note: In Dilithium, the public key cannot be easily derived from just the secret key
-        // This is a limitation of the current pqcrypto-dilithium crate
-        // For now, we'll return an error - proper key storage should save both keys
+        // In Dilithium, we need both secret and public keys
+        // This method should be used with a key storage system that saves both
+        // For now, we'll generate a new keypair and return an error
+        // TODO: Implement proper key storage system that saves both keys
         Err(BlockchainError::CryptographyError(
-            "Cannot derive public key from secret key in pqcrypto-dilithium. Store both keys.".to_string()))
+            "Cannot derive public key from secret key in Dilithium3. Use KeyStorage::load_keypair() instead.".to_string()))
+    }
+    
+    /// Create keypair from both secret and public keys (for key storage systems)
+    pub fn from_keys(secret_key: &[u8], public_key: &[u8]) -> Result<Self> {
+        if secret_key.len() != DILITHIUM3_SECKEY_SIZE {
+            return Err(BlockchainError::CryptographyError(
+                format!("Invalid secret key size: expected {}, got {}", 
+                       DILITHIUM3_SECKEY_SIZE, secret_key.len())));
+        }
+        
+        if public_key.len() != DILITHIUM3_PUBKEY_SIZE {
+            return Err(BlockchainError::CryptographyError(
+                format!("Invalid public key size: expected {}, got {}", 
+                       DILITHIUM3_PUBKEY_SIZE, public_key.len())));
+        }
+        
+        Ok(Self {
+            public_key: public_key.to_vec(),
+            secret_key: secret_key.to_vec(),
+        })
     }
     
     /// Sign message with Dilithium3 - returns detached signature
@@ -384,32 +405,29 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_dilithium3_keypair_generation() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_dilithium3_keypair_generation() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         assert_eq!(keypair.public_key.len(), DILITHIUM3_PUBKEY_SIZE);
         assert_eq!(keypair.secret_key.len(), DILITHIUM3_SECKEY_SIZE);
+        Ok(())
     }
     
     #[test]
-    fn test_dilithium3_sign_verify() {
-        let keypair = Dilithium3Keypair::new().unwrap();
+    fn test_dilithium3_sign_verify() -> Result<()> {
+        let keypair = Dilithium3Keypair::new()?;
         let message = b"Hello, quantum-safe world!";
         
-        let signature = keypair.sign(message).unwrap();
+        let signature = keypair.sign(message)?;
+        assert_eq!(signature.signature.len(), DILITHIUM3_SIGNATURE_SIZE);
+        assert_eq!(signature.public_key.len(), DILITHIUM3_PUBKEY_SIZE);
         
-        // Debug: Print actual sizes
-        println!("Signature size: {}, expected: {}", signature.signature.len(), DILITHIUM3_SIGNATURE_SIZE);
-        println!("Public key size: {}, expected: {}", signature.public_key.len(), DILITHIUM3_PUBKEY_SIZE);
-        
-        assert!(signature.is_valid_format());
-        
-        let valid = Dilithium3Keypair::verify(message, &signature).unwrap();
+        let valid = Dilithium3Keypair::verify(message, &signature)?;
         assert!(valid);
         
-        // Test with wrong message
         let wrong_message = b"Wrong message";
-        let invalid = Dilithium3Keypair::verify(wrong_message, &signature).unwrap();
+        let invalid = Dilithium3Keypair::verify(wrong_message, &signature)?;
         assert!(!invalid);
+        Ok(())
     }
     
     #[test]
@@ -427,13 +445,13 @@ mod tests {
     }
     
     #[test]
-    fn test_argon2id_pow() {
+    fn test_argon2id_pow() -> Result<()> {
         let config = Argon2Config::development(); // Fast for testing
         let data = b"test proof of work";
         let salt = b"testsalt12345678";
         
-        let result1 = argon2id_pow_hash(data, salt, &config).unwrap();
-        let result2 = argon2id_pow_hash(data, salt, &config).unwrap();
+        let result1 = argon2id_pow_hash(data, salt, &config)?;
+        let result2 = argon2id_pow_hash(data, salt, &config)?;
         
         // Deterministic with same input
         assert_eq!(result1, result2);
@@ -441,8 +459,9 @@ mod tests {
         
         // Different salt produces different result
         let salt2 = b"differentsalt123";
-        let result3 = argon2id_pow_hash(data, salt2, &config).unwrap();
+        let result3 = argon2id_pow_hash(data, salt2, &config)?;
         assert_ne!(result1, result3);
+        Ok(())
     }
     
     #[test]
@@ -462,7 +481,7 @@ mod tests {
     }
     
     #[test]
-    fn test_pow_verification() {
+    fn test_pow_verification() -> Result<()> {
         let header = b"test block header";
         let nonce = 12345u64;
         
@@ -470,8 +489,9 @@ mod tests {
         let target = generate_difficulty_target(1);
         
         // This might pass or fail depending on hash result
-        let result = verify_pow(header, nonce, &target);
-        assert!(result.is_ok());
+        let result = verify_pow(header, nonce, &target)?;
+        // Just check that it doesn't panic, actual result depends on hash
+        Ok(())
     }
     
     #[test]

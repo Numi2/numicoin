@@ -221,19 +221,22 @@ mod tests {
     use chrono::Utc;
     
     #[test]
-    fn test_storage_creation() {
-        let temp_dir = tempdir().unwrap();
-        let storage = BlockchainStorage::new(temp_dir.path()).unwrap();
+    fn test_storage_creation() -> Result<()> {
+        let temp_dir = tempdir()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create temp dir: {}", e)))?;
+        let storage = BlockchainStorage::new(temp_dir.path())?;
         // Database size might be 0 initially, so we'll just check that it doesn't panic
-        let _size = storage.get_database_size().unwrap();
+        let _size = storage.get_database_size()?;
+        Ok(())
     }
     
     #[test]
-    fn test_block_storage() {
-        let temp_dir = tempdir().unwrap();
-        let storage = BlockchainStorage::new(temp_dir.path()).unwrap();
+    fn test_block_storage() -> Result<()> {
+        let temp_dir = tempdir()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create temp dir: {}", e)))?;
+        let storage = BlockchainStorage::new(temp_dir.path())?;
         
-        let keypair = Dilithium3Keypair::new().unwrap();
+        let keypair = Dilithium3Keypair::new()?;
         let block = Block::new(
             1,
             [0u8; 32],
@@ -242,18 +245,21 @@ mod tests {
             keypair.public_key.clone(),
         );
         
-        storage.save_block(&block).unwrap();
-        let loaded_block = storage.load_block(1).unwrap().unwrap();
+        storage.save_block(&block)?;
+        let loaded_block = storage.load_block(1)?.ok_or_else(|| 
+            BlockchainError::StorageError("Failed to load block".to_string()))?;
         
         assert_eq!(block.header.height, loaded_block.header.height);
+        Ok(())
     }
     
     #[test]
-    fn test_transaction_storage() {
-        let temp_dir = tempdir().unwrap();
-        let storage = BlockchainStorage::new(temp_dir.path()).unwrap();
+    fn test_transaction_storage() -> Result<()> {
+        let temp_dir = tempdir()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create temp dir: {}", e)))?;
+        let storage = BlockchainStorage::new(temp_dir.path())?;
         
-        let keypair = Dilithium3Keypair::new().unwrap();
+        let keypair = Dilithium3Keypair::new()?;
         let tx = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -263,16 +269,19 @@ mod tests {
             1,
         );
         
-        storage.save_transaction(&tx.id, &tx).unwrap();
-        let loaded_tx = storage.load_transaction(&tx.id).unwrap().unwrap();
+        storage.save_transaction(&tx.id, &tx)?;
+        let loaded_tx = storage.load_transaction(&tx.id)?.ok_or_else(|| 
+            BlockchainError::StorageError("Failed to load transaction".to_string()))?;
         
         assert_eq!(tx.id, loaded_tx.id);
+        Ok(())
     }
     
     #[test]
-    fn test_account_storage() {
-        let temp_dir = tempdir().unwrap();
-        let storage = BlockchainStorage::new(temp_dir.path()).unwrap();
+    fn test_account_storage() -> Result<()> {
+        let temp_dir = tempdir()
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create temp dir: {}", e)))?;
+        let storage = BlockchainStorage::new(temp_dir.path())?;
         
         let account = AccountState {
             balance: 1000,
@@ -285,9 +294,11 @@ mod tests {
         };
         
         let public_key = vec![1, 2, 3, 4];
-        storage.save_account(&public_key, &account).unwrap();
-        let loaded_account = storage.load_account(&public_key).unwrap().unwrap();
+        storage.save_account(&public_key, &account)?;
+        let loaded_account = storage.load_account(&public_key)?.ok_or_else(|| 
+            BlockchainError::StorageError("Failed to load account".to_string()))?;
         
         assert_eq!(account.balance, loaded_account.balance);
+        Ok(())
     }
 } 

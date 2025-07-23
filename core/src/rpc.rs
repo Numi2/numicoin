@@ -20,7 +20,7 @@ use crate::transaction::{Transaction, TransactionType};
 use crate::mempool::ValidationResult;
 use crate::network::{NetworkManager, NetworkManagerHandle};
 use crate::miner::Miner;
-use crate::Result;
+use crate::{Result, BlockchainError};
 
 // AI Agent Note: This is a production-ready RPC server implementation
 // Security features implemented:
@@ -435,7 +435,8 @@ impl RpcServer {
             .layer(TimeoutLayer::new(Duration::from_secs(30)))
             .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB limit
             .layer(CorsLayer::new()
-                .allow_origin("http://localhost:3000".parse::<warp::http::HeaderValue>().unwrap())
+                .allow_origin("http://localhost:3000".parse::<warp::http::HeaderValue>()
+                .map_err(|e| BlockchainError::ConfigurationError(format!("Invalid CORS origin: {}", e)))?)
                 .allow_methods([warp::http::Method::GET, warp::http::Method::POST])
                 .allow_headers([warp::http::header::CONTENT_TYPE]))
             .service(warp::service(routes.clone()));
@@ -539,7 +540,8 @@ impl RpcServer {
         warp::addr::remote()
             .and(with_rpc_server(rpc_server))
             .and_then(|addr: Option<SocketAddr>, rpc_server: Arc<RpcServer>| async move {
-                let client_addr = addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+                let client_addr = addr.unwrap_or_else(|| "127.0.0.1:0".parse()
+            .unwrap_or_else(|_| "127.0.0.1:8080".parse().unwrap()));
                 
                 // Check if IP is blocked
                 if let Some(blocked_until) = rpc_server.blocked_ips.get(&client_addr) {

@@ -1,49 +1,60 @@
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum BlockchainError {
+    #[error("Invalid block: {0}")]
     InvalidBlock(String),
+
+    #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
+
+    #[error("Storage error: {0}")]
     StorageError(String),
+
+    #[error("Network error: {0}")]
     NetworkError(String),
+
+    #[error("Consensus error: {0}")]
     ConsensusError(String),
+
+    #[error("Cryptography error: {0}")]
     CryptographyError(String),
-    // AI Agent Note: Added missing error variants for production readiness
+
+    #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    #[error("Invalid signature: {0}")]
     InvalidSignature(String),
+
+    #[error("Invalid nonce: expected {expected}, found {found}")]
     InvalidNonce { expected: u64, found: u64 },
+
+    #[error("Insufficient balance: {0}")]
     InsufficientBalance(String),
+
+    #[error("Block not found: {0}")]
     BlockNotFound(String),
+
+    #[error("Mining error: {0}")]
     MiningError(String),
+
+    #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("Invalid backup: {0}")]
     InvalidBackup(String),
+
+    #[error("IO error: {0}")]
     IoError(String),
+
+    #[error("Task join error: {0}")]
     TaskJoinError(String),
 }
 
-impl fmt::Display for BlockchainError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BlockchainError::InvalidBlock(msg) => write!(f, "Invalid block: {msg}"),
-            BlockchainError::InvalidTransaction(msg) => write!(f, "Invalid transaction: {msg}"),
-            BlockchainError::StorageError(msg) => write!(f, "Storage error: {msg}"),
-            BlockchainError::NetworkError(msg) => write!(f, "Network error: {msg}"),
-            BlockchainError::ConsensusError(msg) => write!(f, "Consensus error: {msg}"),
-            BlockchainError::CryptographyError(msg) => write!(f, "Cryptography error: {msg}"),
-            BlockchainError::SerializationError(msg) => write!(f, "Serialization error: {msg}"),
-            BlockchainError::InvalidSignature(msg) => write!(f, "Invalid signature: {msg}"),
-            BlockchainError::InvalidNonce { expected, found } => write!(f, "Invalid nonce: expected {expected}, found {found}"),
-            BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {msg}"),
-            BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {msg}"),
-            BlockchainError::MiningError(msg) => write!(f, "Mining error: {msg}"),
-            BlockchainError::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
-            BlockchainError::InvalidBackup(msg) => write!(f, "Invalid backup: {msg}"),
-            BlockchainError::IoError(msg) => write!(f, "IO error: {msg}"),
-            BlockchainError::TaskJoinError(msg) => write!(f, "Task join error: {msg}"),
-        }
-    }
-}
+// The `thiserror::Error` derive automatically implements `std::error::Error` and
+// `fmt::Display`, so the manual implementations are no longer necessary.
 
+// Existing `From` conversions are kept for convenience and to minimise refactor scope.
 // Add From implementations for error conversions
 impl From<std::io::Error> for BlockchainError {
     fn from(err: std::io::Error) -> Self {
@@ -80,8 +91,6 @@ impl From<std::path::StripPrefixError> for BlockchainError {
         BlockchainError::InvalidArgument(err.to_string())
     }
 }
-
-impl std::error::Error for BlockchainError {}
 
 // Convert tokio JoinError into our error type
 impl From<tokio::task::JoinError> for BlockchainError {

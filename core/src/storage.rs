@@ -356,37 +356,18 @@ impl BlockchainStorage {
         std::fs::create_dir_all(backup_path)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to create backup directory: {e}")))?;
         
-        // Flush all data first
+        // Flush on-disk state to ensure a consistent view
         self.flush()?;
-        
-        // Create a new database instance at the backup location
-        let backup_db = sled::open(backup_path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to create backup database: {e}")))?;
-        
-        // Copy all trees
-        for (tree_name, source_tree) in [
-            ("blocks", &self.blocks),
-            ("transactions", &self.transactions),
-            ("accounts", &self.accounts),
-            ("chain_state", &self.state),
-            ("checkpoints", &self.checkpoints),
-        ] {
-            let backup_tree = backup_db.open_tree(tree_name)
-                .map_err(|e| BlockchainError::StorageError(format!("Failed to open backup tree {}: {e}", tree_name)))?;
-            
-            for result in source_tree.iter() {
-                let (key, value) = result
-                    .map_err(|e| BlockchainError::StorageError(format!("Failed to iterate {}: {e}", tree_name)))?;
-                
-                backup_tree.insert(key, value)
-                    .map_err(|e| BlockchainError::StorageError(format!("Failed to backup {}: {e}", tree_name)))?;
-            }
-        }
-        
-        backup_db.flush()
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to flush backup: {e}")))?;
-        
-        log::info!("Database backup completed to {:?}", backup_path);
+
+        // Since sled supports crash-safe checkpoints, use the built-in facility instead of
+        // copying live files while the database is open. This prevents torn/corrupted
+        // snapshots that could arise from long write transactions.
+
+        self.db
+            .checkpoint(backup_path)
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create checkpoint: {e}")))?;
+
+        log::info!("✅ Database checkpoint created at {:?}", backup_path);
         Ok(())
     }
     

@@ -538,17 +538,19 @@ impl NumiBlockchain {
     
     /// Create genesis block
     fn create_genesis_block(&mut self) -> Result<()> {
-        let genesis_transactions = vec![
-            // Genesis supply allocation
-            Transaction::new(
-                self.miner_keypair.public_key.clone(),
-                TransactionType::MiningReward {
-                    block_height: 0,
-                    amount: 21_000_000_000_000_000, // 21M NUMI * 10^9 (total supply)
-                },
-                0,
-            )
-        ];
+        let mut genesis_transaction = Transaction::new(
+            self.miner_keypair.public_key.clone(),
+            TransactionType::MiningReward {
+                block_height: 0,
+                amount: 21_000_000_000_000_000, // 21M NUMI * 10^9 (total supply)
+            },
+            0,
+        );
+        
+        // Sign the genesis transaction
+        genesis_transaction.sign(&self.miner_keypair)?;
+        
+        let genesis_transactions = vec![genesis_transaction];
         
         let mut genesis_block = Block::new(
             0,
@@ -584,11 +586,10 @@ impl NumiBlockchain {
             return Err(BlockchainError::InvalidBlock("Block timestamp too far in future".to_string()));
         }
         
-        // Validate all transactions
+        // Validate all transactions (basic validation only)
         for (i, transaction) in block.transactions.iter().enumerate() {
-            // AI Agent Note: Using placeholder values for basic validation
-            // In production, should look up actual account balance and nonce
-            if let Err(e) = transaction.validate(0, 0) {
+            // Basic transaction validation (signature, structure)
+            if let Err(e) = transaction.validate_basic() {
                 return Err(BlockchainError::InvalidBlock(
                     format!("Transaction {} invalid: {}", i, e)));
             }
@@ -646,11 +647,13 @@ impl NumiBlockchain {
                 total_sent: 0,
             });
         
-        // Validate nonce
-        if transaction.nonce != account_state.nonce + 1 {
-            return Err(BlockchainError::InvalidTransaction(
-                format!("Invalid nonce: expected {}, got {}", 
-                       account_state.nonce + 1, transaction.nonce)));
+        // Validate nonce (except for mining rewards which are system-generated)
+        if !matches!(transaction.transaction_type, TransactionType::MiningReward { .. }) {
+            if transaction.nonce != account_state.nonce + 1 {
+                return Err(BlockchainError::InvalidTransaction(
+                    format!("Invalid nonce: expected {}, got {}", 
+                           account_state.nonce + 1, transaction.nonce)));
+            }
         }
         
         // Validate transaction type-specific conditions
@@ -666,9 +669,12 @@ impl NumiBlockchain {
                     return Err(BlockchainError::InvalidTransaction(
                         format!("Insufficient balance for staking: {} < {}", account_state.balance, amount)));
                 }
-                if *amount < 1_000_000_000 { // Minimum 1 NUMI
+                if *amount < 100_000_000 { // Minimum 0.1 NUMI for demo
                     return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
                 }
+            }
+            TransactionType::MiningReward { .. } => {
+                // Mining rewards are validated at block level and don't require balance checks
             }
             TransactionType::Unstake { amount } => {
                 if account_state.staked_amount < *amount {

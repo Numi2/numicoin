@@ -126,6 +126,16 @@ impl Transaction {
         Ok(())
     }
     
+    /// Basic validation that only checks signature and structure (for block validation)
+    pub fn validate_basic(&self) -> Result<()> {
+        // Verify signature
+        if !self.verify_signature()? {
+            return Err(BlockchainError::InvalidSignature("Transaction signature verification failed".to_string()));
+        }
+        
+        Ok(())
+    }
+    
     pub fn get_amount(&self) -> u64 {
         match &self.transaction_type {
             TransactionType::Transfer { amount, .. } => *amount,

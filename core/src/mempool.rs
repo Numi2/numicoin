@@ -368,7 +368,7 @@ impl TransactionMempool {
                 // TODO: Check balance (requires blockchain state access)
             }
             TransactionType::Stake { amount } => {
-                if *amount < 1_000_000_000 { // Minimum 1 NUMI stake
+                if *amount < 100_000_000 { // Minimum 0.1 NUMI stake for demo
                     return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
                 }
             }

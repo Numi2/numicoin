@@ -174,7 +174,7 @@ impl Miner {
         &mut self,
         height: u64,
         previous_hash: BlockHash,
-        transactions: Vec<Transaction>,
+        mut transactions: Vec<Transaction>,
         difficulty: u32,
         start_nonce: u64,
     ) -> Result<Option<MiningResult>> {
@@ -183,6 +183,18 @@ impl Miner {
         }
         
         log::info!("🔨 Starting multi-threaded mining for block {} (difficulty: {})", height, difficulty);
+        
+        // Add mining reward transaction at the beginning
+        let mut mining_reward = Transaction::new(
+            self.keypair.public_key.clone(),
+            crate::transaction::TransactionType::MiningReward {
+                block_height: height,
+                amount: 50_000_000_000, // 50 NUMI mining reward
+            },
+            0, // Mining rewards don't use nonce
+        );
+        mining_reward.sign(&self.keypair)?;
+        transactions.insert(0, mining_reward);
         
         // Prepare mining parameters
         let difficulty_target = generate_difficulty_target(difficulty);

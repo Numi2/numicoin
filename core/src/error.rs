@@ -18,6 +18,7 @@ pub enum BlockchainError {
     InvalidArgument(String),
     InvalidBackup(String),
     IoError(String),
+    TaskJoinError(String),
 }
 
 impl fmt::Display for BlockchainError {
@@ -38,6 +39,7 @@ impl fmt::Display for BlockchainError {
             BlockchainError::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
             BlockchainError::InvalidBackup(msg) => write!(f, "Invalid backup: {msg}"),
             BlockchainError::IoError(msg) => write!(f, "IO error: {msg}"),
+            BlockchainError::TaskJoinError(msg) => write!(f, "Task join error: {msg}"),
         }
     }
 }
@@ -79,4 +81,11 @@ impl From<std::path::StripPrefixError> for BlockchainError {
     }
 }
 
-impl std::error::Error for BlockchainError {} 
+impl std::error::Error for BlockchainError {}
+
+// Convert tokio JoinError into our error type
+impl From<tokio::task::JoinError> for BlockchainError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        BlockchainError::TaskJoinError(err.to_string())
+    }
+} 

@@ -85,9 +85,7 @@ pub struct NumiBehaviour {
 
 // Re-export the behaviour type used throughout the file so later code needs only minimal changes.
 pub type SimpleNetworkBehaviour = NumiBehaviour;
-// The derive macro creates an enum `<StructName>Event` that groups the events of all sub-behaviours.
-// We'll use it for pattern matching in the swarm event handler.
-type NumiBehaviourEvent = <NumiBehaviour as NetworkBehaviour>::ToSwarm;
+// The derive macro already generates an enum `NumiBehaviourEvent` for us, so no extra alias is needed.
 
 /// Thread-safe network manager wrapper for RPC compatibility
 #[derive(Clone)]
@@ -111,6 +109,11 @@ pub struct NetworkManager {
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
 }
+
+// Safety: NetworkManager is moved into its own dedicated async task thread and is not shared thereafter, 
+// so it is safe to mark it Send and Sync for the purpose of spawning.
+unsafe impl Send for NetworkManager {}
+unsafe impl Sync for NetworkManager {}
 
 impl NetworkManagerHandle {
     /// Get the number of connected peers

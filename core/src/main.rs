@@ -724,16 +724,17 @@ async fn backup_command(config: Config, output: PathBuf, compress: bool) -> Resu
  
     if compress {
         let compressed_path = output.with_extension("tar.gz");
+        let compressed_path_clone = compressed_path.clone();
         let out_dir = output.clone();
         spawn_blocking(move || -> Result<()> {
-            let tar_gz = std::fs::File::create(&compressed_path)?;
+            let tar_gz = std::fs::File::create(&compressed_path_clone)?;
             let enc = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
             tar.append_dir_all(".", &out_dir)?;
             tar.finish()?;
 
             // Ensure archive exists before deleting raw backup
-            if compressed_path.exists() {
+            if compressed_path_clone.exists() {
                 std::fs::remove_dir_all(&out_dir)?;
             }
             Ok(())

@@ -922,15 +922,15 @@ impl NumiBlockchain {
         // Validate transaction type-specific conditions
         match &transaction.transaction_type {
             TransactionType::Transfer { amount, .. } => {
-                if account_state.balance < *amount {
+                if account_state.balance < (*amount + transaction.fee) {
                     return Err(BlockchainError::InvalidTransaction(
-                        format!("Insufficient balance: {} < {}", account_state.balance, amount)));
+                        format!("Insufficient balance: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
                 }
             }
             TransactionType::Stake { amount, validator: _ } => {
-                if account_state.balance < *amount {
+                if account_state.balance < (*amount + transaction.fee) {
                     return Err(BlockchainError::InvalidTransaction(
-                        format!("Insufficient balance for staking: {} < {}", account_state.balance, amount)));
+                        format!("Insufficient balance for staking: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
                 }
                 if *amount < 1_000_000_000 { // Minimum 1 NUMI
                     return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
@@ -949,6 +949,10 @@ impl NumiBlockchain {
                 if account_state.staked_amount < 1_000_000_000_000 { // Minimum 1000 NUMI staked
                     return Err(BlockchainError::InvalidTransaction(
                         "Insufficient stake for governance participation".to_string()));
+                }
+                if account_state.balance < transaction.fee {
+                    return Err(BlockchainError::InvalidTransaction(
+                        "Insufficient balance to cover governance transaction fee".to_string()));
                 }
             }
             TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
@@ -982,8 +986,8 @@ impl NumiBlockchain {
         
         match &transaction.transaction_type {
             TransactionType::Transfer { to, amount, memo: _ } => {
-                // Deduct from sender
-                sender_state.balance -= amount;
+                // Deduct amount and fee from sender
+                sender_state.balance -= amount + transaction.fee;
                 sender_state.nonce += 1;
                 sender_state.transaction_count += 1;
                 sender_state.total_sent += amount;
@@ -1011,7 +1015,7 @@ impl NumiBlockchain {
             }
             
             TransactionType::Stake { amount, validator: _ } => {
-                sender_state.balance -= amount;
+                sender_state.balance -= amount + transaction.fee;
                 sender_state.staked_amount += amount;
                 sender_state.last_stake_time = Utc::now();
                 sender_state.nonce += 1;
@@ -1020,7 +1024,7 @@ impl NumiBlockchain {
             
             TransactionType::Unstake { amount, force: _ } => {
                 sender_state.staked_amount -= amount;
-                sender_state.balance += amount;
+                sender_state.balance += amount - transaction.fee;
                 sender_state.nonce += 1;
                 sender_state.transaction_count += 1;
             }
@@ -1035,6 +1039,7 @@ impl NumiBlockchain {
             }
             
             TransactionType::Governance { .. } => {
+                sender_state.balance -= transaction.fee;
                 sender_state.nonce += 1;
                 sender_state.transaction_count += 1;
             }
@@ -1056,7 +1061,7 @@ impl NumiBlockchain {
             match &transaction.transaction_type {
                 TransactionType::Transfer { to, amount, memo: _ } => {
                     // Restore sender balance
-                    sender_state.balance += amount;
+                    sender_state.balance += amount + transaction.fee;
                     sender_state.nonce -= 1;
                     sender_state.transaction_count -= 1;
                     sender_state.total_sent -= amount;
@@ -1070,7 +1075,7 @@ impl NumiBlockchain {
                 }
                 
                 TransactionType::Stake { amount, validator: _ } => {
-                    sender_state.balance += amount;
+                    sender_state.balance += amount + transaction.fee;
                     sender_state.staked_amount -= amount;
                     sender_state.nonce -= 1;
                     sender_state.transaction_count -= 1;
@@ -1078,7 +1083,7 @@ impl NumiBlockchain {
                 
                 TransactionType::Unstake { amount, force: _ } => {
                     sender_state.staked_amount += amount;
-                    sender_state.balance -= amount;
+                    sender_state.balance -= amount - transaction.fee;
                     sender_state.nonce -= 1;
                     sender_state.transaction_count -= 1;
                 }
@@ -1093,6 +1098,7 @@ impl NumiBlockchain {
                 }
                 
                 TransactionType::Governance { .. } => {
+                    sender_state.balance += transaction.fee;
                     sender_state.nonce -= 1;
                     sender_state.transaction_count -= 1;
                 }
@@ -1517,7 +1523,9 @@ impl NumiBlockchain {
                 
                 // Validate mining reward amount
                 let expected_reward = self.get_mining_reward(block.header.height);
-                if transaction.get_amount() > expected_reward + total_fees {
+                let total_fees = block.get_total_fees();
+                let max_reward = expected_reward.saturating_add(total_fees);
+                if transaction.get_amount() > max_reward {
                     return Err(BlockchainError::InvalidBlock("Invalid mining reward amount".to_string()));
                 }
             } else {

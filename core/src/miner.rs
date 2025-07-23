@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHash};
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, TransactionType};
 use crate::crypto::{generate_difficulty_target, verify_pow, Dilithium3Keypair, Argon2Config};
 use crate::error::BlockchainError;
 use crate::{Result};
@@ -188,7 +188,36 @@ impl Miner {
         let mut block = Block::new(
             height,
             previous_hash,
-            transactions,
+            {
+                // Calculate economic incentives: base block reward + total collected fees
+                let mut txs = transactions;
+                let total_fees: u64 = txs.iter().map(|tx| tx.fee).sum();
+
+                // Determine base block reward according to halving schedule
+                let base_reward = Self::calculate_block_reward(height);
+                let reward_amount = base_reward.saturating_add(total_fees);
+
+                // Construct the reward transaction addressed to the miner
+                let mut reward_tx = Transaction::new_with_fee(
+                    self.keypair.public_key_bytes().to_vec(),
+                    TransactionType::MiningReward {
+                        block_height: height,
+                        amount: reward_amount,
+                        pool_address: None,
+                    },
+                    0, // nonce for system-generated tx
+                    0, // fee is zero for reward
+                    0, // gas_limit
+                );
+                // Sign the reward transaction with the miner's keypair
+                if let Err(e) = reward_tx.sign(&self.keypair) {
+                    log::error!("Failed to sign mining reward transaction: {}", e);
+                }
+
+                // Insert reward transaction as the very first transaction in the block
+                txs.insert(0, reward_tx);
+                txs
+            },
             difficulty,
             self.keypair.public_key_bytes().to_vec(),
         );
@@ -532,6 +561,18 @@ impl Miner {
         let estimated_seconds = target_hashes / stats.hash_rate;
         
         std::time::Duration::from_secs(estimated_seconds)
+    }
+    
+    /// Calculate block subsidy based on Bitcoin-like halving schedule
+    fn calculate_block_reward(height: u64) -> u64 {
+        const HALVING_INTERVAL: u64 = 210_000;
+        const INITIAL_REWARD: u64 = 50_000_000_000; // 50 NUMI ( * 10^9 )
+
+        let halvings = height / HALVING_INTERVAL;
+        if halvings >= 64 {
+            return 0;
+        }
+        INITIAL_REWARD >> halvings
     }
     
     // Hardware monitoring and optimization methods

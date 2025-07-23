@@ -164,7 +164,7 @@ impl TransactionMempool {
             // Try to evict lower-priority transactions
             if !self.make_space_for_transaction(tx_size, fee_rate).await {
                 return Ok(ValidationResult::FeeTooLow { 
-                    minimum: self.min_fee_rate, 
+                    minimum: self.dynamic_min_fee_rate(), 
                     got: fee_rate 
                 });
             }
@@ -211,6 +211,8 @@ impl TransactionMempool {
 
     /// Get highest priority transactions for block creation
     pub fn get_transactions_for_block(&self, max_block_size: usize, max_transactions: usize) -> Vec<Transaction> {
+        // Ensure priorities are up-to-date before selection
+        self.refresh_priorities();
         let mut selected = Vec::new();
         let mut total_size = 0;
         let priority_queue = self.priority_queue.read();
@@ -333,10 +335,66 @@ impl TransactionMempool {
             *self.rejected_count_1h.write() = 0;
             *self.last_cleanup.write() = now;
         }
+        // Re-compute priorities after cleanup so that age penalties are updated
+        self.refresh_priorities();
     }
 
     // Private helper methods
     
+    /// Calculates a dynamic minimum fee rate based on current mempool utilisation.
+    /// This creates economic incentives by raising the bar for inclusion when the
+    /// mempool is congested and lowering it when there is plenty of capacity.
+    fn dynamic_min_fee_rate(&self) -> u64 {
+        let base = self.min_fee_rate;
+        let size_utilisation = *self.current_size_bytes.read() as f64 / self.max_mempool_size as f64;
+        let count_utilisation = self.transactions.len() as f64 / self.max_transactions as f64;
+        let utilisation = size_utilisation.max(count_utilisation);
+
+        if utilisation > 0.90 {
+            base.saturating_mul(5)
+        } else if utilisation > 0.75 {
+            base.saturating_mul(3)
+        } else if utilisation > 0.50 {
+            base.saturating_mul(2)
+        } else {
+            base
+        }
+    }
+
+    /// Refresh the priority queue by applying an age‐based penalty to every
+    /// transaction.  Newer transactions keep their full fee_rate while older
+    /// transactions gradually lose priority, ensuring liveness and discouraging
+    /// spam with low fees that linger in the mempool.
+    pub fn refresh_priorities(&self) {
+        let now = Instant::now();
+        let mut new_queue: BTreeMap<TransactionPriority, TransactionId> = BTreeMap::new();
+
+        // Recompute priority for every transaction
+        for entry in self.transactions.iter() {
+            let age_secs = now.duration_since(entry.added_at).as_secs();
+            // Older transactions get a *lower* effective priority.  Because we
+            // iterate over the queue in reverse order (highest first), we store
+            // u64::MAX - age to invert the ordering so that large values mean
+            // 2higher priority2.
+            let age_penalty = u64::MAX - age_secs;
+
+            let new_priority = TransactionPriority {
+                fee_rate: entry.fee_rate,
+                age_penalty,
+                tx_id: *entry.key(),
+            };
+
+            // Update the entry's cached priority so removal logic remains valid
+            if let Some(mut e) = self.transactions.get_mut(entry.key()) {
+                e.priority = new_priority.clone();
+            }
+
+            new_queue.insert(new_priority, *entry.key());
+        }
+
+        *self.priority_queue.write() = new_queue;
+    }
+
     async fn validate_transaction(&self, transaction: &Transaction) -> Result<ValidationResult> {
         // Check transaction size
         let tx_size = self.calculate_transaction_size(transaction);
@@ -415,8 +473,9 @@ impl TransactionMempool {
             return false;
         }
         
-        // Check if fee meets minimum
-        fee_rate >= self.min_fee_rate
+        // Check if fee meets dynamic minimum
+        let min_fee = self.dynamic_min_fee_rate();
+        fee_rate >= min_fee
     }
 
     async fn make_space_for_transaction(&self, tx_size: usize, fee_rate: u64) -> bool {

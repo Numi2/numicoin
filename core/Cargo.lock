@@ -2929,6 +2929,7 @@ dependencies = [
  "dns-lookup",
  "env_logger",
  "flate2",
+ "fs2",
  "futures",
  "hex",
  "hickory-resolver 0.24.4",

@@ -20,32 +20,32 @@ pub enum BlockchainError {
 impl fmt::Display for BlockchainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BlockchainError::InvalidBlock(msg) => write!(f, "Invalid block: {}", msg),
-            BlockchainError::InvalidTransaction(msg) => write!(f, "Invalid transaction: {}", msg),
-            BlockchainError::StorageError(msg) => write!(f, "Storage error: {}", msg),
-            BlockchainError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            BlockchainError::ConsensusError(msg) => write!(f, "Consensus error: {}", msg),
-            BlockchainError::CryptographyError(msg) => write!(f, "Cryptography error: {}", msg),
-            BlockchainError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
-            BlockchainError::InvalidSignature(msg) => write!(f, "Invalid signature: {}", msg),
-            BlockchainError::InvalidNonce { expected, found } => write!(f, "Invalid nonce: expected {}, found {}", expected, found),
-            BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {}", msg),
-            BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {}", msg),
-            BlockchainError::MiningError(msg) => write!(f, "Mining error: {}", msg),
+            BlockchainError::InvalidBlock(msg) => write!(f, "Invalid block: {msg}"),
+            BlockchainError::InvalidTransaction(msg) => write!(f, "Invalid transaction: {msg}"),
+            BlockchainError::StorageError(msg) => write!(f, "Storage error: {msg}"),
+            BlockchainError::NetworkError(msg) => write!(f, "Network error: {msg}"),
+            BlockchainError::ConsensusError(msg) => write!(f, "Consensus error: {msg}"),
+            BlockchainError::CryptographyError(msg) => write!(f, "Cryptography error: {msg}"),
+            BlockchainError::SerializationError(msg) => write!(f, "Serialization error: {msg}"),
+            BlockchainError::InvalidSignature(msg) => write!(f, "Invalid signature: {msg}"),
+            BlockchainError::InvalidNonce { expected, found } => write!(f, "Invalid nonce: expected {expected}, found {found}"),
+            BlockchainError::InsufficientBalance(msg) => write!(f, "Insufficient balance: {msg}"),
+            BlockchainError::BlockNotFound(msg) => write!(f, "Block not found: {msg}"),
+            BlockchainError::MiningError(msg) => write!(f, "Mining error: {msg}"),
         }
     }
 }
 
 // Add From implementations for error conversions
-impl From<Box<bincode::ErrorKind>> for BlockchainError {
-    fn from(err: Box<bincode::ErrorKind>) -> Self {
-        BlockchainError::SerializationError(format!("Bincode error: {:?}", err))
+impl From<bincode::Error> for BlockchainError {
+    fn from(err: bincode::Error) -> Self {
+        BlockchainError::SerializationError(format!("Bincode error: {err:?}"))
     }
 }
 
 impl From<std::io::Error> for BlockchainError {
     fn from(err: std::io::Error) -> Self {
-        BlockchainError::StorageError(format!("IO error: {}", err))
+        BlockchainError::StorageError(format!("IO error: {err}"))
     }
 }
 

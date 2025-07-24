@@ -428,29 +428,34 @@ impl NumiBlockchain {
             return self.handle_orphan_block_protected(block, peer_id).await;
         }
         
-        // Process the block and its transactions
-        let was_reorganization = self.connect_block_enhanced(block, peer_id.clone()).await?;
-        
-        // Update processing time
-        let processing_time = processing_start.elapsed().as_millis() as u64;
-        if let Some(ref peer) = peer_id {
-            self.update_peer_metrics(peer, |metrics| {
-                metrics.processing_time_total += processing_time;
-            });
+        // Wrap block processing (including any I/O) in a timeout to bound total time
+        let processing_future = async {
+            // Process the block and its transactions
+            let was_reorganization = self.connect_block_enhanced(block, peer_id.clone()).await?;
+
+            // Update CPU processing time metric
+            let cpu_time = processing_start.elapsed().as_millis() as u64;
+            if let Some(ref peer) = peer_id {
+                self.update_peer_metrics(peer, |metrics| {
+                    metrics.processing_time_total += cpu_time;
+                });
+            }
+
+            // Process any orphan blocks that might now be valid
+            Box::pin(self.process_orphan_blocks_protected()).await?;
+
+            // Update checkpoints if needed
+            self.update_checkpoints_if_needed().await?;
+
+            Ok::<bool, BlockchainError>(was_reorganization)
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(MAX_BLOCK_PROCESSING_TIME_MS),
+            processing_future
+        ).await {
+            Ok(inner) => inner,
+            Err(_) => Err(BlockchainError::InvalidBlock("Block processing timed out".to_string())),
         }
-        
-        // Check for long processing time (potential DoS)
-        if processing_time > MAX_BLOCK_PROCESSING_TIME_MS {
-            log::warn!("⚠️ Block processing took {}ms (peer: {:?})", processing_time, peer_id);
-        }
-        
-        // Process any orphan blocks that might now be valid
-        Box::pin(self.process_orphan_blocks_protected()).await?;
-        
-        // Update checkpoints if needed
-        self.update_checkpoints_if_needed().await?;
-        
-        Ok(was_reorganization)
     }
     
     /// Internal block processing with orphan handling and reorg detection

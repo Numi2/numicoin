@@ -74,6 +74,7 @@ num-bigint = "0.4.6"
 num-traits = "0.2"
 core_affinity = "0.6"
 sysinfo = "0.26"
+jsonwebtoken = "8"
 
 [dev-dependencies]
 criterion = "0.5"

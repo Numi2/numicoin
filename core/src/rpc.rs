@@ -13,6 +13,22 @@ use tower_http::{
     limit::RequestBodyLimitLayer,
 };
 use warp::{Filter, Reply, Rejection, http::StatusCode};
+use jsonwebtoken::{decode, DecodingKey, Validation};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+    role: String,
+}
+
+#[derive(Debug)]
+struct Unauthorized;
+#[derive(Debug)]
+struct Forbidden;
+
+impl warp::reject::Reject for Unauthorized {}
+impl warp::reject::Reject for Forbidden {}
 
 use crate::blockchain::NumiBlockchain;
 use crate::storage::BlockchainStorage;
@@ -103,7 +119,7 @@ impl Default for AuthConfig {
 }
 
 /// API endpoint access levels
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessLevel {
     Public,     // No authentication required
     User,       // Basic user authentication required
@@ -480,8 +496,9 @@ impl RpcServer {
         &self,
         rpc_server: Arc<RpcServer>,
     ) -> impl Filter<Extract = impl Reply, Error = std::convert::Infallible> + Clone {
-        // Create rate limiting filter with proper warp types
         let rate_limit = self.rate_limit_filter(Arc::clone(&rpc_server));
+        let auth_user = self.auth_filter(AccessLevel::User);
+        let auth_admin = self.auth_filter(AccessLevel::Admin);
         
         // Public routes (no authentication required)
         let status_route = warp::path("status")
@@ -510,6 +527,7 @@ impl RpcServer {
             .and(warp::body::content_length_limit(16 * 1024)) // 16KB limit for transactions
             .and(warp::body::json())
             .and(rate_limit.clone())
+            .and(auth_user.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_transaction);
         
@@ -519,12 +537,14 @@ impl RpcServer {
             .and(warp::body::content_length_limit(1024))
             .and(warp::body::json())
             .and(rate_limit.clone())
+            .and(auth_admin.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_mine);
             
         let stats_route = warp::path("stats")
             .and(warp::get())
             .and(rate_limit.clone())
+            .and(auth_admin.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_stats);
         
@@ -578,6 +598,37 @@ impl RpcServer {
                 
                 rpc_server.increment_stat("total_requests").await;
                 Ok(())
+            })
+            .untuple_one()
+    }
+    
+    /// Authentication filter to enforce JWT verification and role checks
+    fn auth_filter(
+        &self,
+        required_level: AccessLevel,
+    ) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+        let auth_config = self._auth_config.clone();
+        warp::header::optional::<String>("authorization")
+            .and_then(move |auth_header: Option<String>| {
+                let auth_config = auth_config.clone();
+                async move {
+                    if !auth_config.require_auth {
+                        return Ok(());
+                    }
+                    let token_str = auth_header
+                        .and_then(|h| h.strip_prefix("Bearer ").map(str::to_string))
+                        .ok_or_else(|| warp::reject::custom(Unauthorized))?;
+                    let token_data = decode::<Claims>(
+                        &token_str,
+                        &DecodingKey::from_secret(auth_config.jwt_secret.as_bytes()),
+                        &Validation::default(),
+                    )
+                    .map_err(|_| warp::reject::custom(Unauthorized))?;
+                    if required_level == AccessLevel::Admin && token_data.claims.role != "admin" {
+                        return Err(warp::reject::custom(Forbidden));
+                    }
+                    Ok(())
+                }
             })
             .untuple_one()
     }
@@ -1118,6 +1169,10 @@ async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std
         (StatusCode::NOT_FOUND, "Endpoint not found")
     } else if err.find::<RateLimitExceeded>().is_some() {
         (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded")
+    } else if err.find::<Unauthorized>().is_some() {
+        (StatusCode::UNAUTHORIZED, "Unauthorized")
+    } else if err.find::<Forbidden>().is_some() {
+        (StatusCode::FORBIDDEN, "Forbidden")
     } else if err.find::<warp::reject::PayloadTooLarge>().is_some() {
         (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large")
     } else if err.find::<warp::reject::InvalidHeader>().is_some() {

@@ -14,6 +14,7 @@ use crate::mempool::{TransactionMempool, ValidationResult};
 use crate::error::BlockchainError;
 use crate::{Result};
 
+use num_traits::{Zero, ToPrimitive};
 
 /// Maximum blocks that can be processed per second (DoS protection)
 const MAX_BLOCKS_PER_SECOND: usize = 10;
@@ -339,7 +340,7 @@ impl NumiBlockchain {
         for (height, blocks) in blocks_by_height {
             for block in blocks {
                 if height == 0 {
-                    blockchain.genesis_hash = block.calculate_hash();
+                    blockchain.genesis_hash = block.calculate_hash()?;
                 }
                 blockchain.process_block_internal(block, false).await?;
             }
@@ -380,7 +381,7 @@ impl NumiBlockchain {
     /// Process new block from specific peer with comprehensive protection
     pub async fn add_block_from_peer(&self, block: Block, peer_id: Option<String>) -> Result<bool> {
         let processing_start = std::time::Instant::now();
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         
         // DoS protection: Rate limiting
         if !self.check_processing_rate_limit()? {
@@ -454,7 +455,7 @@ impl NumiBlockchain {
     
     /// Internal block processing with orphan handling and reorg detection
     async fn process_block_internal(&self, block: Block, validate_pow: bool) -> Result<bool> {
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         
         // Check if we already have this block
         if self.blocks.contains_key(&block_hash) {
@@ -494,7 +495,7 @@ impl NumiBlockchain {
 
     /// Connect block to the blockchain and handle potential reorganization
     async fn connect_block(&self, block: Block) -> Result<bool> {
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         let parent_hash = block.header.previous_hash;
         
         // Calculate cumulative difficulty
@@ -715,7 +716,7 @@ impl NumiBlockchain {
     
     /// Handle orphan blocks that arrive before their parents
     async fn handle_orphan_block(&self, block: Block) -> Result<bool> {
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         
         // Check orphan pool size limit
         if self.orphan_pool.len() >= self.max_orphan_blocks {
@@ -728,7 +729,7 @@ impl NumiBlockchain {
         
         // Add to orphan pool
         let previous_hash = hex::encode(&block.header.previous_hash);
-        let size_bytes = block.serialize_header_for_hashing().len();
+        let size_bytes = block.serialize_header_for_hashing()?.len();
         let orphan = OrphanBlock {
             block,
             arrival_time: Utc::now(),
@@ -748,10 +749,13 @@ impl NumiBlockchain {
     /// Process orphan blocks that might now be valid
     async fn process_orphan_blocks(&self) -> Result<()> {
         let mut processed_any = true;
+        let mut iteration_count = 0;
+        const MAX_ITERATIONS: usize = 100; // Prevent infinite loops from orphan storms
         
         // Keep processing until no more orphans can be processed
-        while processed_any {
+        while processed_any && iteration_count < MAX_ITERATIONS {
             processed_any = false;
+            iteration_count += 1;
             let orphan_hashes: Vec<BlockHash> = self.orphan_pool.iter()
                 .map(|entry| *entry.key())
                 .collect();
@@ -788,6 +792,10 @@ impl NumiBlockchain {
             }
         }
         
+        if iteration_count >= MAX_ITERATIONS {
+            log::warn!("⚠️ Orphan processing stopped after {} iterations to prevent DoS", MAX_ITERATIONS);
+        }
+        
         Ok(())
     }
     
@@ -816,7 +824,7 @@ impl NumiBlockchain {
         
         // Sign the genesis block
         genesis_block.sign(&self.miner_keypair)?;
-        self.genesis_hash = genesis_block.calculate_hash();
+        self.genesis_hash = genesis_block.calculate_hash()?;
         
         // Process genesis block
         futures::executor::block_on(self.process_block_internal(genesis_block, false))?;
@@ -879,7 +887,7 @@ impl NumiBlockchain {
         let difficulty_target = generate_difficulty_target(block.header.difficulty);
         let header_blob = block.serialize_header_for_hashing();
         
-        if !verify_pow(&header_blob, block.header.nonce, &difficulty_target)? {
+        if !verify_pow(&header_blob?, block.header.nonce, &difficulty_target)? {
             return Err(BlockchainError::InvalidBlock("Proof of work verification failed".to_string()));
         }
         
@@ -1155,14 +1163,21 @@ impl NumiBlockchain {
     
     /// Calculate work value for a block based on difficulty
     fn calculate_block_work(&self, difficulty: u32) -> u128 {
-        // Work = 2^256 / (target + 1) where target = 2^(256-difficulty)
-        // This represents the expected number of hash attempts needed
-        if difficulty >= 256 {
-            return 1; // Maximum difficulty = minimum work
+        // Work = 2^256 / (target + 1), where target is derived from difficulty
+        let target = crate::crypto::generate_difficulty_target(difficulty);
+        // Convert target (Vec<u8>) to U256 (big-endian)
+        let mut target_bytes = [0u8; 32];
+        for (i, b) in target.iter().enumerate().take(32) {
+            target_bytes[i] = *b;
         }
-        // Work = 2^difficulty (simplified approximation)
-        // Cap at 2^127 to prevent overflow while maintaining meaningful values
-        2u128.pow(difficulty.min(127))
+        let target_value = num_bigint::BigUint::from_bytes_be(&target_bytes);
+        let one = num_bigint::BigUint::from(1u8);
+        let max = num_bigint::BigUint::from_bytes_be(&[0xFFu8; 32]); // 2^256 - 1
+        if target_value.is_zero() {
+            return u128::MAX; // Easiest possible work
+        }
+        let work = (&max / (&target_value + &one)).to_u128().unwrap_or(u128::MAX);
+        work
     }
     
     /// Calculate next difficulty adjustment
@@ -1431,7 +1446,7 @@ impl NumiBlockchain {
 
     /// Enhanced block validation with comprehensive checks and caching
     async fn validate_block_comprehensive(&self, block: &Block, _peer_id: Option<&String>) -> Result<()> {
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         
         // Check validation cache first
         if let Some(metadata) = self.blocks.get(&block_hash) {
@@ -1562,7 +1577,7 @@ impl NumiBlockchain {
         let header_blob = block.serialize_header_for_hashing();
         
         // Verify the PoW meets the difficulty target
-        if !verify_pow(&header_blob, block.header.nonce, &difficulty_target)? {
+        if !verify_pow(&header_blob?, block.header.nonce, &difficulty_target)? {
             return Err(BlockchainError::InvalidBlock("Proof of work verification failed".to_string()));
         }
         
@@ -1593,7 +1608,7 @@ impl NumiBlockchain {
         }
         
         // Previous hash validation
-        if block.header.previous_hash != parent.calculate_hash() {
+        if block.header.previous_hash != parent.calculate_hash()? {
             return Err(BlockchainError::InvalidBlock("Previous block hash mismatch".to_string()));
         }
         
@@ -1602,7 +1617,7 @@ impl NumiBlockchain {
     
     /// Enhanced orphan block handling with DoS protection
     async fn handle_orphan_block_protected(&self, block: Block, peer_id: Option<String>) -> Result<bool> {
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         
         // Check global orphan pool size limit
         if self.orphan_pool.len() >= self.max_orphan_blocks {
@@ -1677,7 +1692,7 @@ impl NumiBlockchain {
     /// Enhanced block connection with security checks
     async fn connect_block_enhanced(&self, block: Block, peer_id: Option<String>) -> Result<bool> {
         let processing_start = std::time::Instant::now();
-        let block_hash = block.calculate_hash();
+        let block_hash = block.calculate_hash()?;
         let parent_hash = block.header.previous_hash;
         
         // Calculate cumulative difficulty

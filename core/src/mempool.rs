@@ -31,6 +31,8 @@ pub struct TransactionPriority {
     pub tx_id: TransactionId,
 }
 
+
+
 /// Transaction entry in the mempool with metadata
 #[derive(Debug, Clone)]
 pub struct MempoolEntry {
@@ -573,6 +575,7 @@ mod tests {
             TransactionType::Transfer {
                 to: vec![0; 32],
                 amount: 1000,
+                memo: None,
             },
             1,
         );
@@ -595,6 +598,7 @@ mod tests {
             TransactionType::Transfer {
                 to: vec![0; 32],
                 amount: 1000,
+                memo: None,
             },
             1,
         );

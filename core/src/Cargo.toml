@@ -1,2 +1,0 @@
-log = "0.4"
-fs2 = "0.4" // File locking to prevent concurrent writes 

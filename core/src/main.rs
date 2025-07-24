@@ -579,7 +579,7 @@ async fn show_status_command(config: Config, _detailed: bool, _format: OutputFor
     
     // Get latest block info
     if let Some(latest_block) = blockchain.get_latest_block() {
-        println!("🔗 Latest block hash: {}", latest_block.get_hash_hex());
+        println!("🔗 Latest block hash: {}", latest_block.get_hash_hex()?);
         println!("📝 Latest block transactions: {}", latest_block.get_transaction_count());
     } else {
         println!("🔗 No blocks found");

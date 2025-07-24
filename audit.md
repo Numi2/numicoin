@@ -1,11 +1,6 @@
-# Audit Report: Red Flags
+# Audit Report: 
 
-## core/src/block.rs
-- unwrap_or_default on bincode::serialize hides serialization errors in header hashing.
 
-## core/src/blockchain.rs
-- calculate_block_work = 2u128.pow(difficulty) is overflow-prone and misrepresents mining work.
-- Orphan block processing loops unbounded; vulnerable to DoS from orphan storms.
 
 ## core/src/config.rs
 - Config::default embeds hardcoded JWT secret and admin API key; insecure for production.
@@ -14,11 +9,6 @@
 - secret_key Vec<u8> not zeroized on drop; private material lingers in memory.
 - No Kyber KEM implementation despite network handshake expecting kyber keys.
 
-## core/src/error.rs
-- No red flags identified.
-
-## core/src/lib.rs
-- No red flags identified.
 
 ## core/src/main.rs
 - create_config produces insecure default secrets and HTTP RPC without TLS.
@@ -33,7 +23,6 @@
 
 ## core/src/network.rs
 - SecureStream handshake relies on missing Kyber KEM; key exchange unimplemented.
-- No TLS; custom crypto unvetted and likely vulnerable.
 
 ## core/src/pqc_transport.rs
 - Nonce derived solely from counter; lacks randomness and replay protection.

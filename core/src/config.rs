@@ -386,9 +386,21 @@ pub struct SecurityConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            jwt_secret: "numi-default-secret-change-in-production".to_string(),
+            jwt_secret: std::env::var("NUMI_JWT_SECRET")
+                .unwrap_or_else(|_| {
+                    log::warn!("JWT_SECRET not set in environment, using random value");
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                }),
             jwt_expiry_hours: 1,
-            admin_api_key: "admin-key-change-in-production".to_string(),
+            admin_api_key: std::env::var("NUMI_ADMIN_KEY")
+                .unwrap_or_else(|_| {
+                    log::warn!("ADMIN_KEY not set in environment, using random value");
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                }),
             enable_rate_limiting: true,
             enable_ip_blocking: true,
             max_failed_attempts: 5,

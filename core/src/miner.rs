@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+use chrono::Utc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,11 @@ use crate::transaction::{Transaction, TransactionType};
 use crate::crypto::{generate_difficulty_target, verify_pow, Dilithium3Keypair, Argon2Config};
 use crate::error::BlockchainError;
 use crate::{Result};
+
+#[cfg(not(target_os = "linux"))]
+use core_affinity;
+#[cfg(not(target_os = "linux"))]
+use sysinfo::{System, SystemExt, ComponentExt};
 
 // Features must be checked:
 // - Multi-threaded mining with Rayon for parallel nonce search
@@ -228,8 +234,7 @@ impl Miner {
         self.should_stop.store(false, Ordering::Relaxed);
         self.global_nonce.store(start_nonce, Ordering::Relaxed);
         
-        let mining_start = Instant::now();
-        self.update_mining_stats(difficulty, mining_start, true);
+        self.update_mining_stats(difficulty, true);
         
         // Determine optimal thread count
         let thread_count = if self.config.thread_count == 0 {
@@ -242,7 +247,8 @@ impl Miner {
         
         // Create mining result channels
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let mut thread_handles = Vec::new();
+        // Prepare struct-level thread handles instead of a local vector
+        self.thread_handles.clear();
         
         // Spawn mining threads
         for thread_id in 0..thread_count {
@@ -257,21 +263,26 @@ impl Miner {
             let difficulty_target = difficulty_target.clone();
             
             let handle = std::thread::spawn(move || {
-                Self::mining_thread_worker(
-                    thread_id,
-                    block_template,
-                    difficulty_target,
-                    is_mining,
-                    is_paused,
-                    should_stop,
-                    global_nonce,
-                    stats,
-                    config,
-                    result_tx,
-                );
+                // Catch panics in worker threads
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::mining_thread_worker(
+                        thread_id,
+                        block_template,
+                        difficulty_target,
+                        is_mining,
+                        is_paused,
+                        should_stop,
+                        global_nonce,
+                        stats,
+                        config,
+                        result_tx,
+                    );
+                }));
+                if let Err(err) = result {
+                    log::error!("Mining thread {} panicked: {:?}", thread_id, err);
+                }
             });
-            
-            thread_handles.push(handle);
+            self.thread_handles.push(handle);
         }
         
         // Start statistics monitoring thread
@@ -313,7 +324,7 @@ impl Miner {
         };
         
         // Clean up threads
-        for handle in thread_handles {
+        for handle in self.thread_handles.drain(..) {
             let _ = handle.join();
         }
         let _ = stats_monitor.join();
@@ -337,8 +348,12 @@ impl Miner {
         log::debug!("🔨 Mining thread {} started", thread_id);
         
         let mut local_hashes = 0u64;
+        let mut total_hashes = 0u64; // track total hashes since start
         let mut last_stats_update = Instant::now();
         let thread_start_time = Instant::now();
+        let mut last_health_check = Instant::now();
+        // Track when to refresh block timestamp
+        let mut last_time_update = Instant::now();
         
         // Set CPU affinity if enabled
         if config.enable_cpu_affinity {
@@ -367,16 +382,23 @@ impl Miner {
                 }
                 
                 block.header.nonce = nonce;
-                let header_blob = block.serialize_header_for_hashing();
+                let header_blob = match block.serialize_header_for_hashing() {
+                    Ok(blob) => blob,
+                    Err(e) => {
+                        log::error!("Failed to serialize header in thread {}: {}", thread_id, e);
+                        continue;
+                    }
+                };
                 
+                total_hashes += 1;
                 local_hashes += 1;
                 
                 // Check if this nonce satisfies the difficulty target
                 match verify_pow(&header_blob, nonce, &difficulty_target) {
                     Ok(true) => {
                         // Found valid block!
-                        let mining_time = thread_start_time.elapsed();
-                        let hash_rate = local_hashes / mining_time.as_secs().max(1);
+                        let mining_time = thread_start_time.elapsed(); // compute elapsed
+                        let hash_rate = total_hashes / mining_time.as_secs().max(1);
                         
                         let mining_result = MiningResult {
                             block,
@@ -384,7 +406,7 @@ impl Miner {
                             hash_rate,
                             mining_time_secs: mining_time.as_secs(),
                             thread_id,
-                            total_attempts: local_hashes,
+                            total_attempts: total_hashes,
                         };
                         
                         // Send result and exit
@@ -403,7 +425,17 @@ impl Miner {
                 // Update statistics periodically
                 if last_stats_update.elapsed().as_secs() >= config.stats_update_interval {
                     Self::update_thread_stats(&stats, thread_id, local_hashes, thread_start_time);
+                    // only count new hashes since last update
+                    local_hashes = 0;
                     last_stats_update = Instant::now();
+                }
+                
+                // Health check - ensure thread is making progress
+                if last_health_check.elapsed().as_secs() >= 30 {
+                    if local_hashes == 0 {
+                        log::warn!("⚠️ Mining thread {} appears stalled (no hashes in 30s)", thread_id);
+                    }
+                    last_health_check = Instant::now();
                 }
                 
                 // Check thermal throttling
@@ -415,6 +447,11 @@ impl Miner {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                     }
+                }
+                // Periodically update block timestamp to avoid stale headers
+                if last_time_update.elapsed().as_secs() >= config.stats_update_interval {
+                    block.header.timestamp = Utc::now();
+                    last_time_update = Instant::now();
                 }
             }
         }
@@ -457,12 +494,17 @@ impl Miner {
     }
     
     /// Update mining statistics
-    fn update_mining_stats(&self, difficulty: u32, _start_time: Instant, mining_active: bool) {
+    fn update_mining_stats(&self, difficulty: u32, mining_active: bool) {
         let mut stats = self.stats.write();
         stats.difficulty = difficulty;
         stats.start_timestamp = chrono::Utc::now().timestamp() as u64;
         stats.is_mining = mining_active;
         stats.threads_active = if mining_active { self.config.thread_count } else { 0 };
+        if mining_active {
+            stats.total_hashes = 0;
+            stats.current_nonce = self.global_nonce.load(Ordering::Relaxed);
+            stats.hash_rate = 0;
+        }
     }
     
     /// Update final statistics after successful mining
@@ -556,8 +598,11 @@ impl Miner {
             return std::time::Duration::from_secs(u64::MAX); // Unknown
         }
         
-        // Rough estimate based on difficulty and current hash rate
-        let target_hashes = 2u64.pow(difficulty.min(64));
+        // Avoid overflow: large difficulty treated as infinite
+        if difficulty >= 64 {
+            return std::time::Duration::from_secs(u64::MAX);
+        }
+        let target_hashes = 1u64 << difficulty;
         let estimated_seconds = target_hashes / stats.hash_rate;
         
         std::time::Duration::from_secs(estimated_seconds)
@@ -579,22 +624,35 @@ impl Miner {
     
     /// Set CPU affinity for mining thread (Linux only)
     #[cfg(target_os = "linux")]
-    fn set_cpu_affinity(_thread_id: usize) {
-        // Implementation would use libc to set CPU affinity
-        // This is a placeholder for the actual implementation
-        log::debug!("Setting CPU affinity for thread {} (not implemented)", _thread_id);
+    fn set_cpu_affinity(thread_id: usize) {
+        let cores = core_affinity::get_core_ids().unwrap_or_default();
+        if !cores.is_empty() {
+            let core_id = cores[thread_id % cores.len()];
+            core_affinity::set_for_current(core_id);
+            log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
+        }
     }
-    
     #[cfg(not(target_os = "linux"))]
-    fn set_cpu_affinity(_thread_id: usize) {
-        // No-op on non-Linux systems
+    fn set_cpu_affinity(thread_id: usize) {
+        let cores = core_affinity::get_core_ids().unwrap_or_default();
+        if !cores.is_empty() {
+            let core_id = cores[thread_id % cores.len()];
+            core_affinity::set_for_current(core_id);
+            log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
+        }
     }
     
     /// Get current CPU temperature (requires system monitoring)
     fn get_cpu_temperature() -> Option<f32> {
-        // This would integrate with system monitoring APIs
-        // Placeholder implementation
-        None
+        let mut sys = System::new_all();
+        sys.refresh_components();
+        let temps: Vec<f32> = sys.components()
+            .iter()
+            .filter(|c| c.label().to_lowercase().contains("cpu"))
+            .map(|c| c.temperature())
+            .collect();
+        temps.into_iter()
+             .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }
 }
 
@@ -653,6 +711,7 @@ mod tests {
             crate::transaction::TransactionType::MiningReward {
                 block_height: 1,
                 amount: 1000,
+                pool_address: None,
             },
             0,
         );

@@ -82,10 +82,22 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            jwt_secret: "numi-default-secret-change-in-production".to_string(),
+            jwt_secret: std::env::var("NUMI_JWT_SECRET")
+                .unwrap_or_else(|_| {
+                    log::warn!("JWT_SECRET not set in environment, using random value");
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                }),
             token_expiry: Duration::from_secs(3600), // 1 hour
-            require_auth: false,
-            admin_api_key: "admin-key-change-in-production".to_string(),
+            require_auth: true, // Require authentication by default
+            admin_api_key: std::env::var("NUMI_ADMIN_KEY")
+                .unwrap_or_else(|_| {
+                    log::warn!("ADMIN_KEY not set in environment, using random value");
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                }),
         }
     }
 }
@@ -804,7 +816,7 @@ async fn handle_block(
 
             let response = BlockResponse {
                 height: block.header.height,
-                hash: hex::encode(&block.calculate_hash()),
+                hash: hex::encode(&block.calculate_hash().unwrap_or([0u8; 32])),
                 previous_hash: hex::encode(&block.header.previous_hash),
                 timestamp: block.header.timestamp,
                 transactions: transaction_summaries,
@@ -1068,7 +1080,7 @@ async fn handle_mine(
                     "Block mined but failed to add to blockchain".to_string() 
                 },
                 block_height: mining_result.block.header.height,
-                block_hash: hex::encode(&mining_result.block.calculate_hash()),
+                block_hash: hex::encode(&mining_result.block.calculate_hash().unwrap_or([0u8; 32])),
                 mining_time_ms: mining_time.as_millis() as u64,
                 hash_rate: mining_result.hash_rate,
             };

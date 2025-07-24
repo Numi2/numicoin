@@ -5,8 +5,10 @@ use argon2::{Argon2, Params, Algorithm, Version};
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 use pqcrypto_traits::sign::{PublicKey, SecretKey, DetachedSignature};
+use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret, Ciphertext};
 use rand::RngCore;
 use base64ct::Encoding;
+use pqcrypto_kyber::kyber768::{PublicKey as KyberPublicKey, SecretKey as KyberSecretKey, Ciphertext as KyberCiphertext};
 
 use crate::error::BlockchainError;
 use crate::Result;
@@ -40,6 +42,7 @@ pub struct Dilithium3Keypair {
     #[zeroize(skip)] // Public key doesn't need zeroization
     pub public_key: Vec<u8>,
     #[serde(skip)] // Never serialize secret keys
+    #[zeroize] // Zeroize secret key on drop
     secret_key: Vec<u8>,
     /// Key fingerprint for integrity checking
     #[zeroize(skip)]
@@ -47,6 +50,8 @@ pub struct Dilithium3Keypair {
     /// Creation timestamp for auditing
     created_at: u64,
 }
+
+
 
 impl Dilithium3Keypair {
     /// Generate new Dilithium3 keypair with enhanced entropy
@@ -339,13 +344,10 @@ impl Dilithium3Signature {
         self.signature.len() + self.public_key.len() + 32 + 8 // + hash + timestamp
     }
     
-    /// Check if signature is expired (optional feature)
+    /// Check if signature is expired (max_age_seconds window)
     pub fn is_expired(&self, max_age_seconds: u64) -> bool {
-        if max_age_seconds == 0 {
-            return false; // No expiry
-        }
         let current_time = chrono::Utc::now().timestamp() as u64;
-        current_time.saturating_sub(self.created_at) > max_age_seconds
+        current_time.saturating_sub(self.created_at) >= max_age_seconds
     }
 }
 
@@ -692,6 +694,32 @@ pub fn generate_salt_with_length(length: usize) -> Result<Vec<u8>> {
         return Err(BlockchainError::CryptographyError("Invalid salt length".to_string()));
     }
     generate_random_bytes(length)
+}
+
+// KYBER KEM IMPLEMENTATION
+
+/// Generate a Kyber768 keypair (public, secret) as byte vectors.
+pub fn kyber_keypair() -> (Vec<u8>, Vec<u8>) {
+    let (pk, sk) = pqcrypto_kyber::kyber768::keypair();
+    (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+}
+
+/// Encapsulate a shared secret to a peer's Kyber768 public key.
+pub fn kyber_encapsulate(pk_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pk = KyberPublicKey::from_bytes(pk_bytes)
+        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber public key: {:?}", e)))?;
+    let (ss, ct) = pqcrypto_kyber::kyber768::encapsulate(&pk);
+    Ok((ct.as_bytes().to_vec(), ss.as_bytes().to_vec()))
+}
+
+/// Decapsulate a shared secret from ciphertext using Kyber768 secret key.
+pub fn kyber_decapsulate(ct_bytes: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>> {
+    let sk = KyberSecretKey::from_bytes(sk_bytes)
+        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber secret key: {:?}", e)))?;
+    let ct = KyberCiphertext::from_bytes(ct_bytes)
+        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber ciphertext: {:?}", e)))?;
+    let ss = pqcrypto_kyber::kyber768::decapsulate(&ct, &sk);
+    Ok(ss.as_bytes().to_vec())
 }
 
 // Format implementations for better error messages
@@ -1078,9 +1106,6 @@ mod tests {
         
         // Should be expired with very short window
         assert!(signature.is_expired(0));
-        
-        // Never expires with 0 max age
-        assert!(!signature.is_expired(0));
     }
     
     #[test]
@@ -1088,5 +1113,13 @@ mod tests {
         let mut data = vec![0xFF; 32];
         secure_zero(&mut data);
         assert_eq!(data, vec![0; 32]);
+    }
+
+    #[test]
+    fn test_kyber_kem() {
+        let (pk, sk) = kyber_keypair();
+        let (ct, ss1) = kyber_encapsulate(&pk).unwrap();
+        let ss2 = kyber_decapsulate(&ct, &sk).unwrap();
+        assert_eq!(ss1, ss2);
     }
 } 

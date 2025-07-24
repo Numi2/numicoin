@@ -2,19 +2,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::str::FromStr;
-use rand::Rng;
 
-use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use libp2p::{
     core::upgrade,
     floodsub::{self, Behaviour as Floodsub, Event as FloodsubEvent, Topic},
     identity,
     swarm::{Swarm, SwarmEvent},
-    tcp, noise, yamux,
+    tcp, tls, yamux,
     Multiaddr, PeerId,
     mdns::{tokio::Behaviour as Mdns, Event as MdnsEvent},
     swarm::NetworkBehaviour,
+    Transport,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -23,9 +22,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::block::Block;
 use crate::transaction::Transaction;
 use crate::{Result, BlockchainError};
-use crate::crypto::Dilithium3Keypair;
-use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{PublicKey, SecretKey};
+use crate::crypto::{Dilithium3Keypair, kyber_keypair};
 
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
@@ -337,7 +334,7 @@ pub struct NetworkManager {
     key_registry: Arc<PeerKeyRegistry>,
     local_dilithium_kp: Dilithium3Keypair,
     local_kyber_pk: Vec<u8>,
-    local_kyber_sk: Vec<u8>,
+    _local_kyber_sk: Vec<u8>,
 }
 
 // Safety: NetworkManager is moved into its own dedicated async task thread and is not shared thereafter, 
@@ -397,27 +394,34 @@ impl NetworkManagerHandle {
     pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
         self.banned_peers.read().await.contains(peer_id)
     }
+    /// Get list of verified peers from key registry
+    pub async fn get_verified_peers(&self) -> Vec<PeerId> {
+        self.key_registry.get_verified_peers().await
+    }
 }
 
 impl NetworkManager {
     pub fn new() -> Result<Self> {
         // Generate post-quantum key material for handshake and authentication
         let dilithium_kp = Dilithium3Keypair::new()?;
-        let (kyber_pk, kyber_sk) = kyber768::keypair();
-        
-        // Derive PeerId from Dilithium3 public key fingerprint
-        let peer_id_bytes = dilithium_kp.fingerprint().to_vec();
-        let local_peer_id = PeerId::from_bytes(&peer_id_bytes)
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid PQ PeerId: {}", e)))?;
+        let (kyber_pk, kyber_sk) = kyber_keypair();
+
+        // Generate TLS identity for transport and derive PeerId from it
+        let tls_identity = identity::Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(tls_identity.public());
 
         log::info!("🔑 Local peer ID: {}", local_peer_id);
 
         // Create key registry
         let key_registry = Arc::new(PeerKeyRegistry::new());
 
-        // Create transport with PQC handshake (Kyber KEM + Dilithium3 auth) and Yamux
+        // Create TLS config for transport encryption
+        let tls_config = tls::Config::new(&tls_identity).map_err(|e| BlockchainError::NetworkError(format!("TLS config failed: {}", e)))?;
+
+        // Create transport with TLS and Yamux
         let transport = tcp::tokio::Transport::default()
-            .upgrade(upgrade::Version::V1Lazy)
+            .upgrade(upgrade::Version::V1)
+            .authenticate(tls_config)
             .multiplex(yamux::Config::default())
             .boxed();
 
@@ -459,8 +463,8 @@ impl NetworkManager {
             is_syncing: Arc::new(RwLock::new(false)),
             key_registry,
             local_dilithium_kp: dilithium_kp,
-            local_kyber_pk: kyber_pk.as_bytes().to_vec(),
-            local_kyber_sk: kyber_sk.as_bytes().to_vec(),
+            local_kyber_pk: kyber_pk,
+            _local_kyber_sk: kyber_sk,
         })
     }
 
@@ -583,9 +587,9 @@ impl NetworkManager {
         let peer_ids: Vec<PeerId> = peers.keys().cloned().collect();
         drop(peers); // Release lock early
 
-        for peer_id in peer_ids {
-            let topic_clone = Topic::new(topic);
-            let data_clone = data.clone();
+        for _peer_id in peer_ids {
+            let _topic_clone = Topic::new(topic);
+            let _data_clone = data.clone();
             
             // Spawn individual broadcast task for each peer
             let broadcast_future = async move {
@@ -628,7 +632,7 @@ impl NetworkManager {
             TOPIC_BLOCKS => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::NewBlock(block) = network_message {
-                        log::info!("📦 Received new block: {}", hex::encode(&block.calculate_hash()));
+                        log::info!("📦 Received new block: {}", hex::encode(&block.calculate_hash().unwrap_or([0u8; 32])));
                         
                         // Validate block before processing
                         if let Err(e) = self.validate_block(&block).await {
@@ -762,7 +766,7 @@ impl NetworkManager {
     }
 
     /// Generate authenticated message with replay protection
-    pub fn create_authenticated_message(&self, message_type: &str, data: &[u8]) -> Result<(u64, u64, Vec<u8>)> {
+    pub fn create_authenticated_message(&self, _message_type: &str, data: &[u8]) -> Result<(u64, u64, Vec<u8>)> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
@@ -897,6 +901,7 @@ impl NetworkManager {
     }
 
     /// Send a key request to a peer
+    #[allow(dead_code)]
     async fn send_key_request(&mut self, peer_id: PeerId) {
         let requester_id = self.local_peer_id.to_string();
         let (timestamp, nonce, signature) = match self.create_authenticated_message("key_request", requester_id.as_bytes()) {
@@ -942,7 +947,7 @@ impl NetworkManager {
     }
 
     /// Handle incoming key request
-    async fn handle_key_request(&mut self, requester_id: String, timestamp: u64, nonce: u64, signature: Vec<u8>) -> Result<()> {
+    async fn handle_key_request(&mut self, requester_id: String, timestamp: u64, _nonce: u64, _signature: Vec<u8>) -> Result<()> {
         // Validate the request (in production, verify signature)
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -981,7 +986,7 @@ impl NetworkManager {
     }
 
     /// Handle incoming key response
-    async fn handle_key_response(&mut self, responder_id: String, dilithium_pk: Vec<u8>, kyber_pk: Vec<u8>, timestamp: u64, nonce: u64, signature: Vec<u8>) -> Result<()> {
+    async fn handle_key_response(&mut self, responder_id: String, dilithium_pk: Vec<u8>, kyber_pk: Vec<u8>, timestamp: u64, _nonce: u64, _signature: Vec<u8>) -> Result<()> {
         // Validate the response (in production, verify signature)
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1013,7 +1018,6 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::identity::secp256k1;
 
     #[tokio::test]
     async fn test_peer_key_registry_basic_operations() {
@@ -1080,7 +1084,7 @@ mod tests {
         let handle = network_manager.create_handle();
         
         // Verify key registry is accessible through handle
-        let verified_peers = handle.key_registry.get_verified_peers().await;
+        let verified_peers = handle.get_verified_peers().await;
         assert_eq!(verified_peers.len(), 0); // Should be empty initially
     }
 } 

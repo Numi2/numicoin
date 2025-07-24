@@ -21,7 +21,7 @@ subtle = "2.4" # Constant-time operations
 rand = "0.8" # Cryptographically secure randomness
 
 # Networking with libp2p for production P2P
-libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "macros", "floodsub", "yamux", "mdns", "identify", "ping", "kad"] } # TODO: Upgrade to 0.58+
+libp2p = { version = "0.56", features = ["tokio", "tcp", "noise", "tls", "macros", "floodsub", "yamux", "mdns", "identify", "ping", "kad", "secp256k1"] } # TODO: Upgrade to 0.58+
 tokio = { version = "1.0", features = ["full"] }
 
 # Database and storage with better error handling
@@ -70,6 +70,10 @@ flate2 = "1.0"
 # Networking and security - Updated to fix vulnerabilities
 dns-lookup = "2.0"
 hickory-resolver = "0.24" # Updated from trust-dns-resolver
+num-bigint = "0.4.6"
+num-traits = "0.2"
+core_affinity = "0.6"
+sysinfo = "0.26"
 
 [dev-dependencies]
 criterion = "0.5"

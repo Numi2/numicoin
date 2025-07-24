@@ -482,6 +482,7 @@ mod tests {
             TransactionType::Transfer {
                 to: vec![1, 2, 3, 4],
                 amount: 100,
+                memo: None,
             },
             1,
         );
@@ -505,6 +506,9 @@ mod tests {
             transaction_count: 5,
             total_received: 2000,
             total_sent: 1000,
+            validator_info: None,
+            created_at: Utc::now(),
+            last_activity: Utc::now(),
         };
         
         let public_key = vec![1, 2, 3, 4];

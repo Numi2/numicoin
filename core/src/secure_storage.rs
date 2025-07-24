@@ -10,18 +10,12 @@ use aes_gcm::{
 use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{Dilithium3Keypair, derive_key, generate_random_bytes, Hash};
+use crate::crypto::{Dilithium3Keypair, derive_key, generate_random_bytes, blake3_hash, Hash};
 use crate::{Result, BlockchainError};
 
-// AI Agent Note: This is a production-ready encrypted key storage implementation
 // Security features implemented:
 // - AES-256-GCM encryption with unique nonces and authentication tags
-// - Scrypt key derivation with configurable parameters for password strengthening
-// - Secure memory management with automatic zeroization
-// - Key versioning and migration support for future upgrades
-// - Time-based key rotation and expiry policies
-// - Secure file I/O with atomic writes and integrity verification
-// - Protection against timing attacks through constant-time operations
+//
 // - No key recovery by design (security feature)
 // - Both public and private keys must be stored together
 // - No key derivation support for enhanced security
@@ -232,7 +226,9 @@ impl SecureKeyStore {
         
         // Create password hash for verification using fixed salt for consistency
         let salt = vec![0u8; 32]; // Fixed salt for consistent verification
-        let password_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&salt), b"keystore-auth")?;
+        // Derive a fixed-length seed from the password
+        let seed = blake3_hash(password.as_bytes());
+        let password_hash = derive_key(&seed, &String::from_utf8_lossy(&salt), b"keystore-auth")?;
         self.password_hash = Some(password_hash);
         
         log::info!("🔐 Secure key store initialized");
@@ -268,7 +264,9 @@ impl SecureKeyStore {
         // First, we need to initialize the store to get the password hash
         // For loading, we'll use a temporary approach to derive the key
         let temp_salt = vec![0u8; 32];
-        let temp_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&temp_salt), b"keystore-auth")?;
+        // Derive a fixed-length seed from the password
+        let seed = blake3_hash(password.as_bytes());
+        let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&temp_salt), b"keystore-auth")?;
         let derived_password = format!("keystore_{}", hex::encode(&temp_hash));
         
         // Derive key from password
@@ -618,9 +616,10 @@ impl SecureKeyStore {
         
         // For password verification, we need to use the same salt that was used during initialization
         // Since we don't store the salt separately, we'll use a fixed salt for verification
-        // In production, the salt should be stored with the password hash
         let verification_salt = vec![0u8; 32]; // Fixed salt for verification
-        let test_hash = derive_key(password.as_bytes(), &String::from_utf8_lossy(&verification_salt), b"keystore-auth")?;
+        // Derive a fixed-length seed from the password
+        let seed = blake3_hash(password.as_bytes());
+        let test_hash = derive_key(&seed, &String::from_utf8_lossy(&verification_salt), b"keystore-auth")?;
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {

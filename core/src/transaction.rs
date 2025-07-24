@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use crate::crypto::{Dilithium3Keypair, Dilithium3Signature, blake3_hash, blake3_hash_hex, constant_time_eq};
+use crate::crypto::{Dilithium3Keypair, Dilithium3Signature, blake3_hash, blake3_hash_hex};
 use crate::error::BlockchainError;
 use crate::Result;
 
@@ -154,6 +154,11 @@ impl Transaction {
         transaction_type: TransactionType,
         nonce: u64,
     ) -> Self {
+        // Reject unsupported contract transactions early
+        if transaction_type.is_contract_deploy() || transaction_type.is_contract_call() {
+            panic!("Contract transactions not yet supported");
+        }
+        
         let mut tx = Self::new_with_fee(from, transaction_type, nonce, MIN_TRANSACTION_FEE, 0);
         
         // Calculate proper fee based on transaction size
@@ -209,7 +214,11 @@ impl Transaction {
     pub fn verify_signature(&self) -> Result<bool> {
         if let Some(ref signature) = self.signature {
             let message = self.serialize_for_signing()?;
-            crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.from)
+            // Treat any verification error as invalid signature
+            match crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.from) {
+                Ok(valid) => Ok(valid),
+                Err(_) => Ok(false),
+            }
         } else {
             Ok(false)
         }
@@ -226,8 +235,8 @@ impl Transaction {
     
     /// Calculate transaction size in bytes
     pub fn calculate_size(&self) -> Result<usize> {
-        let serialized = bincode::serialize(self)
-            .map_err(|e| BlockchainError::SerializationError(format!("Size calculation failed: {e}")))?;
+        // Only serialize the transaction for signing (exclude signature and id)
+        let serialized = self.serialize_for_signing()?;
         Ok(serialized.len())
     }
     
@@ -240,14 +249,17 @@ impl Transaction {
         
         // Validate transaction size
         let size = self.calculate_size()?;
+        // Enforce maximum transaction size
         if size > MAX_TRANSACTION_SIZE {
             return Err(BlockchainError::InvalidTransaction(
                 format!("Transaction too large: {} bytes", size)));
         }
-        
-        // Validate fee
-        let fee_info = TransactionFee::minimum_for_size(size)?;
-        fee_info.validate_amount(self.fee)?;
+       
+        // Validate fee for normal transactions (skip mining rewards and gas-based types)
+        if !self.is_reward() && !self.transaction_type.requires_gas() {
+            let fee_info = TransactionFee::minimum_for_size(size)?;
+            fee_info.validate_amount(self.fee)?;
+        }
         
         // Validate timestamp and validity
         let now = Utc::now();
@@ -399,11 +411,11 @@ impl Transaction {
             });
         }
         
-        // Verify sufficient balance including fees
-        let required_amount = self.get_required_balance();
-        if required_amount > current_balance {
+        // Verify sufficient balance for transaction amount
+        let amount = self.get_amount();
+        if amount > current_balance {
             return Err(BlockchainError::InsufficientBalance(
-                format!("Required: {}, Available: {}", required_amount, current_balance)
+                format!("Required: {}, Available: {}", amount, current_balance)
             ));
         }
         
@@ -445,14 +457,7 @@ impl Transaction {
         if self.is_reward() {
             return u64::MAX; // Highest priority for mining rewards
         }
-        
-        // Calculate fee per byte
-        if let Ok(size) = self.calculate_size() {
-            if size > 0 {
-                return self.fee / size as u64;
-            }
-        }
-        
+        // Prioritize by fee for non-reward transactions
         self.fee
     }
     

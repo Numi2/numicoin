@@ -54,24 +54,24 @@ impl Block {
         }
     }
     
-    pub fn calculate_hash(&self) -> BlockHash {
-        let header_data = self.serialize_header_for_hashing();
-        blake3_hash(&header_data)
+    pub fn calculate_hash(&self) -> Result<BlockHash> {
+        let header_data = self.serialize_header_for_hashing()?;
+        Ok(blake3_hash(&header_data))
     }
     
-    pub fn get_hash_hex(&self) -> String {
-        blake3_hash_hex(&self.calculate_hash())
+    pub fn get_hash_hex(&self) -> Result<String> {
+        Ok(blake3_hash_hex(&self.calculate_hash()?))
     }
     
     pub fn sign(&mut self, keypair: &crate::crypto::Dilithium3Keypair) -> Result<()> {
-        let message = self.serialize_header_for_hashing();
+        let message = self.serialize_header_for_hashing()?;
         self.header.block_signature = Some(keypair.sign(&message)?);
         Ok(())
     }
     
     pub fn verify_signature(&self) -> Result<bool> {
         if let Some(ref signature) = self.header.block_signature {
-            let message = self.serialize_header_for_hashing();
+            let message = self.serialize_header_for_hashing()?;
             crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.header.miner_public_key)
         } else {
             Ok(false)
@@ -121,7 +121,7 @@ impl Block {
         
         // Verify previous block hash
         if let Some(prev_block) = previous_block {
-            if self.header.previous_hash != prev_block.calculate_hash() {
+            if self.header.previous_hash != prev_block.calculate_hash()? {
                 return Err(BlockchainError::InvalidBlock("Previous block hash mismatch".to_string()));
             }
             
@@ -178,7 +178,7 @@ impl Block {
         MINING_REWARD
     }
     
-    pub fn serialize_header_for_hashing(&self) -> Vec<u8> {
+    pub fn serialize_header_for_hashing(&self) -> Result<Vec<u8>> {
         // Create header data without signature for hashing
         let header_data = HeaderForHashing {
             version: self.header.version,
@@ -190,8 +190,7 @@ impl Block {
             nonce: self.header.nonce,
             miner_public_key: self.header.miner_public_key.clone(),
         };
-        
-        bincode::serialize(&header_data).expect("Header serialization failed")
+        bincode::serialize(&header_data).map_err(|e| BlockchainError::SerializationError(e.to_string()))
     }
 }
 
@@ -208,8 +207,10 @@ struct HeaderForHashing {
 }
 
 impl BlockHeader {
-    pub fn get_serialized_size(&self) -> usize {
-        bincode::serialized_size(self).unwrap_or(0) as usize
+    pub fn get_serialized_size(&self) -> Result<usize> {
+        bincode::serialized_size(self)
+            .map(|s| s as usize)
+            .map_err(|e| BlockchainError::SerializationError(e.to_string()))
     }
 }
 
@@ -228,6 +229,7 @@ mod tests {
                 TransactionType::Transfer {
                     to: vec![1, 2, 3, 4],
                     amount: 100,
+                    memo: None,
                 },
                 1,
             )
@@ -244,6 +246,7 @@ mod tests {
         assert_eq!(block.header.height, 1);
         assert_eq!(block.header.difficulty, 2);
         assert_eq!(block.get_transaction_count(), 1);
+        let _ = block.calculate_hash().unwrap();
     }
     
     #[test]
@@ -255,6 +258,7 @@ mod tests {
                 TransactionType::Transfer {
                     to: vec![1, 2, 3, 4],
                     amount: 100,
+                    memo: None,
                 },
                 1,
             ),
@@ -263,6 +267,7 @@ mod tests {
                 TransactionType::Transfer {
                     to: vec![5, 6, 7, 8],
                     amount: 200,
+                    memo: None,
                 },
                 2,
             ),
@@ -270,6 +275,14 @@ mod tests {
         
         let merkle_root = Block::calculate_merkle_root(&transactions);
         assert_ne!(merkle_root, [0u8; 32]);
+        let block = Block::new(
+            1,
+            [0u8; 32],
+            transactions,
+            2,
+            keypair.public_key.clone(),
+        );
+        let _ = block.calculate_hash().unwrap();
     }
     
     #[test]
@@ -285,6 +298,7 @@ mod tests {
         
         block.sign(&keypair).unwrap();
         assert!(block.verify_signature().unwrap());
+        let _ = block.calculate_hash().unwrap();
     }
     
     #[test]
@@ -303,5 +317,6 @@ mod tests {
         
         assert!(block.is_genesis());
         assert!(block.validate(None).is_ok());
+        let _ = block.calculate_hash().unwrap();
     }
 } 

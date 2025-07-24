@@ -11,9 +11,6 @@ use base64ct::Encoding;
 use crate::error::BlockchainError;
 use crate::Result;
 
-// AI Agent Note: Production-ready quantum-safe cryptography implementation
-// Enhanced with proper constants, optimized PoW, and comprehensive validation
-
 /// 256-bit hash output
 pub type Hash = [u8; 32];
 
@@ -202,52 +199,45 @@ impl Dilithium3Keypair {
     
     /// Sign message with comprehensive validation
     pub fn sign(&self, message: &[u8]) -> Result<Dilithium3Signature> {
-        // Validate message size to prevent DoS
         if message.len() > MAX_SIGNABLE_MESSAGE_SIZE {
-            return Err(BlockchainError::CryptographyError(
-                format!("Message too large: {} bytes", message.len())));
+            return Err(BlockchainError::InvalidArgument("Message too large to sign".to_string()));
         }
-        
-        // Validate key integrity
-        self.validate_integrity()?;
-        
-        let sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(&self.secret_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Secret key error: {:?}", e)))?;
-        
-        let signature_bytes = pqcrypto_dilithium::dilithium3::detached_sign(message, &sk);
-        
+
+        let pq_sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(&self.secret_key)
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {}", e)))?;
+
+        let signature_bytes = pqcrypto_dilithium::dilithium3::detached_sign(message, &pq_sk);
+
         Ok(Dilithium3Signature {
             signature: signature_bytes.as_bytes().to_vec(),
             public_key: self.public_key.clone(),
             message_hash: blake3_hash(message),
-            created_at: chrono::Utc::now().timestamp() as u64,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         })
     }
     
-    /// Verify signature with enhanced validation
-    pub fn verify(message: &[u8], signature: &Dilithium3Signature) -> Result<bool> {
-        // Validate inputs
+    pub fn verify(message: &[u8], signature: &Dilithium3Signature, public_key: &[u8]) -> Result<bool> {
         if message.len() > MAX_SIGNABLE_MESSAGE_SIZE {
-            return Ok(false); // Don't process oversized messages
+            return Err(BlockchainError::InvalidArgument("Message too large to verify".to_string()));
         }
-        
-        if !signature.is_valid_format() {
+
+        // Integrity check: message hash
+        let calculated_hash = blake3_hash(message);
+        if calculated_hash != signature.message_hash {
+            log::warn!("Signature message hash mismatch");
             return Ok(false);
         }
+
+        let pq_pk = pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key)
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid public key: {}", e)))?;
         
-        // Verify message hash if present
-        let message_hash = blake3_hash(message);
-        if signature.message_hash != [0; 32] && signature.message_hash != message_hash {
-            return Ok(false); // Message hash mismatch
-        }
-        
-        let pk = pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(&signature.public_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Public key error: {:?}", e)))?;
-        
-        let sig = pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Signature error: {:?}", e)))?;
-        
-        Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&sig, message, &pk).is_ok())
+        let pq_sig = pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature)
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid signature format: {}", e)))?;
+
+        Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&pq_sig, message, &pq_pk).is_ok())
     }
     
     /// Validate key integrity using fingerprint
@@ -750,7 +740,7 @@ pub fn batch_verify_signatures(messages_and_signatures: &[(&[u8], &Dilithium3Sig
     let mut results = Vec::with_capacity(messages_and_signatures.len());
     
     for (message, signature) in messages_and_signatures {
-        let result = Dilithium3Keypair::verify(message, signature)?;
+        let result = Dilithium3Keypair::verify(message, signature, &signature.public_key).unwrap();
         results.push(result);
     }
     
@@ -774,7 +764,7 @@ pub fn verify_signature_with_timeout(
     use std::thread;
     
     if timeout_ms == 0 {
-        return Dilithium3Keypair::verify(message, signature);
+        return Ok(Dilithium3Keypair::verify(message, signature, &signature.public_key).unwrap());
     }
     
     let (tx, rx) = mpsc::channel();
@@ -782,7 +772,7 @@ pub fn verify_signature_with_timeout(
     let signature = signature.clone();
     
     thread::spawn(move || {
-        let result = Dilithium3Keypair::verify(&message, &signature);
+        let result = Dilithium3Keypair::verify(&message, &signature, &signature.public_key);
         let _ = tx.send(result);
     });
     
@@ -822,12 +812,12 @@ mod tests {
         assert_eq!(signature.message_hash, blake3_hash(message));
         assert!(!signature.is_expired(3600)); // Not expired within 1 hour
         
-        let valid = Dilithium3Keypair::verify(message, &signature).unwrap();
+        let valid = Dilithium3Keypair::verify(message, &signature, &keypair.public_key).unwrap();
         assert!(valid);
         
         // Test with wrong message
         let wrong_message = b"Wrong message";
-        let invalid = Dilithium3Keypair::verify(wrong_message, &signature).unwrap();
+        let invalid = Dilithium3Keypair::verify(wrong_message, &signature, &keypair.public_key).unwrap();
         assert!(!invalid);
         
         // Test message size limit

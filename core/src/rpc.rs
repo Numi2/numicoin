@@ -495,7 +495,7 @@ impl RpcServer {
         // User routes (require authentication if enabled)
         let transaction_route = warp::path("transaction")
             .and(warp::post())
-            .and(warp::body::content_length_limit(4096)) // 4KB limit for transactions
+            .and(warp::body::content_length_limit(16 * 1024)) // 16KB limit for transactions
             .and(warp::body::json())
             .and(rate_limit.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))

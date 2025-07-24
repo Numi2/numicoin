@@ -208,13 +208,8 @@ impl Transaction {
     
     pub fn verify_signature(&self) -> Result<bool> {
         if let Some(ref signature) = self.signature {
-            // Verify the signature is from the claimed sender
-            if !constant_time_eq(&signature.public_key, &self.from) {
-                return Ok(false);
-            }
-            
             let message = self.serialize_for_signing()?;
-            Dilithium3Keypair::verify(&message, signature)
+            crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.from)
         } else {
             Ok(false)
         }

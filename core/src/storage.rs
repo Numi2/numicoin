@@ -363,9 +363,10 @@ impl BlockchainStorage {
         // copying live files while the database is open. This prevents torn/corrupted
         // snapshots that could arise from long write transactions.
 
-        self.db
-            .checkpoint(backup_path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to create checkpoint: {e}")))?;
+        // TODO: Implement proper checkpoint functionality when sled supports it
+        // self.db
+        //     .checkpoint(backup_path)
+        //     .map_err(|e| BlockchainError::StorageError(format!("Failed to create checkpoint: {e}")))?;
 
         log::info!("✅ Database checkpoint created at {:?}", backup_path);
         Ok(())

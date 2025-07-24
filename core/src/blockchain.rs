@@ -14,14 +14,6 @@ use crate::mempool::{TransactionMempool, ValidationResult};
 use crate::error::BlockchainError;
 use crate::{Result};
 
-// AI Agent Note: Enhanced production-ready blockchain with comprehensive security
-// New features added:
-// - Security checkpoints system to prevent long-range attacks
-// - Enhanced DoS protection with rate limiting and resource quotas
-// - Improved fork choice rules with cumulative difficulty and finality
-// - Block validation caching for performance
-// - Account state snapshots for fast recovery
-// - Enhanced difficulty adjustment with better attack resistance
 
 /// Maximum blocks that can be processed per second (DoS protection)
 const MAX_BLOCKS_PER_SECOND: usize = 10;
@@ -528,7 +520,7 @@ impl NumiBlockchain {
             arrival_time: Utc::now(),
             processing_time_ms: 0,
             peer_id: None,
-            validation_cache: None,
+            validation_cache: None, // Could be populated if we cached earlier
         };
         
         // Add to block index
@@ -912,22 +904,25 @@ impl NumiBlockchain {
                 last_activity: Utc::now(),
             });
         
-        // Validate nonce
-        if transaction.nonce != account_state.nonce + 1 {
-            return Err(BlockchainError::InvalidTransaction(
-                format!("Invalid nonce: expected {}, got {}", 
-                       account_state.nonce + 1, transaction.nonce)));
-        }
-        
         // Validate transaction type-specific conditions
         match &transaction.transaction_type {
             TransactionType::Transfer { amount, .. } => {
+                if transaction.nonce != account_state.nonce + 1 {
+                    return Err(BlockchainError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", 
+                               account_state.nonce + 1, transaction.nonce)));
+                }
                 if account_state.balance < (*amount + transaction.fee) {
                     return Err(BlockchainError::InvalidTransaction(
                         format!("Insufficient balance: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
                 }
             }
             TransactionType::Stake { amount, validator: _ } => {
+                if transaction.nonce != account_state.nonce + 1 {
+                    return Err(BlockchainError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", 
+                               account_state.nonce + 1, transaction.nonce)));
+                }
                 if account_state.balance < (*amount + transaction.fee) {
                     return Err(BlockchainError::InvalidTransaction(
                         format!("Insufficient balance for staking: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
@@ -937,6 +932,11 @@ impl NumiBlockchain {
                 }
             }
             TransactionType::Unstake { amount, force: _ } => {
+                if transaction.nonce != account_state.nonce + 1 {
+                    return Err(BlockchainError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", 
+                               account_state.nonce + 1, transaction.nonce)));
+                }
                 if account_state.staked_amount < *amount {
                     return Err(BlockchainError::InvalidTransaction(
                         format!("Insufficient staked amount: {} < {}", account_state.staked_amount, amount)));
@@ -946,6 +946,11 @@ impl NumiBlockchain {
                 // Mining rewards are validated at block level
             }
             TransactionType::Governance { .. } => {
+                if transaction.nonce != account_state.nonce + 1 {
+                    return Err(BlockchainError::InvalidTransaction(
+                        format!("Invalid nonce: expected {}, got {}", 
+                               account_state.nonce + 1, transaction.nonce)));
+                }
                 if account_state.staked_amount < 1_000_000_000_000 { // Minimum 1000 NUMI staked
                     return Err(BlockchainError::InvalidTransaction(
                         "Insufficient stake for governance participation".to_string()));
@@ -1150,9 +1155,14 @@ impl NumiBlockchain {
     
     /// Calculate work value for a block based on difficulty
     fn calculate_block_work(&self, difficulty: u32) -> u128 {
-        // Work = 2^256 / (target + 1)
-        // Simplified: work increases exponentially with difficulty
-        2u128.pow(difficulty.min(64)) // Cap to prevent overflow
+        // Work = 2^256 / (target + 1) where target = 2^(256-difficulty)
+        // This represents the expected number of hash attempts needed
+        if difficulty >= 256 {
+            return 1; // Maximum difficulty = minimum work
+        }
+        // Work = 2^difficulty (simplified approximation)
+        // Cap at 2^127 to prevent overflow while maintaining meaningful values
+        2u128.pow(difficulty.min(127))
     }
     
     /// Calculate next difficulty adjustment

@@ -72,7 +72,7 @@ impl Block {
     pub fn verify_signature(&self) -> Result<bool> {
         if let Some(ref signature) = self.header.block_signature {
             let message = self.serialize_header_for_hashing();
-            crate::crypto::Dilithium3Keypair::verify(&message, signature)
+            crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.header.miner_public_key)
         } else {
             Ok(false)
         }
@@ -168,7 +168,7 @@ impl Block {
     pub fn get_total_fees(&self) -> u64 {
         self.transactions.iter()
             .filter(|tx| !tx.is_reward())
-            .map(|tx| tx.get_amount())
+            .map(|tx| tx.fee)
             .sum()
     }
     
@@ -191,7 +191,7 @@ impl Block {
             miner_public_key: self.header.miner_public_key.clone(),
         };
         
-        bincode::serialize(&header_data).unwrap_or_default()
+        bincode::serialize(&header_data).expect("Header serialization failed")
     }
 }
 

@@ -80,6 +80,8 @@ jsonwebtoken = "8"
 criterion = "0.5"
 tempfile = "3.8"
 proptest = "1.4" # Property-based testing
+assert_cmd = "2.0"
+predicates = "2.1"
 
 [features]
 default = ["std", "temporary-pqcrypto"]

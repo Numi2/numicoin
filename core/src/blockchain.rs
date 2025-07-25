@@ -314,16 +314,28 @@ impl NumiBlockchain {
     
     /// Load blockchain from storage with validation
     pub async fn load_from_storage(storage: &crate::storage::BlockchainStorage) -> Result<Self> {
-        let mut blockchain = Self::new()?;
+        let miner_keypair = Dilithium3Keypair::new()?;
+        let mempool = Arc::new(TransactionMempool::new());
         
-        // Clear initial state (will be rebuilt from storage)
-        blockchain.blocks.clear();
-        blockchain.main_chain.write().clear();
-        blockchain.accounts.clear();
-        blockchain.checkpoints.write().clear();
-        blockchain.orphan_pool.clear();
-        blockchain.orphan_by_peer.clear();
-        blockchain.peer_metrics.clear();
+        let mut blockchain = Self {
+            blocks: Arc::new(DashMap::new()),
+            main_chain: Arc::new(RwLock::new(Vec::new())),
+            accounts: Arc::new(DashMap::new()),
+            state: Arc::new(RwLock::new(ChainState::default())),
+            checkpoints: Arc::new(RwLock::new(Vec::new())),
+            orphan_pool: Arc::new(DashMap::new()),
+            orphan_by_peer: Arc::new(DashMap::new()),
+            mempool,
+            block_times: Arc::new(RwLock::new(VecDeque::new())),
+            peer_metrics: Arc::new(DashMap::new()),
+            genesis_hash: [0; 32],
+            miner_keypair,
+            target_block_time: Duration::from_secs(30), // 30 second blocks
+            difficulty_adjustment_interval: 144,        // Adjust every 144 blocks (~1 hour)
+            max_orphan_blocks: 1000,                   // Maximum orphan blocks to keep
+            max_reorg_depth: 144,                      // Maximum reorganization depth
+            block_processing_times: Arc::new(RwLock::new(VecDeque::new())),
+        };
         
         // Load all blocks from storage
         let stored_blocks = storage.get_all_blocks()?;
@@ -337,12 +349,18 @@ impl NumiBlockchain {
         }
         
         // Rebuild blockchain from blocks in height order
-        for (height, blocks) in blocks_by_height {
-            for block in blocks {
-                if height == 0 {
-                    blockchain.genesis_hash = block.calculate_hash()?;
+        if blocks_by_height.is_empty() {
+            // No stored blocks, create genesis block
+            blockchain.create_genesis_block()?;
+        } else {
+            // Load existing blocks
+            for (height, blocks) in blocks_by_height {
+                for block in blocks {
+                    if height == 0 {
+                        blockchain.genesis_hash = block.calculate_hash()?;
+                    }
+                    blockchain.process_block_internal(block, false).await?;
                 }
-                blockchain.process_block_internal(block, false).await?;
             }
         }
         

@@ -28,7 +28,7 @@ struct Cli {
     config: PathBuf,
     
     /// Data directory (overrides config file)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     data_dir: Option<PathBuf>,
     
     /// Enable verbose logging
@@ -634,10 +634,12 @@ async fn init_blockchain_command(config: Config, _force: bool, _genesis_config_p
     let blockchain = NumiBlockchain::new()?;
     println!("✅ Blockchain initialized");
     
-    // Save initial state
+    // Save initial state and blocks
+    blockchain.save_to_storage(&storage)?;
+    println!("✅ Initial state and blocks saved");
+    
+    // Get state for display
     let state = blockchain.get_chain_state();
-    storage.save_chain_state(&state)?;
-    println!("✅ Initial state saved");
     
     println!("🎉 Numi blockchain initialized successfully!");
     println!("📊 Genesis block created");

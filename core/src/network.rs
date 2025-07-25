@@ -23,6 +23,7 @@ use crate::block::Block;
 use crate::transaction::Transaction;
 use crate::{Result, BlockchainError};
 use crate::crypto::{Dilithium3Keypair, kyber_keypair};
+use crate::transaction::TransactionType;
 
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
@@ -1018,6 +1019,7 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transaction::TransactionType;
 
     #[tokio::test]
     async fn test_peer_key_registry_basic_operations() {
@@ -1086,5 +1088,55 @@ mod tests {
         // Verify key registry is accessible through handle
         let verified_peers = handle.get_verified_peers().await;
         assert_eq!(verified_peers.len(), 0); // Should be empty initially
+    }
+
+    #[tokio::test]
+    async fn test_network_manager_sync_flags() {
+        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        // Initially not syncing
+        assert!(!manager.is_syncing().await);
+        // Set syncing
+        manager.set_syncing(true).await;
+        assert!(manager.is_syncing().await);
+        // Unset syncing
+        manager.set_syncing(false).await;
+        assert!(!manager.is_syncing().await);
+    }
+
+    #[tokio::test]
+    async fn test_network_manager_chain_height() {
+        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        // Initial height is 0
+        assert_eq!(manager.get_chain_height().await, 0);
+        // Update chain height
+        manager.set_chain_height(42).await;
+        assert_eq!(manager.get_chain_height().await, 42);
+    }
+
+    #[tokio::test]
+    async fn test_network_manager_handle_sync_and_height() {
+        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let handle = manager.create_handle();
+        // Initially not syncing and height 0
+        assert!(!handle.is_syncing().await);
+        assert_eq!(handle.get_chain_height().await, 0);
+        // Manager updates
+        manager.set_syncing(true).await;
+        manager.set_chain_height(7).await;
+        // Handle reflects updates
+        assert!(handle.is_syncing().await);
+        assert_eq!(handle.get_chain_height().await, 7);
+    }
+
+    #[tokio::test]
+    async fn test_network_manager_broadcast_messages() {
+        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let handle = manager.create_handle();
+        // Test broadcast_block via handle
+        let block = Block::new(0, [0u8; 32], Vec::new(), 1, Vec::new());
+        assert!(handle.broadcast_block(block).await.is_ok());
+        // Test broadcast_transaction via handle
+        let tx = Transaction::new(Vec::new(), TransactionType::Transfer { to: Vec::new(), amount: 0, memo: None }, 0);
+        assert!(handle.broadcast_transaction(tx).await.is_ok());
     }
 } 

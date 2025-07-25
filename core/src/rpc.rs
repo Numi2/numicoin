@@ -1190,3 +1190,83 @@ async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std
         code,
     ))
 } 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::{Transaction, TransactionType};
+    use hex;
+    use bincode;
+
+    #[test]
+    fn test_transaction_request_validate_success() {
+        let from = hex::encode(vec![0u8; 64]);
+        let to = hex::encode(vec![0u8; 64]);
+        let signature = hex::encode(vec![0u8; 64]);
+        let req = TransactionRequest {
+            from: from.clone(),
+            to: to.clone(),
+            amount: 100,
+            nonce: 1,
+            signature: signature.clone(),
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_transaction_request_validate_invalid_from_format() {
+        let req = TransactionRequest {
+            from: "zz".repeat(64),
+            to: hex::encode(vec![0u8; 64]),
+            amount: 100,
+            nonce: 1,
+            signature: hex::encode(vec![0u8; 64]),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_transaction_request_validate_amount_zero() {
+        let from = hex::encode(vec![0u8; 64]);
+        let to = hex::encode(vec![0u8; 64]);
+        let signature = hex::encode(vec![0u8; 64]);
+        let req = TransactionRequest {
+            from,
+            to,
+            amount: 0,
+            nonce: 1,
+            signature,
+        };
+        let err = req.validate().unwrap_err();
+        assert_eq!(err, "Amount must be greater than zero");
+    }
+
+    #[test]
+    fn test_rate_limit_config_defaults() {
+        let default = RateLimitConfig::default();
+        assert_eq!(default.requests_per_minute, 60);
+        assert_eq!(default.burst_size, 10);
+        assert!(default.cleanup_interval.as_secs() >= 300);
+    }
+
+    #[test]
+    fn test_production_rate_limit_config() {
+        let prod = RateLimitConfig::production();
+        assert_eq!(prod.requests_per_minute, 100);
+        assert_eq!(prod.burst_size, 20);
+    }
+
+    #[test]
+    fn test_calculate_transaction_fee() {
+        let tx = Transaction::new_with_fee(
+            vec![0u8; 64],
+            TransactionType::Transfer { to: vec![0u8; 64], amount: 0, memo: None },
+            0,
+            0,
+            0,
+        );
+        let fee = calculate_transaction_fee(&tx);
+        // Base fee 1000 satoshis / 1e9 = 0.000001 NUMI, size fee >= 0
+        assert!(fee >= 0.000001);
+    }
+} 

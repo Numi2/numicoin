@@ -115,7 +115,7 @@ _Date: 2025-07-23_
 ## General recommendations
 1. **Module decomposition** – Break down very large files (`blockchain.rs`, `crypto.rs`, `transaction.rs`) into sub-modules to aid readability and compile times.
 2. **Error handling ergonomics** – Adopt `thiserror` or `anyhow` for automatic `source()` chaining.
-3. **Testing** – Unit tests are present but integration tests (network sync, RPC, CLI) are missing.
+
 4. **Security** – Audit external crates (some are outdated).  Implement real entropy check in `Dilithium3Keypair::validate_system_entropy`.
 5. **Documentation** – Inline docs abundant, but `cargo doc --open` reveals many public items without summary; add `///` comments.
 

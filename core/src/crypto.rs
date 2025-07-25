@@ -278,44 +278,44 @@ impl Dilithium3Keypair {
     fn validate_system_entropy() -> Result<()> {
         use std::fs::File;
         use std::io::Read;
-        
-        // Check entropy sources on Unix systems
-        #[cfg(unix)]
+
+        // Check entropy sources on Linux systems
+        #[cfg(target_os = "linux")]
         {
-            match File::open("/proc/sys/kernel/random/entropy_avail") {
-                Ok(mut file) => {
-                    let mut contents = String::new();
-                    if file.read_to_string(&mut contents).is_ok() {
-                        if let Ok(entropy) = contents.trim().parse::<u32>() {
-                            if entropy < (MIN_ENTROPY_BITS as u32) {
-                                log::warn!("Low system entropy: {} bits", entropy);
-                            }
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Can't check entropy, proceed with warning
-                    log::warn!("Cannot check system entropy availability");
-                }
+            let mut file = File::open("/proc/sys/kernel/random/entropy_avail")
+                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot open entropy source: {}", e)))?;
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)
+                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot read entropy source: {}", e)))?;
+            let entropy = contents.trim().parse::<u32>()
+                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot parse entropy value: {}", e)))?;
+            if entropy < (MIN_ENTROPY_BITS as u32) {
+                return Err(BlockchainError::CryptographyError(format!(
+                    "Insufficient system entropy: {} bits available, {} bits required",
+                    entropy, MIN_ENTROPY_BITS)));
             }
         }
-        
+        #[cfg(not(target_os = "linux"))]
+        {
+            log::warn!("Skipping system entropy check on non-Linux OS");
+        }
+
         // Test randomness quality
         let mut test_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut test_bytes);
-        
+
         // Basic entropy test - check for patterns
         let mut ones = 0;
         for byte in &test_bytes {
             ones += byte.count_ones();
         }
-        
+
         // Should be roughly balanced (around 128 ones in 256 bits)
         if ones < 96 || ones > 160 {
             return Err(BlockchainError::CryptographyError(
                 "Insufficient randomness detected".to_string()));
         }
-        
+
         Ok(())
     }
 }

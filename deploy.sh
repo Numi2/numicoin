@@ -103,7 +103,7 @@ create_directories() {
     log_step "Creating directories..."
     
     mkdir -p $NUMI_HOME $NUMI_DATA $NUMI_LOGS
-    chown -R $NUMI_USER:$NUMI_USER $NUMI_HOME $NUMI_DATA $NUMI_LOGS
+#    chown -R $NUMI_USER:$NUMI_USER $NUMI_HOME $NUMI_DATA $NUMI_LOGS
     chmod 755 $NUMI_HOME $NUMI_DATA
     chmod 750 $NUMI_LOGS
     
@@ -329,7 +329,7 @@ main "$@"
 EOF
 
     chmod +x $NUMI_HOME/monitor.sh
-    chown $NUMI_USER:$NUMI_USER $NUMI_HOME/monitor.sh
+#    chown $NUMI_USER:$NUMI_USER $NUMI_HOME/monitor.sh
     
     # Add to cron for periodic monitoring
     echo "*/5 * * * * $NUMI_USER $NUMI_HOME/monitor.sh" > /etc/cron.d/numi-monitor

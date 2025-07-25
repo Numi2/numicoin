@@ -217,16 +217,7 @@ impl NetworkConfig {
         }
     }
 
-    pub fn testnet() -> Self {
-        Self {
-            max_peers: 10,
-            connection_timeout_secs: 10,
-            peer_discovery_interval_secs: 60,
-            ban_duration_secs: 300, // 5 minutes for development
-            rate_limit_per_peer: 1000, // More lenient for testing
-            ..Default::default()
-        }
-    }
+
 
     pub fn validate(&self) -> Result<(), String> {
         if self.listen_port == 0 {
@@ -322,20 +313,7 @@ impl MiningConfig {
         }
     }
 
-    pub fn testnet() -> Self {
-        Self {
-            enabled: true,
-            thread_count: (num_cpus::get() / 2).max(1),
-            nonce_chunk_size: 1_000,
-            stats_update_interval_secs: 10,
-            thermal_throttle_temp: 70.0,
-            power_limit_watts: 50.0,
-            argon2_config: Argon2Config::development(),
-            target_block_time_secs: 10, // Faster blocks for development
-            difficulty_adjustment_interval: 20,
-            ..Default::default()
-        }
-    }
+
 
     pub fn validate(&self) -> Result<(), String> {
         if self.thread_count == 0 {
@@ -441,20 +419,7 @@ impl RpcConfig {
         }
     }
 
-    pub fn testnet() -> Self {
-        Self {
-            rate_limit_requests_per_minute: 1000,
-            rate_limit_burst_size: 100,
-            enable_authentication: false,
-            admin_endpoints_enabled: true,
-            allowed_origins: vec![
-                "http://localhost:3000".to_string(),
-                "http://localhost:3001".to_string(),
-                "http://127.0.0.1:3000".to_string(),
-            ],
-            ..Default::default()
-        }
-    }
+
 
     pub fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
@@ -577,16 +542,7 @@ impl SecurityConfig {
         }
     }
 
-    pub fn testnet() -> Self {
-        Self {
-            max_failed_attempts: 10,
-            block_duration_minutes: 1,
-            enable_request_signing: false,
-            require_https: false,
-            enable_firewall: false,
-            ..Default::default()
-        }
-    }
+
 
     pub fn validate(&self) -> Result<(), String> {
         if self.jwt_secret.len() < 32 {
@@ -687,19 +643,7 @@ impl StorageConfig {
         }
     }
 
-    pub fn testnet() -> Self {
-        Self {
-            data_directory: PathBuf::from("./testnet-data"),
-            backup_directory: Some(PathBuf::from("./testnet-backups")),
-            max_database_size_mb: 1024, // 1GB
-            cache_size_mb: 128, // 128MB
-            enable_compression: false,
-            enable_encryption: false,
-            auto_backup: false,
-            sync_mode: SyncMode::Fast,
-            ..Default::default()
-        }
-    }
+
 
     pub fn validate(&self) -> Result<(), String> {
         if self.max_database_size_mb == 0 {
@@ -784,19 +728,6 @@ impl ConsensusConfig {
             genesis_supply: 1_000_000_000_000_000, // 1M NUMI for testnet
             mining_reward_halving_interval: 100_000, // Faster halving for testnet
             initial_mining_reward: 100_000_000_000, // 100 NUMI initial reward
-            ..Default::default()
-        }
-    }
-
-    pub fn testnet() -> Self {
-        Self {
-            target_block_time: Duration::from_secs(10), // Faster for testing
-            difficulty_adjustment_interval: 20,
-            max_block_size: 512 * 1024, // 512KB
-            max_transactions_per_block: 100,
-            max_reorg_depth: 10,
-            checkpoint_interval: 50,
-            finality_depth: 100,
             ..Default::default()
         }
     }

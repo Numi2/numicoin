@@ -1,0 +1,30 @@
+{
+    "testnet": {
+        "name": "numi-testnet",
+        "version": "1.0.0",
+        "chain_id": "testnet-2024",
+        "ports": {
+            "p2p": 8334,
+            "rpc": 8081
+        },
+        "bootstrap_nodes": [
+            "/ip4/127.0.0.1/tcp/8334",
+            "/ip4/127.0.0.1/tcp/8335",
+            "/ip4/127.0.0.1/tcp/8336"
+        ],
+        "consensus": {
+            "algorithm": "proof-of-work",
+            "pow_algorithm": "argon2id",
+            "signature_algorithm": "dilithium3",
+            "kem_algorithm": "kyber",
+            "block_time": 15,
+            "difficulty_adjustment_interval": 30
+        },
+        "cryptography": {
+            "hash_function": "blake3",
+            "signature_scheme": "dilithium3",
+            "kem_scheme": "kyber",
+            "pow_function": "argon2id"
+        }
+    }
+}

@@ -394,10 +394,7 @@ impl Transaction {
     pub fn get_amount(&self) -> u64 {
         match &self.transaction_type {
             TransactionType::Transfer { amount, .. } => *amount,
-            TransactionType::Stake { amount, .. } => *amount,
-            TransactionType::Unstake { amount, .. } => *amount,
             TransactionType::MiningReward { amount, .. } => *amount,
-            TransactionType::Governance { .. } => 0,
             TransactionType::ContractDeploy { .. } => 0, // Only fee required
             TransactionType::ContractCall { .. } => 0, // Only fee and gas required
         }

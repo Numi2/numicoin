@@ -397,7 +397,7 @@ async fn start_full_node(config: Config) -> Result<()> {
 
     // ----------------------- Networking ---------------------------
     let mut network = NetworkManager::new()?;
-    let network_addr = config.network.listen_address.clone();
+    let network_addr = format!("/ip4/{}/tcp/{}", config.network.listen_address, config.network.listen_port);
     network.start(&network_addr).await?;
     log::info!("✅ Network started on {}", network_addr);
 
@@ -615,7 +615,7 @@ async fn show_balance_command(config: Config, address: String, _history: bool) -
     // Try to get account state for more details
     if let Ok(account_state) = blockchain.get_account_state(&pubkey) {
         println!("🔢 Nonce: {}", account_state.nonce);
-        println!("🔒 Staked amount: {} NUMI", account_state.staked_amount as f64 / 1_000_000_000.0);
+        println!("📊 Transaction count: {}", account_state.transaction_count);
     }
     
     Ok(())

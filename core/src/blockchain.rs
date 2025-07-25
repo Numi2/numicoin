@@ -905,12 +905,9 @@ impl NumiBlockchain {
             .unwrap_or_else(|| AccountState {
                 balance: 0,
                 nonce: 0,
-                staked_amount: 0,
-                last_stake_time: Utc::now(),
                 transaction_count: 0,
                 total_received: 0,
                 total_sent: 0,
-                validator_info: None,
                 created_at: Utc::now(),
                 last_activity: Utc::now(),
             });
@@ -965,12 +962,9 @@ impl NumiBlockchain {
                     .unwrap_or_else(|| AccountState {
                         balance: 0,
                         nonce: 0,
-                        staked_amount: 0,
-                        last_stake_time: Utc::now(),
                         transaction_count: 0,
                         total_received: 0,
                         total_sent: 0,
-                        validator_info: None,
                         created_at: Utc::now(),
                         last_activity: Utc::now(),
                     });
@@ -979,21 +973,6 @@ impl NumiBlockchain {
                 recipient_state.total_received += amount;
                 
                 self.accounts.insert(to.clone(), recipient_state);
-            }
-            
-            TransactionType::Stake { amount, validator: _ } => {
-                sender_state.balance -= amount + transaction.fee;
-                sender_state.staked_amount += amount;
-                sender_state.last_stake_time = Utc::now();
-                sender_state.nonce += 1;
-                sender_state.transaction_count += 1;
-            }
-            
-            TransactionType::Unstake { amount, force: _ } => {
-                sender_state.staked_amount -= amount;
-                sender_state.balance += amount - transaction.fee;
-                sender_state.nonce += 1;
-                sender_state.transaction_count += 1;
             }
             
             TransactionType::MiningReward { amount, .. } => {
@@ -1005,11 +984,7 @@ impl NumiBlockchain {
                 state.total_supply += amount;
             }
             
-            TransactionType::Governance { .. } => {
-                sender_state.balance -= transaction.fee;
-                sender_state.nonce += 1;
-                sender_state.transaction_count += 1;
-            }
+
             TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
                 // Contract operations are not yet implemented
                 return Err(BlockchainError::InvalidTransaction("Contract operations not supported".to_string()));
@@ -1741,7 +1716,6 @@ impl NumiBlockchain {
                 state.best_block_hash,
                 state.cumulative_difficulty,
                 state.total_supply,
-                state.active_validators,
                 state_root,
             );
             

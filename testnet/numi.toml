@@ -1,0 +1,100 @@
+[network]
+enabled = true
+listen_address = "0.0.0.0"
+listen_port = 8333
+max_peers = 20
+connection_timeout_secs = 15
+bootstrap_nodes = [
+    "/ip4/127.0.0.1/tcp/8334",
+    "/ip4/127.0.0.1/tcp/8335",
+]
+enable_upnp = false
+enable_mdns = true
+peer_discovery_interval_secs = 120
+max_message_size = 10485760
+ban_duration_secs = 600
+rate_limit_per_peer = 500
+
+[mining]
+enabled = true
+thread_count = 10
+nonce_chunk_size = 5000
+stats_update_interval_secs = 5
+enable_cpu_affinity = false
+thermal_throttle_temp = 75.0
+power_limit_watts = 0.0
+target_block_time_secs = 15
+difficulty_adjustment_interval = 30
+
+[mining.argon2_config]
+memory_cost = 4096
+time_cost = 1
+parallelism = 1
+output_length = 32
+salt_length = 32
+
+[rpc]
+enabled = true
+bind_address = "0.0.0.0"
+port = 8081
+max_connections = 200
+request_timeout_secs = 30
+max_request_size = 1048576
+enable_cors = true
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "https://testnet.numicoin.org",
+]
+rate_limit_requests_per_minute = 500
+rate_limit_burst_size = 50
+enable_authentication = false
+admin_endpoints_enabled = true
+
+[security]
+jwt_secret = "aZ5LA6R9OZ5IhxbO7Q13hdgfTSIy6nPH"
+jwt_expiry_hours = 1
+admin_api_key = "ZPQSaokL0PZrHXbsVGl2SIpgPdyayMzW"
+enable_rate_limiting = true
+enable_ip_blocking = true
+max_failed_attempts = 15
+block_duration_minutes = 5
+enable_request_signing = false
+require_https = false
+enable_firewall = false
+trusted_proxies = [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+]
+
+[storage]
+data_directory = "./testnet-data"
+backup_directory = "./testnet-backups"
+max_database_size_mb = 2048
+cache_size_mb = 256
+enable_compression = true
+enable_encryption = false
+auto_backup = true
+backup_interval_hours = 12
+retention_days = 7
+sync_mode = "Normal"
+
+[consensus]
+difficulty_adjustment_interval = 30
+max_block_size = 1048576
+max_transactions_per_block = 500
+min_transaction_fee = 500
+max_reorg_depth = 20
+checkpoint_interval = 100
+finality_depth = 200
+genesis_supply = 1000000000000000
+mining_reward_halving_interval = 100000
+initial_mining_reward = 100000000000
+
+[consensus.target_block_time]
+secs = 15
+nanos = 0

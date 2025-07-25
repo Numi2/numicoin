@@ -484,8 +484,27 @@ impl NetworkManager {
 
     /// Start the network manager and bind to listening address
     pub async fn start(&mut self, listen_addr: &str) -> Result<()> {
-        let addr: Multiaddr = listen_addr.parse()
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid listen address: {}", e)))?;
+        // Try to parse as multiaddr first, if that fails, try to construct it
+        let addr: Multiaddr = match listen_addr.parse() {
+            Ok(addr) => addr,
+            Err(_) => {
+                // If parsing fails, try to construct a proper multiaddr
+                // The listen_addr should be in format "/ip4/0.0.0.0/tcp/8333"
+                if listen_addr.starts_with("/ip4/") {
+                    listen_addr.parse()
+                        .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {}", e)))?
+                } else {
+                    // Try to construct from IP and port
+                    let parts: Vec<&str> = listen_addr.split('/').collect();
+                    if parts.len() >= 4 && parts[1] == "ip4" && parts[3] == "tcp" {
+                        listen_addr.parse()
+                            .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {}", e)))?
+                    } else {
+                        return Err(BlockchainError::NetworkError(format!("Invalid listen address format: {}", listen_addr)));
+                    }
+                }
+            }
+        };
 
         self.swarm.listen_on(addr.clone())
             .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {}", e)))?;

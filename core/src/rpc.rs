@@ -785,26 +785,26 @@ async fn handle_balance(
     };
     
     // Get balance and account state without holding lock across await
-    let (balance, nonce, staked_amount, transaction_count) = {
+    let (balance, nonce, transaction_count) = {
         let blockchain = rpc_server.blockchain.read();
         let balance = blockchain.get_balance(&pubkey);
         let account_state = blockchain.get_account_state(&pubkey);
         
-        let (nonce, staked_amount, transaction_count) = 
+        let (nonce, transaction_count) = 
             if let Ok(account_state) = account_state {
-                (account_state.nonce, account_state.staked_amount, account_state.transaction_count)
+                (account_state.nonce, account_state.transaction_count)
             } else {
-                (0, 0, 0)
+                (0, 0)
             };
         
-        (balance, nonce, staked_amount, transaction_count)
+        (balance, nonce, transaction_count)
     };
     
     let response = BalanceResponse {
         address,
         balance: balance as f64 / 1_000_000_000.0,
         nonce,
-        staked_amount: staked_amount as f64 / 1_000_000_000.0,
+        staked_amount: 0.0, // Removed staking functionality
         transaction_count,
     };
     
@@ -849,10 +849,7 @@ async fn handle_block(
             let transaction_summaries: Vec<TransactionSummary> = block.transactions.iter().map(|tx| {
                 let (tx_type, amount) = match &tx.transaction_type {
                     TransactionType::Transfer { amount, .. } => ("transfer".to_string(), *amount),
-                    TransactionType::Stake { amount, validator: _ } => ("stake".to_string(), *amount),
-                    TransactionType::Unstake { amount, force: _ } => ("unstake".to_string(), *amount),
                     TransactionType::MiningReward { amount, .. } => ("mining_reward".to_string(), *amount),
-                    TransactionType::Governance { .. } => ("governance".to_string(), 0),
                     TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => ("contract".to_string(), 0),
                 };
                 

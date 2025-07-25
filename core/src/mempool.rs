@@ -427,20 +427,8 @@ impl TransactionMempool {
                 }
                 // TODO: Check balance (requires blockchain state access)
             }
-            TransactionType::Stake { amount, validator: _ } => {
-                if *amount < 1_000_000_000 { // Minimum 1 NUMI stake
-                    return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
-                }
-            }
-            TransactionType::Unstake { .. } => {
-                // TODO: Validate unstaking conditions
-            }
             TransactionType::MiningReward { .. } => {
                 // Mining rewards are system-generated and pre-validated
-            }
-            TransactionType::Governance { .. } => {
-                // Governance transactions have special validation rules
-                // TODO: Implement governance validation
             }
             TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
                 // Contract operations are not yet implemented

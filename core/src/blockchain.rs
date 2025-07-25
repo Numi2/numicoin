@@ -45,7 +45,7 @@ pub struct SecurityCheckpoint {
     pub cumulative_difficulty: u128,
     pub timestamp: DateTime<Utc>,
     pub total_supply: u64,
-    pub active_validators: u64,
+
     /// Merkle root of account states at this checkpoint
     pub state_root: [u8; 32],
 }
@@ -56,7 +56,6 @@ impl SecurityCheckpoint {
         block_hash: BlockHash,
         cumulative_difficulty: u128,
         total_supply: u64,
-        active_validators: u64,
         state_root: [u8; 32],
     ) -> Self {
         Self {
@@ -65,7 +64,6 @@ impl SecurityCheckpoint {
             cumulative_difficulty,
             timestamp: Utc::now(),
             total_supply,
-            active_validators,
             state_root,
         }
     }
@@ -104,8 +102,7 @@ pub struct ChainState {
     /// Last finalized block (beyond reorganization)
     pub finalized_block_hash: BlockHash,
     pub finalized_block_height: u64,
-    /// Active validator count for PoS elements
-    pub active_validators: u64,
+
     /// Current network hash rate estimate
     pub network_hash_rate: u64,
 }
@@ -123,7 +120,7 @@ impl Default for ChainState {
             cumulative_difficulty: 0,
             finalized_block_hash: [0; 32],
             finalized_block_height: 0,
-            active_validators: 0,
+
             network_hash_rate: 0,
         }
     }
@@ -134,13 +131,9 @@ impl Default for ChainState {
 pub struct AccountState {
     pub balance: u64,
     pub nonce: u64,
-    pub staked_amount: u64,
-    pub last_stake_time: DateTime<Utc>,
     pub transaction_count: u64,
     pub total_received: u64,
     pub total_sent: u64,
-    /// Validator info (if this account is a validator)
-    pub validator_info: Option<ValidatorInfo>,
     /// Account creation time
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -153,29 +146,16 @@ impl Default for AccountState {
         Self {
             balance: 0,
             nonce: 0,
-            staked_amount: 0,
-            last_stake_time: now,
             transaction_count: 0,
             total_received: 0,
             total_sent: 0,
-            validator_info: None,
             created_at: now,
             last_activity: now,
         }
     }
 }
 
-/// Validator information for PoS consensus
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidatorInfo {
-    pub voting_power: u64,
-    pub commission_rate: f64, // 0.0 to 1.0
-    pub jailed: bool,
-    pub jail_until: DateTime<Utc>,
-    pub missed_blocks: u64,
-    pub produced_blocks: u64,
-    pub last_signed: DateTime<Utc>,
-}
+
 
 /// Enhanced block metadata with security and performance features
 #[derive(Debug, Clone)]
@@ -338,7 +318,7 @@ impl NumiBlockchain {
         };
         
         // Load all blocks from storage
-        let stored_blocks = storage.get_all_blocks()?;
+        let stored_blocks = storage.iter_blocks(None, None)?.collect::<Result<Vec<_>>>()?;
         let mut blocks_by_height: BTreeMap<u64, Vec<Block>> = BTreeMap::new();
         
         for block in stored_blocks {
@@ -365,7 +345,7 @@ impl NumiBlockchain {
         }
         
         // Load account states
-        let accounts = storage.get_all_accounts()?;
+        let accounts = storage.iter_accounts(None, None)?.collect::<Result<Vec<_>>>()?;
         for (pubkey, account_state) in accounts {
             blockchain.accounts.insert(pubkey, account_state);
         }
@@ -948,49 +928,11 @@ impl NumiBlockchain {
                         format!("Insufficient balance: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
                 }
             }
-            TransactionType::Stake { amount, validator: _ } => {
-                if transaction.nonce != account_state.nonce + 1 {
-                    return Err(BlockchainError::InvalidTransaction(
-                        format!("Invalid nonce: expected {}, got {}", 
-                               account_state.nonce + 1, transaction.nonce)));
-                }
-                if account_state.balance < (*amount + transaction.fee) {
-                    return Err(BlockchainError::InvalidTransaction(
-                        format!("Insufficient balance for staking: {} < {} (amount + fee)", account_state.balance, *amount + transaction.fee)));
-                }
-                if *amount < 1_000_000_000 { // Minimum 1 NUMI
-                    return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
-                }
-            }
-            TransactionType::Unstake { amount, force: _ } => {
-                if transaction.nonce != account_state.nonce + 1 {
-                    return Err(BlockchainError::InvalidTransaction(
-                        format!("Invalid nonce: expected {}, got {}", 
-                               account_state.nonce + 1, transaction.nonce)));
-                }
-                if account_state.staked_amount < *amount {
-                    return Err(BlockchainError::InvalidTransaction(
-                        format!("Insufficient staked amount: {} < {}", account_state.staked_amount, amount)));
-                }
-            }
+
             TransactionType::MiningReward { .. } => {
                 // Mining rewards are validated at block level
             }
-            TransactionType::Governance { .. } => {
-                if transaction.nonce != account_state.nonce + 1 {
-                    return Err(BlockchainError::InvalidTransaction(
-                        format!("Invalid nonce: expected {}, got {}", 
-                               account_state.nonce + 1, transaction.nonce)));
-                }
-                if account_state.staked_amount < 1_000_000_000_000 { // Minimum 1000 NUMI staked
-                    return Err(BlockchainError::InvalidTransaction(
-                        "Insufficient stake for governance participation".to_string()));
-                }
-                if account_state.balance < transaction.fee {
-                    return Err(BlockchainError::InvalidTransaction(
-                        "Insufficient balance to cover governance transaction fee".to_string()));
-                }
-            }
+
             TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
                 // Contract transactions are not yet implemented
                 return Err(BlockchainError::InvalidTransaction("Contract transactions not yet supported".to_string()));
@@ -1007,18 +949,7 @@ impl NumiBlockchain {
         // Get or create sender account
         let mut sender_state = self.accounts.get(&sender_key)
             .map(|state| state.clone())
-            .unwrap_or_else(|| AccountState {
-                balance: 0,
-                nonce: 0,
-                staked_amount: 0,
-                last_stake_time: Utc::now(),
-                transaction_count: 0,
-                total_received: 0,
-                total_sent: 0,
-                validator_info: None,
-                created_at: Utc::now(),
-                last_activity: Utc::now(),
-            });
+            .unwrap_or_default();
         
         match &transaction.transaction_type {
             TransactionType::Transfer { to, amount, memo: _ } => {
@@ -1110,19 +1041,7 @@ impl NumiBlockchain {
                     }
                 }
                 
-                TransactionType::Stake { amount, validator: _ } => {
-                    sender_state.balance += amount + transaction.fee;
-                    sender_state.staked_amount -= amount;
-                    sender_state.nonce -= 1;
-                    sender_state.transaction_count -= 1;
-                }
-                
-                TransactionType::Unstake { amount, force: _ } => {
-                    sender_state.staked_amount += amount;
-                    sender_state.balance -= amount - transaction.fee;
-                    sender_state.nonce -= 1;
-                    sender_state.transaction_count -= 1;
-                }
+
                 
                 TransactionType::MiningReward { amount, .. } => {
                     sender_state.balance -= amount;
@@ -1133,11 +1052,7 @@ impl NumiBlockchain {
                     state.total_supply -= amount;
                 }
                 
-                TransactionType::Governance { .. } => {
-                    sender_state.balance += transaction.fee;
-                    sender_state.nonce -= 1;
-                    sender_state.transaction_count -= 1;
-                }
+
                 TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
                     // Contract operations are not yet implemented
                     return Err(BlockchainError::InvalidTransaction("Contract operations not supported".to_string()));
@@ -2157,19 +2072,7 @@ impl NumiBlockchain {
         }
     }
     
-    /// Get validator information
-    pub fn get_validator_info(&self, public_key: &[u8]) -> Option<ValidatorInfo> {
-        self.accounts.get(public_key)
-            .and_then(|account| account.validator_info.clone())
-    }
-    
-    /// Update validator information
-    pub fn update_validator_info(&self, public_key: &[u8], validator_info: ValidatorInfo) -> Result<()> {
-        let mut account = self.get_account_state_or_default(public_key);
-        account.validator_info = Some(validator_info);
-        self.accounts.insert(public_key.to_vec(), account);
-        Ok(())
-    }
+
     
     /// Get network statistics
     pub fn get_network_stats(&self) -> HashMap<String, u64> {
@@ -2178,7 +2081,7 @@ impl NumiBlockchain {
         
         stats.insert("total_blocks".to_string(), state.total_blocks);
         stats.insert("total_supply".to_string(), state.total_supply);
-        stats.insert("active_validators".to_string(), state.active_validators);
+
         stats.insert("network_hash_rate".to_string(), state.network_hash_rate);
         stats.insert("orphan_blocks".to_string(), self.orphan_pool.len() as u64);
         stats.insert("peer_count".to_string(), self.peer_metrics.len() as u64);

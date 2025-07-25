@@ -23,7 +23,7 @@ use crate::block::Block;
 use crate::transaction::Transaction;
 use crate::{Result, BlockchainError};
 use crate::crypto::{Dilithium3Keypair, kyber_keypair};
-use crate::transaction::TransactionType;
+
 
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
@@ -1019,7 +1019,6 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::TransactionType;
 
     #[tokio::test]
     async fn test_peer_key_registry_basic_operations() {
@@ -1130,6 +1129,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_broadcast_messages() {
+        use crate::transaction::TransactionType;
+        
         let manager = NetworkManager::new().expect("Failed to create NetworkManager");
         let handle = manager.create_handle();
         // Test broadcast_block via handle

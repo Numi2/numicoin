@@ -276,12 +276,12 @@ impl Dilithium3Keypair {
     
     /// Validate system entropy before key generation
     fn validate_system_entropy() -> Result<()> {
-        use std::fs::File;
-        use std::io::Read;
-
-        // Check entropy sources on Linux systems
         #[cfg(target_os = "linux")]
         {
+            use std::fs::File;
+            use std::io::Read;
+
+            // Check entropy sources on Linux systems
             let mut file = File::open("/proc/sys/kernel/random/entropy_avail")
                 .map_err(|e| BlockchainError::CryptographyError(format!("Cannot open entropy source: {}", e)))?;
             let mut contents = String::new();

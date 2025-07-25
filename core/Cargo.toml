@@ -66,6 +66,7 @@ zeroize = { version = "1.4", features = ["zeroize_derive"] }
 # Backup and restore utilities
 tar = "0.4"
 flate2 = "1.0"
+fs_extra = "1.3" # For atomic file operations
 
 # Networking and security - Updated to fix vulnerabilities
 dns-lookup = "2.0"

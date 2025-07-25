@@ -44,6 +44,7 @@ struct Cli {
 enum Environment {
     Development,
     Production,
+    Testnet,
     Testing,
 }
 
@@ -330,6 +331,7 @@ fn create_default_config(env: &Environment) -> Result<Config> {
     let config = match env {
         Environment::Development => Config::development(),
         Environment::Production => Config::production(),
+        Environment::Testnet => Config::testnet(),
         Environment::Testing => {
             let mut config = Config::development();
             config.consensus.target_block_time = std::time::Duration::from_secs(1); // Very fast for testing

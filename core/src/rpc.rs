@@ -1196,7 +1196,7 @@ mod tests {
     use super::*;
     use crate::transaction::{Transaction, TransactionType};
     use hex;
-    use bincode;
+
 
     #[test]
     fn test_transaction_request_validate_success() {

@@ -32,27 +32,11 @@ pub enum TransactionType {
         /// Optional memo/message (max 256 bytes)
         memo: Option<String>,
     },
-    Stake {
-        amount: u64,
-        /// Validator to delegate to (optional)
-        validator: Option<Vec<u8>>,
-    },
-    Unstake {
-        amount: u64,
-        /// Forced unstaking (may incur penalty)
-        force: bool,
-    },
     MiningReward {
         block_height: u64,
         amount: u64,
         /// Mining pool address (if applicable)
         pool_address: Option<Vec<u8>>,
-    },
-    Governance {
-        proposal_id: u64,
-        vote: bool,
-        /// Optional voting reason
-        reason: Option<String>,
     },
     /// Contract deployment (future extension)
     ContractDeploy {
@@ -309,22 +293,7 @@ impl Transaction {
                 }
             }
             
-            TransactionType::Stake { amount, validator } => {
-                if *amount < 1_000_000_000 { // Minimum 1 NUMI
-                    return Err(BlockchainError::InvalidTransaction("Stake amount too low".to_string()));
-                }
-                if let Some(ref val) = validator {
-                    if val.is_empty() || val.len() > 10000 {
-                        return Err(BlockchainError::InvalidTransaction("Invalid validator address".to_string()));
-                    }
-                }
-            }
-            
-            TransactionType::Unstake { amount, .. } => {
-                if *amount == 0 {
-                    return Err(BlockchainError::InvalidTransaction("Unstake amount cannot be zero".to_string()));
-                }
-            }
+
             
             TransactionType::MiningReward { block_height: _, amount, pool_address } => {
                 if *amount == 0 {
@@ -341,16 +310,7 @@ impl Transaction {
                 }
             }
             
-            TransactionType::Governance { proposal_id: _, vote: _, reason } => {
-                if let Some(ref reason_text) = reason {
-                    if reason_text.len() > 512 {
-                        return Err(BlockchainError::InvalidTransaction("Governance reason too long".to_string()));
-                    }
-                    if !reason_text.is_ascii() {
-                        return Err(BlockchainError::InvalidTransaction("Governance reason must be ASCII".to_string()));
-                    }
-                }
-            }
+
             
             TransactionType::ContractDeploy { code_hash: _, init_data } => {
                 if init_data.len() > 100_000 { // 100KB limit for init data
@@ -475,10 +435,7 @@ impl Transaction {
     pub fn get_type_string(&self) -> &'static str {
         match &self.transaction_type {
             TransactionType::Transfer { .. } => "transfer",
-            TransactionType::Stake { .. } => "stake",
-            TransactionType::Unstake { .. } => "unstake",
             TransactionType::MiningReward { .. } => "mining_reward",
-            TransactionType::Governance { .. } => "governance",
             TransactionType::ContractDeploy { .. } => "contract_deploy",
             TransactionType::ContractCall { .. } => "contract_call",
         }
@@ -502,20 +459,8 @@ impl TransactionType {
         matches!(self, TransactionType::Transfer { .. })
     }
     
-    pub fn is_stake(&self) -> bool {
-        matches!(self, TransactionType::Stake { .. })
-    }
-    
-    pub fn is_unstake(&self) -> bool {
-        matches!(self, TransactionType::Unstake { .. })
-    }
-    
     pub fn is_reward(&self) -> bool {
         matches!(self, TransactionType::MiningReward { .. })
-    }
-    
-    pub fn is_governance(&self) -> bool {
-        matches!(self, TransactionType::Governance { .. })
     }
     
     pub fn is_contract_deploy(&self) -> bool {
@@ -535,10 +480,7 @@ impl TransactionType {
     pub fn estimate_gas(&self) -> u64 {
         match self {
             TransactionType::Transfer { .. } => 21_000,
-            TransactionType::Stake { .. } => 30_000,
-            TransactionType::Unstake { .. } => 25_000,
             TransactionType::MiningReward { .. } => 0,
-            TransactionType::Governance { .. } => 15_000,
             TransactionType::ContractDeploy { .. } => 200_000,
             TransactionType::ContractCall { .. } => 100_000,
         }
@@ -718,35 +660,7 @@ mod tests {
         assert!(long_memo_tx.validate_structure().is_err());
     }
     
-    #[test]
-    fn test_stake_transaction() {
-        let keypair = Dilithium3Keypair::new().unwrap();
-        
-        // Valid stake transaction
-        let stake_tx = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Stake {
-                amount: 1_000_000_000, // 1 NUMI
-                validator: Some(vec![1, 2, 3, 4]),
-            },
-            1,
-        );
-        
-        assert!(stake_tx.validate_structure().is_ok());
-        assert_eq!(stake_tx.get_amount(), 1_000_000_000);
-        assert_eq!(stake_tx.get_type_string(), "stake");
-        
-        // Invalid stake (too low)
-        let low_stake_tx = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Stake {
-                amount: 100, // Too low
-                validator: None,
-            },
-            1,
-        );
-        assert!(low_stake_tx.validate_structure().is_err());
-    }
+
     
     #[test]
     fn test_mining_reward_transaction() {
@@ -774,36 +688,7 @@ mod tests {
         assert!(reward_tx.validate_structure().is_err());
     }
     
-    #[test]
-    fn test_governance_transaction() {
-        let keypair = Dilithium3Keypair::new().unwrap();
-        
-        let gov_tx = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Governance {
-                proposal_id: 42,
-                vote: true,
-                reason: Some("I support this proposal".to_string()),
-            },
-            1,
-        );
-        
-        assert!(gov_tx.validate_structure().is_ok());
-        assert_eq!(gov_tx.get_amount(), 0);
-        assert_eq!(gov_tx.get_type_string(), "governance");
-        
-        // Invalid governance (reason too long)
-        let invalid_gov_tx = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Governance {
-                proposal_id: 42,
-                vote: true,
-                reason: Some("a".repeat(600)), // Too long
-            },
-            1,
-        );
-        assert!(invalid_gov_tx.validate_structure().is_err());
-    }
+
     
     #[test]
     fn test_contract_transactions() {

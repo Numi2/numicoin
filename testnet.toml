@@ -1,0 +1,103 @@
+# Testnet Configuration for NumiCoin
+# This configuration is optimized for testnet operation
+
+[network]
+enabled = true
+listen_address = "0.0.0.0"
+listen_port = 8334  # Testnet port
+max_peers = 20
+connection_timeout_secs = 15
+bootstrap_nodes = [
+    "/ip4/127.0.0.1/tcp/8334",
+    "/ip4/127.0.0.1/tcp/8335",
+    "/ip4/127.0.0.1/tcp/8336"
+]
+enable_upnp = false
+enable_mdns = true
+peer_discovery_interval_secs = 120
+max_message_size = 1048576  # 1MB
+ban_duration_secs = 600  # 10 minutes
+rate_limit_per_peer = 500
+
+[mining]
+enabled = true
+thread_count = 4  # Adjust based on your CPU
+nonce_chunk_size = 5000
+stats_update_interval_secs = 5
+enable_cpu_affinity = false
+thermal_throttle_temp = 75.0
+power_limit_watts = 0.0
+mining_pool_url = null
+mining_pool_worker = null
+target_block_time_secs = 15
+difficulty_adjustment_interval = 30
+
+[argon2_config]
+memory_cost = 4096
+time_cost = 3
+parallelism = 1
+output_length = 32
+salt_length = 16
+
+[rpc]
+enabled = true
+bind_address = "0.0.0.0"
+port = 8081  # Testnet RPC port
+max_connections = 200
+request_timeout_secs = 30
+max_request_size = 1048576  # 1MB
+enable_cors = true
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "https://testnet.numicoin.org"
+]
+rate_limit_requests_per_minute = 500
+rate_limit_burst_size = 50
+enable_authentication = false
+admin_endpoints_enabled = true
+
+[security]
+jwt_secret = "testnet-jwt-secret-change-in-production"
+jwt_expiry_hours = 24
+admin_api_key = "testnet-admin-key-change-in-production"
+enable_rate_limiting = true
+enable_ip_blocking = true
+max_failed_attempts = 15
+block_duration_minutes = 5
+enable_request_signing = false
+require_https = false
+enable_firewall = false
+trusted_proxies = [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16"
+]
+
+[storage]
+data_directory = "./testnet-data"
+backup_directory = "./testnet-backups"
+max_database_size_mb = 2048  # 2GB
+cache_size_mb = 256  # 256MB
+enable_compression = true
+enable_encryption = false
+auto_backup = true
+backup_interval_hours = 12
+retention_days = 7
+sync_mode = "Normal"
+
+[consensus]
+target_block_time = 15  # 15 seconds
+difficulty_adjustment_interval = 30
+max_block_size = 1048576  # 1MB
+max_transactions_per_block = 500
+min_transaction_fee = 500  # Lower fees for testnet
+max_reorg_depth = 20
+checkpoint_interval = 100
+finality_depth = 200
+genesis_supply = 1000000000000000  # 1M NUMI
+mining_reward_halving_interval = 100000
+initial_mining_reward = 100000000000  # 100 NUMI 

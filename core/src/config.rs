@@ -52,6 +52,18 @@ impl Config {
         }
     }
 
+    /// Testnet configuration with testnet-specific settings
+    pub fn testnet() -> Self {
+        Self {
+            network: NetworkConfig::testnet(),
+            mining: MiningConfig::testnet(),
+            rpc: RpcConfig::testnet(),
+            security: SecurityConfig::testnet(),
+            storage: StorageConfig::testnet(),
+            consensus: ConsensusConfig::testnet(),
+        }
+    }
+
     /// Load configuration from file with environment variable overrides
     pub fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let config_str = std::fs::read_to_string(path)?;
@@ -189,6 +201,33 @@ impl NetworkConfig {
         }
     }
 
+    pub fn testnet() -> Self {
+        Self {
+            max_peers: 20,
+            connection_timeout_secs: 15,
+            peer_discovery_interval_secs: 120,
+            ban_duration_secs: 600, // 10 minutes for testnet
+            rate_limit_per_peer: 500,
+            bootstrap_nodes: vec![
+                "/ip4/127.0.0.1/tcp/8334".to_string(),
+                "/ip4/127.0.0.1/tcp/8335".to_string(),
+            ],
+            enable_mdns: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            max_peers: 10,
+            connection_timeout_secs: 10,
+            peer_discovery_interval_secs: 60,
+            ban_duration_secs: 300, // 5 minutes for development
+            rate_limit_per_peer: 1000, // More lenient for testing
+            ..Default::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.listen_port == 0 {
             return Err("Listen port cannot be 0".to_string());
@@ -254,6 +293,36 @@ impl MiningConfig {
     }
 
     pub fn development() -> Self {
+        Self {
+            enabled: true,
+            thread_count: (num_cpus::get() / 2).max(1),
+            nonce_chunk_size: 1_000,
+            stats_update_interval_secs: 10,
+            thermal_throttle_temp: 70.0,
+            power_limit_watts: 50.0,
+            argon2_config: Argon2Config::development(),
+            target_block_time_secs: 10, // Faster blocks for development
+            difficulty_adjustment_interval: 20,
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            enabled: true,
+            thread_count: num_cpus::get(),
+            nonce_chunk_size: 5_000,
+            stats_update_interval_secs: 5,
+            thermal_throttle_temp: 75.0,
+            power_limit_watts: 0.0, // No power limit for testnet
+            argon2_config: Argon2Config::development(),
+            target_block_time_secs: 15, // Slightly slower than development
+            difficulty_adjustment_interval: 30,
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
         Self {
             enabled: true,
             thread_count: (num_cpus::get() / 2).max(1),
@@ -339,6 +408,40 @@ impl RpcConfig {
     }
 
     pub fn development() -> Self {
+        Self {
+            rate_limit_requests_per_minute: 1000,
+            rate_limit_burst_size: 100,
+            enable_authentication: false,
+            admin_endpoints_enabled: true,
+            allowed_origins: vec![
+                "http://localhost:3000".to_string(),
+                "http://localhost:3001".to_string(),
+                "http://127.0.0.1:3000".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            bind_address: "0.0.0.0".to_string(),
+            port: 8081, // Different port for testnet
+            max_connections: 200,
+            rate_limit_requests_per_minute: 500,
+            rate_limit_burst_size: 50,
+            enable_authentication: false,
+            admin_endpoints_enabled: true,
+            allowed_origins: vec![
+                "http://localhost:3000".to_string(),
+                "http://localhost:3001".to_string(),
+                "http://127.0.0.1:3000".to_string(),
+                "https://testnet.numicoin.org".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
         Self {
             rate_limit_requests_per_minute: 1000,
             rate_limit_burst_size: 100,
@@ -456,6 +559,35 @@ impl SecurityConfig {
         }
     }
 
+    pub fn testnet() -> Self {
+        Self {
+            max_failed_attempts: 15,
+            block_duration_minutes: 5,
+            enable_request_signing: false,
+            require_https: false,
+            enable_firewall: false,
+            trusted_proxies: vec![
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+                "10.0.0.0/8".to_string(),
+                "172.16.0.0/12".to_string(),
+                "192.168.0.0/16".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            max_failed_attempts: 10,
+            block_duration_minutes: 1,
+            enable_request_signing: false,
+            require_https: false,
+            enable_firewall: false,
+            ..Default::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.jwt_secret.len() < 32 {
             return Err("JWT secret must be at least 32 characters".to_string());
@@ -539,6 +671,36 @@ impl StorageConfig {
         }
     }
 
+    pub fn testnet() -> Self {
+        Self {
+            data_directory: PathBuf::from("./testnet-data"),
+            backup_directory: Some(PathBuf::from("./testnet-backups")),
+            max_database_size_mb: 2048, // 2GB for testnet
+            cache_size_mb: 256, // 256MB
+            enable_compression: true,
+            enable_encryption: false,
+            auto_backup: true,
+            backup_interval_hours: 12,
+            retention_days: 7,
+            sync_mode: SyncMode::Normal,
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            data_directory: PathBuf::from("./testnet-data"),
+            backup_directory: Some(PathBuf::from("./testnet-backups")),
+            max_database_size_mb: 1024, // 1GB
+            cache_size_mb: 128, // 128MB
+            enable_compression: false,
+            enable_encryption: false,
+            auto_backup: false,
+            sync_mode: SyncMode::Fast,
+            ..Default::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.max_database_size_mb == 0 {
             return Err("Max database size must be greater than 0".to_string());
@@ -609,6 +771,36 @@ impl ConsensusConfig {
         }
     }
 
+    pub fn testnet() -> Self {
+        Self {
+            target_block_time: Duration::from_secs(15), // 15 second blocks for testnet
+            difficulty_adjustment_interval: 30,
+            max_block_size: 1024 * 1024, // 1MB
+            max_transactions_per_block: 500,
+            min_transaction_fee: 500, // Lower fees for testnet
+            max_reorg_depth: 20,
+            checkpoint_interval: 100,
+            finality_depth: 200,
+            genesis_supply: 1_000_000_000_000_000, // 1M NUMI for testnet
+            mining_reward_halving_interval: 100_000, // Faster halving for testnet
+            initial_mining_reward: 100_000_000_000, // 100 NUMI initial reward
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            target_block_time: Duration::from_secs(10), // Faster for testing
+            difficulty_adjustment_interval: 20,
+            max_block_size: 512 * 1024, // 512KB
+            max_transactions_per_block: 100,
+            max_reorg_depth: 10,
+            checkpoint_interval: 50,
+            finality_depth: 100,
+            ..Default::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.target_block_time.as_secs() == 0 {
             return Err("Target block time must be greater than 0".to_string());
@@ -652,6 +844,14 @@ mod tests {
     #[test]
     fn test_development_config() {
         let config = Config::development();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.consensus.target_block_time, Duration::from_secs(10));
+        assert!(!config.security.require_https);
+    }
+
+    #[test]
+    fn test_testnet_config() {
+        let config = Config::testnet();
         assert!(config.validate().is_ok());
         assert_eq!(config.consensus.target_block_time, Duration::from_secs(10));
         assert!(!config.security.require_https);

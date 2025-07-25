@@ -1,0 +1,88 @@
+# Testnet Genesis Configuration for NumiCoin
+# This file defines the initial state of the testnet blockchain
+
+[genesis]
+# Genesis block configuration
+height = 0
+difficulty = 1
+timestamp = "2024-01-01T00:00:00Z"
+
+# Testnet-specific parameters
+network_name = "numi-testnet"
+network_version = "1.0.0"
+chain_id = "testnet-2024"
+
+[genesis.accounts]
+# Pre-funded test accounts for development and testing
+# These accounts will receive initial NUMI tokens
+
+# Test account 1 - Developer account
+[[genesis.accounts.accounts]]
+address = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+balance = 100_000_000_000_000  # 100,000 NUMI
+description = "Developer test account"
+
+# Test account 2 - Faucet account
+[[genesis.accounts.accounts]]
+address = "1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"
+balance = 500_000_000_000_000  # 500,000 NUMI
+description = "Testnet faucet account"
+
+# Test account 3 - Validator account
+[[genesis.accounts.accounts]]
+address = "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+balance = 200_000_000_000_000  # 200,000 NUMI
+description = "Validator test account"
+
+# Test account 4 - User account
+[[genesis.accounts.accounts]]
+address = "333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f50"
+balance = 50_000_000_000_000   # 50,000 NUMI
+description = "General user test account"
+
+[genesis.validators]
+# Initial validator set for testnet
+# These validators will be responsible for block production
+
+[[genesis.validators.validators]]
+address = "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+
+commission_rate = 0.05  # 5% commission
+description = "Primary testnet validator"
+
+[genesis.consensus]
+# Consensus parameters for testnet
+target_block_time = 15  # 15 seconds
+difficulty_adjustment_interval = 30
+max_block_size = 1048576  # 1MB
+max_transactions_per_block = 500
+min_transaction_fee = 500
+max_reorg_depth = 20
+checkpoint_interval = 100
+finality_depth = 200
+
+[genesis.mining]
+# Mining parameters for testnet
+initial_difficulty = 1
+mining_reward = 100_000_000_000  # 100 NUMI per block
+halving_interval = 100_000  # Every 100,000 blocks
+max_supply = 1_000_000_000_000_000  # 1M NUMI total supply
+
+[genesis.network]
+# Network parameters for testnet
+bootstrap_nodes = [
+    "/ip4/127.0.0.1/tcp/8334",
+    "/ip4/127.0.0.1/tcp/8335",
+    "/ip4/127.0.0.1/tcp/8336"
+]
+max_peers = 20
+connection_timeout = 15
+peer_discovery_interval = 120
+
+[genesis.features]
+# Feature flags for testnet
+enable_contracts = false
+enable_governance = true
+enable_staking = true
+enable_faucet = true
+enable_explorer = true 

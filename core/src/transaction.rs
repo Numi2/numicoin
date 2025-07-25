@@ -785,7 +785,6 @@ mod tests {
     #[test]
     fn test_required_balance_calculation() {
         let keypair = Dilithium3Keypair::new().unwrap();
-        
         let tx = Transaction::new_with_fee(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -797,21 +796,7 @@ mod tests {
             50,
             0,
         );
-        
         assert_eq!(tx.get_required_balance(), 150); // amount + fee
-        
-        let stake_tx = Transaction::new_with_fee(
-            keypair.public_key.clone(),
-            TransactionType::Stake {
-                amount: 1000,
-                validator: None,
-            },
-            1,
-            30,
-            0,
-        );
-        
-        assert_eq!(stake_tx.get_required_balance(), 1030); // stake amount + fee
     }
     
     #[test]
@@ -872,13 +857,7 @@ mod tests {
         assert!(transfer_type.is_transfer());
         assert!(!transfer_type.requires_gas());
         assert_eq!(transfer_type.estimate_gas(), 21_000);
-        
-        let stake_type = TransactionType::Stake {
-            amount: 1000,
-            validator: None,
-        };
-        assert!(stake_type.is_stake());
-        
+
         let contract_deploy_type = TransactionType::ContractDeploy {
             code_hash: [0u8; 32],
             init_data: vec![],
@@ -886,7 +865,7 @@ mod tests {
         assert!(contract_deploy_type.is_contract_deploy());
         assert!(contract_deploy_type.requires_gas());
         assert_eq!(contract_deploy_type.estimate_gas(), 200_000);
-        
+
         let contract_call_type = TransactionType::ContractCall {
             contract_address: vec![1, 2, 3, 4],
             method: "test".to_string(),

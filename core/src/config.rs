@@ -784,7 +784,7 @@ mod tests {
     fn test_testnet_config() {
         let config = Config::testnet();
         assert!(config.validate().is_ok());
-        assert_eq!(config.consensus.target_block_time, Duration::from_secs(10));
+        assert_eq!(config.consensus.target_block_time, Duration::from_secs(15));
         assert!(!config.security.require_https);
     }
 

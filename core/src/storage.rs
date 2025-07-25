@@ -1204,12 +1204,9 @@ mod tests {
         let account = AccountState {
             balance: 1000,
             nonce: 1,
-            staked_amount: 500,
-            last_stake_time: Utc::now(),
             transaction_count: 5,
             total_received: 2000,
             total_sent: 1000,
-            validator_info: None,
             created_at: Utc::now(),
             last_activity: Utc::now(),
         };

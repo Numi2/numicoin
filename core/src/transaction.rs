@@ -138,10 +138,6 @@ impl Transaction {
         transaction_type: TransactionType,
         nonce: u64,
     ) -> Self {
-        // Reject unsupported contract transactions early
-        if transaction_type.is_contract_deploy() || transaction_type.is_contract_call() {
-            panic!("Contract transactions not yet supported");
-        }
         
         let mut tx = Self::new_with_fee(from, transaction_type, nonce, MIN_TRANSACTION_FEE, 0);
         
@@ -198,11 +194,7 @@ impl Transaction {
     pub fn verify_signature(&self) -> Result<bool> {
         if let Some(ref signature) = self.signature {
             let message = self.serialize_for_signing()?;
-            // Treat any verification error as invalid signature
-            match crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.from) {
-                Ok(valid) => Ok(valid),
-                Err(_) => Ok(false),
-            }
+            crate::crypto::Dilithium3Keypair::verify(&message, signature, &self.from)
         } else {
             Ok(false)
         }

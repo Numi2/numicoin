@@ -585,6 +585,13 @@ impl RpcServer {
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_stats);
         
+        // Auth route for getting a JWT
+        let login_route = warp::path("login")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(with_rpc_server(Arc::clone(&rpc_server)))
+            .and_then(handle_login);
+            
         // Health check route (no rate limiting)
         let health_route = warp::path("health")
             .and(warp::get())
@@ -596,6 +603,7 @@ impl RpcServer {
             .or(transaction_route)
             .or(mine_route)
             .or(stats_route)
+            .or(login_route)
             .or(health_route)
             .recover(handle_rejection)
     }
@@ -965,8 +973,8 @@ async fn handle_transaction(
         }
     };
 
-    // Create transaction with proper validation
-    let mut transaction = Transaction::new_with_fee(
+    // Create a transaction template to calculate size and fee
+    let mut transaction = Transaction::new(
         from_pubkey,
         TransactionType::Transfer {
             to: to_pubkey,
@@ -974,18 +982,6 @@ async fn handle_transaction(
             memo: None,
         },
         tx_request.nonce,
-        calculate_transaction_fee(&Transaction::new_with_fee(
-            vec![0; 64], // Placeholder for fee calculation
-            TransactionType::Transfer {
-                to: vec![0; 64],
-                amount: tx_request.amount,
-                memo: None,
-            },
-            tx_request.nonce,
-            0,
-            0,
-        )) as u64,
-        0,
     );
 
     // Reconstruct and verify signature
@@ -1036,25 +1032,20 @@ async fn handle_transaction(
         }).await.unwrap_or(Ok(ValidationResult::InvalidSignature))
     };
 
+    // Obtain mempool handle without holding the blockchain read lock across await
+    let mempool_handle = {
+        let blockchain_read = rpc_server.blockchain.read();
+        blockchain_read.mempool_handle()
+    };
     // Submit to mempool if valid
     let mempool_result = if let Ok(ValidationResult::Valid) = validation_result {
-        // Clone blockchain for async operation
-        let blockchain_clone = Arc::clone(&rpc_server.blockchain);
-        tokio::task::spawn_blocking(move || {
-            // Access blockchain in blocking context
-            let _blockchain = blockchain_clone.read();
-            
-            // In a real implementation, this would be:
-            // futures::executor::block_on(blockchain.add_transaction(transaction))
-            // But for now, we'll simulate the operation
-            Ok(ValidationResult::Valid)
-        }).await.unwrap_or(Err(crate::BlockchainError::InvalidTransaction("Processing failed".to_string())))
+        mempool_handle.add_transaction(transaction.clone()).await.map_err(|e: crate::BlockchainError| warp::reject::custom(ApiError(e.to_string())))?
     } else {
-        validation_result
+        validation_result.map_err(|e: crate::BlockchainError| warp::reject::custom(ApiError(e.to_string())))?
     };
 
     // Broadcast transaction to network if valid
-    if let Ok(ValidationResult::Valid) = mempool_result {
+    if let ValidationResult::Valid = mempool_result {
         if let Some(ref network) = rpc_server.network_manager {
             // Clone transaction for broadcasting since it was moved into the closure
             let transaction_clone = transaction.clone();
@@ -1062,20 +1053,22 @@ async fn handle_transaction(
         }
     }
 
+    // Compute status string based on ValidationResult
+    let status = match mempool_result.clone() {
+        ValidationResult::Valid => "accepted".to_string(),
+        ValidationResult::InvalidSignature => "rejected: invalid signature".to_string(),
+        ValidationResult::InvalidNonce { expected, got } => format!("rejected: invalid nonce (expected {}, got {})", expected, got),
+        ValidationResult::InsufficientBalance { required, available } => format!("rejected: insufficient balance (required {}, available {})", required, available),
+        ValidationResult::DuplicateTransaction => "rejected: duplicate transaction".to_string(),
+        ValidationResult::TransactionTooLarge => "rejected: transaction too large".to_string(),
+        ValidationResult::FeeTooLow { minimum, got } => format!("rejected: fee too low (minimum {}, got {})", minimum, got),
+        ValidationResult::AccountSpamming { rate_limit } => format!("rejected: account spamming (rate limit: {})", rate_limit),
+        ValidationResult::TransactionExpired => "rejected: transaction expired".to_string(),
+    };
+
     let response = TransactionResponse {
         id: tx_id,
-        status: match &mempool_result {
-            Ok(ValidationResult::Valid) => "accepted".to_string(),
-            Ok(ValidationResult::InvalidSignature) => "rejected: invalid signature".to_string(),
-            Ok(ValidationResult::InvalidNonce { expected, got }) => format!("rejected: invalid nonce (expected {}, got {})", expected, got),
-            Ok(ValidationResult::InsufficientBalance { required, available }) => format!("rejected: insufficient balance (required {}, available {})", required, available),
-            Ok(ValidationResult::DuplicateTransaction) => "rejected: duplicate transaction".to_string(),
-            Ok(ValidationResult::TransactionTooLarge) => "rejected: transaction too large".to_string(),
-            Ok(ValidationResult::FeeTooLow { minimum, got }) => format!("rejected: fee too low (minimum {}, got {})", minimum, got),
-            Ok(ValidationResult::AccountSpamming { rate_limit }) => format!("rejected: account spamming (rate limit: {})", rate_limit),
-            Ok(ValidationResult::TransactionExpired) => "rejected: transaction expired".to_string(),
-            Err(e) => format!("rejected: error - {}", e),
-        },
+        status,
         validation_result: format!("{:?}", mempool_result),
     };
 
@@ -1197,6 +1190,39 @@ async fn handle_stats(
     Ok(warp::reply::json(&ApiResponse::success(stats)))
 }
 
+/// Login handler to generate JWT
+async fn handle_login(
+    login_request: LoginRequest,
+    rpc_server: Arc<RpcServer>,
+) -> std::result::Result<warp::reply::Json, Rejection> {
+    // In a real application, you would verify username/password against a database
+    // For this example, we'll use a simple check against the admin API key
+    if login_request.api_key == rpc_server._auth_config.admin_api_key {
+        let expiration = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::seconds(rpc_server._auth_config.token_expiry.as_secs() as i64))
+            .expect("valid timestamp")
+            .timestamp();
+
+        let claims = Claims {
+            sub: "admin".to_owned(),
+            role: "admin".to_owned(),
+            exp: expiration as usize,
+        };
+
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(rpc_server._auth_config.jwt_secret.as_bytes()),
+        )
+        .map_err(|_| warp::reject::custom(ApiError("Failed to create token".to_string())))?;
+
+        Ok(warp::reply::json(&ApiResponse::success(LoginResponse { token })))
+    } else {
+        Err(warp::reject::custom(Unauthorized))
+    }
+}
+
+
 /// Global error handler for rejections
 async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std::convert::Infallible> {
     let (code, message) = if err.is_not_found() {
@@ -1213,6 +1239,8 @@ async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std
         (StatusCode::BAD_REQUEST, "Invalid headers")
     } else if err.find::<warp::body::BodyDeserializeError>().is_some() {
         (StatusCode::BAD_REQUEST, "Invalid request body")
+    } else if err.find::<ApiError>().is_some() {
+        (StatusCode::BAD_REQUEST, "API error")
     } else {
         log::error!("Unhandled rejection: {:?}", err);
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
@@ -1224,6 +1252,20 @@ async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std
         code,
     ))
 } 
+
+#[derive(Debug)]
+struct ApiError(#[allow(dead_code)] String);
+impl warp::reject::Reject for ApiError {}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginRequest {
+    api_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoginResponse {
+    token: String,
+}
 
 #[cfg(test)]
 mod tests {

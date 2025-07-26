@@ -224,8 +224,8 @@ impl SecureKeyStore {
                 "Key store already initialized".to_string()));
         }
         
-        // Create password hash for verification using fixed salt for consistency
-        let salt = vec![0u8; 32]; // Fixed salt for consistent verification
+        // Create password hash for verification using fixed salt based on configuration
+        let salt = vec![0u8; self.kdf_config.salt_length];
         // Derive a fixed-length seed from the password
         let seed = blake3_hash(password.as_bytes());
         let password_hash = derive_key(&seed, &String::from_utf8_lossy(&salt), b"keystore-auth")?;
@@ -262,8 +262,8 @@ impl SecureKeyStore {
         let encrypted_content = &encrypted_data[44..];
         
         // First, we need to initialize the store to get the password hash
-        // For loading, we'll use a temporary approach to derive the key
-        let temp_salt = vec![0u8; 32];
+        // For loading, derive the same password hash using configured salt length
+        let temp_salt = vec![0u8; self.kdf_config.salt_length];
         // Derive a fixed-length seed from the password
         let seed = blake3_hash(password.as_bytes());
         let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&temp_salt), b"keystore-auth")?;
@@ -615,8 +615,8 @@ impl SecureKeyStore {
             .ok_or_else(|| BlockchainError::CryptographyError("Key store not initialized".to_string()))?;
         
         // For password verification, we need to use the same salt that was used during initialization
-        // Since we don't store the salt separately, we'll use a fixed salt for verification
-        let verification_salt = vec![0u8; 32]; // Fixed salt for verification
+        // Use the same fixed salt (all zeros) used during initialization for verification
+        let verification_salt = vec![0u8; self.kdf_config.salt_length];
         // Derive a fixed-length seed from the password
         let seed = blake3_hash(password.as_bytes());
         let test_hash = derive_key(&seed, &String::from_utf8_lossy(&verification_salt), b"keystore-auth")?;

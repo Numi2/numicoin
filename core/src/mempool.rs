@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transaction::{Transaction, TransactionId, TransactionType};
 use crate::{Result, BlockchainError};
+use crate::blockchain::NumiBlockchain;
 
 // AI Agent Note: This is a production not ready. transaction mempool implementation
 // Features implemented:
@@ -84,6 +85,9 @@ pub struct TransactionMempool {
     /// Transactions by sender account for efficient account queries
     transactions_by_account: Arc<DashMap<Vec<u8>, HashSet<TransactionId>>>,
     
+    /// A handle to the blockchain for state-aware validation
+    blockchain: Option<Arc<RwLock<NumiBlockchain>>>,
+
     /// Configuration parameters
     max_mempool_size: usize,         // Maximum memory usage in bytes
     max_transactions: usize,         // Maximum number of transactions
@@ -115,6 +119,7 @@ impl TransactionMempool {
             transactions: Arc::new(DashMap::new()),
             account_nonces: Arc::new(DashMap::new()),
             transactions_by_account: Arc::new(DashMap::new()),
+            blockchain: None,
             
             // Conservative production limits
             max_mempool_size: 256 * 1024 * 1024,  // 256 MB
@@ -131,6 +136,11 @@ impl TransactionMempool {
             rejected_count_1h: Arc::new(RwLock::new(0)),
             last_cleanup: Arc::new(RwLock::new(Instant::now())),
         }
+    }
+
+    /// Set a blockchain handle for state-aware validation
+    pub fn set_blockchain_handle(&mut self, blockchain: Arc<RwLock<NumiBlockchain>>) {
+        self.blockchain = Some(blockchain);
     }
 
     /// Add transaction to mempool with full validation
@@ -425,7 +435,17 @@ impl TransactionMempool {
                 if *amount == 0 {
                     return Err(BlockchainError::InvalidTransaction("Zero amount transfer".to_string()));
                 }
-                // TODO: Check balance (requires blockchain state access)
+                
+                if let Some(blockchain) = &self.blockchain {
+                    let blockchain = blockchain.read();
+                    let account_state = blockchain.get_account_state_or_default(&transaction.from);
+                    if account_state.balance < transaction.get_required_balance() {
+                        return Ok(ValidationResult::InsufficientBalance {
+                            required: transaction.get_required_balance(),
+                            available: account_state.balance,
+                        });
+                    }
+                }
             }
             TransactionType::MiningReward { .. } => {
                 // Mining rewards are system-generated and pre-validated

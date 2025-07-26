@@ -266,9 +266,8 @@ impl NumiBlockchain {
     /// Create new blockchain with genesis block and enhanced security
     pub fn new() -> Result<Self> {
         let miner_keypair = Dilithium3Keypair::new()?;
-        let mempool = Arc::new(TransactionMempool::new());
         
-        let mut blockchain = Self {
+        let blockchain = Self {
             blocks: Arc::new(DashMap::new()),
             main_chain: Arc::new(RwLock::new(Vec::new())),
             accounts: Arc::new(DashMap::new()),
@@ -276,7 +275,7 @@ impl NumiBlockchain {
             checkpoints: Arc::new(RwLock::new(Vec::new())),
             orphan_pool: Arc::new(DashMap::new()),
             orphan_by_peer: Arc::new(DashMap::new()),
-            mempool,
+            mempool: Arc::new(TransactionMempool::new()), // Temporary mempool
             block_times: Arc::new(RwLock::new(VecDeque::new())),
             peer_metrics: Arc::new(DashMap::new()),
             genesis_hash: [0; 32],
@@ -287,9 +286,38 @@ impl NumiBlockchain {
             max_reorg_depth: 144,                      // Maximum reorganization depth
             block_processing_times: Arc::new(RwLock::new(VecDeque::new())),
         };
+
+        let blockchain_arc = Arc::new(RwLock::new(blockchain));
+        let mut mempool = TransactionMempool::new();
+        mempool.set_blockchain_handle(blockchain_arc.clone());
         
-        blockchain.create_genesis_block()?;
-        Ok(blockchain)
+        let mut locked_blockchain = blockchain_arc.write();
+        locked_blockchain.mempool = Arc::new(mempool);
+        
+        locked_blockchain.create_genesis_block()?;
+
+        // TODO: Refactor this to avoid cloning the blockchain.
+        // This is a temporary solution to break the Arc cycle.
+        let final_blockchain = NumiBlockchain {
+            blocks: locked_blockchain.blocks.clone(),
+            main_chain: locked_blockchain.main_chain.clone(),
+            accounts: locked_blockchain.accounts.clone(),
+            state: locked_blockchain.state.clone(),
+            checkpoints: locked_blockchain.checkpoints.clone(),
+            orphan_pool: locked_blockchain.orphan_pool.clone(),
+            orphan_by_peer: locked_blockchain.orphan_by_peer.clone(),
+            mempool: locked_blockchain.mempool.clone(),
+            block_times: locked_blockchain.block_times.clone(),
+            peer_metrics: locked_blockchain.peer_metrics.clone(),
+            genesis_hash: locked_blockchain.genesis_hash,
+            miner_keypair: locked_blockchain.miner_keypair.clone(),
+            target_block_time: locked_blockchain.target_block_time,
+            difficulty_adjustment_interval: locked_blockchain.difficulty_adjustment_interval,
+            max_orphan_blocks: locked_blockchain.max_orphan_blocks,
+            max_reorg_depth: locked_blockchain.max_reorg_depth,
+            block_processing_times: locked_blockchain.block_processing_times.clone(),
+        };
+        Ok(final_blockchain)
     }
     
     /// Load blockchain from storage with validation
@@ -428,8 +456,11 @@ impl NumiBlockchain {
         
         // Wrap block processing (including any I/O) in a timeout to bound total time
         let processing_future = async {
+            log::info!("🔄 Starting block processing for block {}", hex::encode(&block_hash));
+            
             // Process the block and its transactions
             let was_reorganization = self.connect_block_enhanced(block, peer_id.clone()).await?;
+            log::info!("✅ Block processing completed, was_reorganization={}", was_reorganization);
 
             // Update CPU processing time metric
             let cpu_time = processing_start.elapsed().as_millis() as u64;
@@ -438,13 +469,19 @@ impl NumiBlockchain {
                     metrics.processing_time_total += cpu_time;
                 });
             }
+            log::info!("⏱️ CPU processing time: {}ms", cpu_time);
 
             // Process any orphan blocks that might now be valid
+            log::info!("🔍 Processing orphan blocks...");
             Box::pin(self.process_orphan_blocks_protected()).await?;
+            log::info!("✅ Orphan blocks processing completed");
 
             // Update checkpoints if needed
+            log::info!("🔒 Updating checkpoints...");
             self.update_checkpoints_if_needed().await?;
+            log::info!("✅ Checkpoints update completed");
 
+            log::info!("🎉 Block processing fully completed");
             Ok::<bool, BlockchainError>(was_reorganization)
         };
         match tokio::time::timeout(
@@ -713,6 +750,21 @@ impl NumiBlockchain {
             })
             .collect();
         self.mempool.remove_transactions(&tx_ids).await;
+        
+        // Update main chain vector to include this block
+        let block_hash = block.calculate_hash()?;
+        let mut main_chain = self.main_chain.write();
+        
+        // Ensure the main chain has enough capacity
+        if block.header.height >= main_chain.len() as u64 {
+            main_chain.resize(block.header.height as usize + 1, [0u8; 32]);
+        }
+        
+        // Add the block to the main chain at the correct height
+        main_chain[block.header.height as usize] = block_hash;
+        
+        log::debug!("📝 Updated main chain: block {} at height {}", 
+                   hex::encode(&block_hash), block.header.height);
         
         Ok(())
     }
@@ -1045,17 +1097,26 @@ impl NumiBlockchain {
         if let Some(best_block_meta) = self.blocks.get(&new_best_hash) {
             let mut state = self.state.write();
             
+            let old_height = state.total_blocks.saturating_sub(1);
+            let new_height = best_block_meta.height;
+            
+            log::info!("🔄 Updating chain state: height {} -> {}, best_hash: {}", 
+                      old_height, new_height, hex::encode(&new_best_hash));
+            
             state.best_block_hash = new_best_hash;
             state.total_blocks = best_block_meta.height + 1;
             state.cumulative_difficulty = best_block_meta.cumulative_difficulty;
             state.last_block_time = best_block_meta.block.header.timestamp;
-            state.current_difficulty = self.calculate_next_difficulty(best_block_meta.height);
             
-            // Recalculate average block time
-            self.update_average_block_time(best_block_meta.height).await;
+            log::info!("✅ Chain state updated: total_blocks={}, difficulty={}, cumulative_difficulty={}", 
+                      state.total_blocks, best_block_meta.block.header.difficulty, state.cumulative_difficulty);
+            
+            log::info!("🔄 update_chain_state_after_reorg returning Ok(())...");
+            Ok(())
+        } else {
+            log::error!("❌ Failed to find block metadata for best hash: {}", hex::encode(&new_best_hash));
+            Err(BlockchainError::BlockNotFound("Block metadata not found".to_string()))
         }
-        
-        Ok(())
     }
     
     /// Update main chain flags for all blocks
@@ -1252,7 +1313,10 @@ impl NumiBlockchain {
     
     /// Get current blockchain height
     pub fn get_current_height(&self) -> u64 {
-        self.state.read().total_blocks.saturating_sub(1)
+        let total_blocks = self.state.read().total_blocks;
+        let height = total_blocks.saturating_sub(1);
+        log::debug!("📏 get_current_height: total_blocks={}, height={}", total_blocks, height);
+        height
     }
     
     /// Get current difficulty
@@ -1651,7 +1715,9 @@ impl NumiBlockchain {
         if cumulative_difficulty > current_best_difficulty {
             // This is the new best chain - perform reorganization with security checks
             log::info!("🔄 New best chain found, performing reorganization");
-            return self.reorganize_to_block_secure(block_hash).await;
+            let result = self.reorganize_to_block_secure(block_hash).await;
+            log::info!("✅ Reorganization completed with result: {:?}", result);
+            return result;
         } else {
             log::debug!("📦 Block {} added to side chain", hex::encode(&block_hash));
             return Ok(false);
@@ -1775,8 +1841,15 @@ impl NumiBlockchain {
     async fn reorganize_to_block_secure(&self, new_best_hash: BlockHash) -> Result<bool> {
         let current_best_hash = self.state.read().best_block_hash;
         
+        log::info!("🔄 Starting secure reorganization: current_best={}, new_best={}", 
+                  hex::encode(&current_best_hash), hex::encode(&new_best_hash));
+        
         // Find the fork point between current and new chain
         let mut fork_info = self.find_fork_point(current_best_hash, new_best_hash)?;
+        
+        log::info!("📍 Fork info: old_chain={}, new_chain={}, blocks_to_disconnect={}, blocks_to_connect={}", 
+                  fork_info.old_chain.len(), fork_info.new_chain.len(), 
+                  fork_info.blocks_to_disconnect.len(), fork_info.blocks_to_connect.len());
         
         // Enhanced security: Detect long-range attacks
         fork_info.is_long_range_attack = self.detect_long_range_attack(&fork_info);
@@ -1808,27 +1881,34 @@ impl NumiBlockchain {
                   fork_info.blocks_to_disconnect.len(), fork_info.blocks_to_connect.len(), fork_info.difficulty_change);
         
         // Disconnect old chain blocks (reverse order)
+        log::info!("🔗 Disconnecting old chain blocks...");
         for block in fork_info.blocks_to_disconnect.iter().rev() {
             self.disconnect_block(block).await?;
         }
         
         // Connect new chain blocks (forward order)
+        log::info!("🔗 Connecting new chain blocks...");
         for block in &fork_info.blocks_to_connect {
             self.connect_block_to_main_chain(block).await?;
         }
         
         // Update main chain
+        log::info!("📝 Updating main chain vector...");
         let new_chain = self.build_chain_to_block(new_best_hash)?;
         *self.main_chain.write() = new_chain;
         
         // Mark blocks as main chain and update finalization
+        log::info!("🏷️ Updating main chain flags...");
         self.update_main_chain_flags(new_best_hash).await;
+        log::info!("🔒 Updating finalization status...");
         self.update_finalization_status().await;
         
         // Update chain state
+        log::info!("📊 Updating chain state...");
         self.update_chain_state_after_reorg(new_best_hash).await?;
-        
+
         log::info!("✅ Secure chain reorganization completed successfully");
+        log::info!("🔄 Reorganization returning Ok(true)...");
         Ok(true)
     }
     
@@ -1892,23 +1972,33 @@ impl NumiBlockchain {
     
     /// Update block finalization status
     async fn update_finalization_status(&self) {
+        log::info!("🔒 Starting finalization status update...");
         let current_height = self.get_current_height();
         let finality_height = current_height.saturating_sub(FINALITY_DEPTH);
         
+        log::info!("📏 Finalization: current_height={}, finality_height={}", current_height, finality_height);
+        
         // Mark blocks as finalized if they're deep enough
+        let mut finalized_count = 0;
         for mut entry in self.blocks.iter_mut() {
             let meta = entry.value_mut();
             if meta.height <= finality_height && meta.is_main_chain {
                 meta.is_finalized = true;
+                finalized_count += 1;
             }
         }
+        
+        log::info!("✅ Finalized {} blocks", finalized_count);
         
         // Update chain state with finalization info
         if let Some(finalized_hash) = self.main_chain.read().get(finality_height as usize).copied() {
             let mut state = self.state.write();
             state.finalized_block_hash = finalized_hash;
             state.finalized_block_height = finality_height;
+            log::info!("📊 Updated chain state finalization: finalized_block_hash={}", hex::encode(&finalized_hash));
         }
+        
+        log::info!("✅ Finalization status update completed");
     }
     
     /// Protected orphan block processing with DoS prevention
@@ -2119,5 +2209,10 @@ impl NumiBlockchain {
             })
             .map(|entry| entry.value().block.clone())
             .collect()
+    }
+
+    /// Get a clone of the transaction mempool handle for use without holding locks
+    pub fn mempool_handle(&self) -> Arc<TransactionMempool> {
+        Arc::clone(&self.mempool)
     }
 } 

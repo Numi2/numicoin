@@ -235,12 +235,23 @@ impl Dilithium3Keypair {
             return Ok(false);
         }
 
-        let pq_pk = pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid public key: {}", e)))?;
-        
-        let pq_sig = pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid signature format: {}", e)))?;
-
+        // Parse public key, return false on failure
+        let pq_pk = match pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key) {
+            Ok(pk) => pk,
+            Err(err) => {
+                log::warn!("Invalid public key in verification: {:?}", err);
+                return Ok(false);
+            }
+        };
+        // Parse signature, return false on failure
+        let pq_sig = match pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature) {
+            Ok(sig) => sig,
+            Err(err) => {
+                log::warn!("Invalid signature format in verification: {:?}", err);
+                return Ok(false);
+            }
+        };
+        // Perform signature verification
         Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&pq_sig, message, &pq_pk).is_ok())
     }
     

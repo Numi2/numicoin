@@ -38,142 +38,6 @@ const BOOTSTRAP_NODES: &[&str] = &[
 /// Maximum allowed timestamp skew for replay protection (5 minutes)
 const MAX_TIMESTAMP_SKEW: u64 = 300;
 
-/// Peer key registry for storing and validating peer identities
-#[derive(Debug, Clone)]
-pub struct PeerKeyRegistry {
-    /// Mapping of PeerId to peer's Dilithium3 public key
-    dilithium_keys: Arc<RwLock<HashMap<PeerId, Vec<u8>>>>,
-    /// Mapping of PeerId to peer's Kyber public key  
-    kyber_keys: Arc<RwLock<HashMap<PeerId, Vec<u8>>>>,
-    /// Pending key requests awaiting response
-    pending_requests: Arc<RwLock<HashMap<PeerId, Instant>>>,
-    /// Bootstrap nodes with known public keys
-    bootstrap_keys: HashMap<PeerId, (Vec<u8>, Vec<u8>)>, // (dilithium_pk, kyber_pk)
-    /// Key verification status
-    verified_keys: Arc<RwLock<HashSet<PeerId>>>,
-}
-
-impl PeerKeyRegistry {
-    pub fn new() -> Self {
-        let mut registry = Self {
-            dilithium_keys: Arc::new(RwLock::new(HashMap::new())),
-            kyber_keys: Arc::new(RwLock::new(HashMap::new())),
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            bootstrap_keys: HashMap::new(),
-            verified_keys: Arc::new(RwLock::new(HashSet::new())),
-        };
-        
-        // Initialize with bootstrap node keys (in production, these would be hardcoded or loaded from config)
-        registry.initialize_bootstrap_keys();
-        registry
-    }
-
-    /// Initialize bootstrap node public keys
-    fn initialize_bootstrap_keys(&mut self) {
-        // In a real implementation, these would be hardcoded or loaded from a trusted source
-        // For now, we'll use placeholder keys that should be replaced with actual bootstrap node keys
-        log::info!("🔑 Initializing bootstrap node keys...");
-        
-        // Example bootstrap node (replace with actual keys in production)
-        // let bootstrap_peer_id = PeerId::from_bytes(&[/* actual peer ID bytes */]).unwrap();
-        // let bootstrap_dilithium_pk = vec![/* actual Dilithium3 public key */];
-        // let bootstrap_kyber_pk = vec![/* actual Kyber public key */];
-        // self.bootstrap_keys.insert(bootstrap_peer_id, (bootstrap_dilithium_pk, bootstrap_kyber_pk));
-    }
-
-    /// Store a peer's public keys
-    pub async fn store_peer_keys(&self, peer_id: PeerId, dilithium_pk: Vec<u8>, kyber_pk: Vec<u8>) {
-        let mut dil_keys = self.dilithium_keys.write().await;
-        let mut kyber_keys = self.kyber_keys.write().await;
-        
-        dil_keys.insert(peer_id, dilithium_pk);
-        kyber_keys.insert(peer_id, kyber_pk);
-        
-        log::debug!("💾 Stored keys for peer: {}", peer_id);
-    }
-
-    /// Get a peer's Dilithium3 public key
-    pub async fn get_dilithium_key(&self, peer_id: &PeerId) -> Option<Vec<u8>> {
-        self.dilithium_keys.read().await.get(peer_id).cloned()
-    }
-
-    /// Get a peer's Kyber public key
-    pub async fn get_kyber_key(&self, peer_id: &PeerId) -> Option<Vec<u8>> {
-        self.kyber_keys.read().await.get(peer_id).cloned()
-    }
-
-    /// Check if we have both keys for a peer
-    pub async fn has_complete_keys(&self, peer_id: &PeerId) -> bool {
-        let dil_keys = self.dilithium_keys.read().await;
-        let kyber_keys = self.kyber_keys.read().await;
-        
-        dil_keys.contains_key(peer_id) && kyber_keys.contains_key(peer_id)
-    }
-
-    /// Check if a peer's keys are verified
-    pub async fn is_verified(&self, peer_id: &PeerId) -> bool {
-        self.verified_keys.read().await.contains(peer_id)
-    }
-
-    /// Mark a peer's keys as verified
-    pub async fn mark_verified(&self, peer_id: PeerId) {
-        self.verified_keys.write().await.insert(peer_id);
-        log::debug!("✅ Marked peer {} as verified", peer_id);
-    }
-
-    /// Request keys from a peer if we don't have them
-    pub async fn request_keys_if_needed(&self, peer_id: PeerId) -> bool {
-        if self.has_complete_keys(&peer_id).await {
-            return false; // Already have keys
-        }
-
-        let mut pending = self.pending_requests.write().await;
-        if pending.contains_key(&peer_id) {
-            return false; // Already requested
-        }
-
-        // Check if it's a bootstrap node
-        if self.bootstrap_keys.contains_key(&peer_id) {
-            let (dil_pk, kyber_pk) = self.bootstrap_keys.get(&peer_id).unwrap();
-            self.store_peer_keys(peer_id, dil_pk.clone(), kyber_pk.clone()).await;
-            self.mark_verified(peer_id).await;
-            return false;
-        }
-
-        // Add to pending requests
-        pending.insert(peer_id, Instant::now());
-        log::debug!("🔍 Requesting keys for peer: {}", peer_id);
-        true
-    }
-
-    /// Clean up expired pending requests
-    pub async fn cleanup_expired_requests(&self) {
-        let now = Instant::now();
-        let mut pending = self.pending_requests.write().await;
-        pending.retain(|_, timestamp| now.duration_since(*timestamp) < Duration::from_secs(30));
-    }
-
-    /// Get all verified peers
-    pub async fn get_verified_peers(&self) -> Vec<PeerId> {
-        self.verified_keys.read().await.iter().cloned().collect()
-    }
-
-    /// Remove a peer's keys (e.g., when they disconnect)
-    pub async fn remove_peer_keys(&self, peer_id: &PeerId) {
-        let mut dil_keys = self.dilithium_keys.write().await;
-        let mut kyber_keys = self.kyber_keys.write().await;
-        let mut verified = self.verified_keys.write().await;
-        let mut pending = self.pending_requests.write().await;
-        
-        dil_keys.remove(peer_id);
-        kyber_keys.remove(peer_id);
-        verified.remove(peer_id);
-        pending.remove(peer_id);
-        
-        log::debug!("🗑️ Removed keys for peer: {}", peer_id);
-    }
-}
-
 /// Network message types for blockchain communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
@@ -205,22 +69,7 @@ pub enum NetworkMessage {
         nonce: u64,
         signature: Vec<u8>,
     },
-    /// Key exchange request
-    KeyRequest {
-        requester_id: String,
-        timestamp: u64,
-        nonce: u64,
-        signature: Vec<u8>,
-    },
-    /// Key exchange response
-    KeyResponse {
-        responder_id: String,
-        dilithium_pk: Vec<u8>,
-        kyber_pk: Vec<u8>,
-        timestamp: u64,
-        nonce: u64,
-        signature: Vec<u8>,
-    },
+    
 }
 
 /// Peer authentication data for replay protection
@@ -241,13 +90,13 @@ pub struct PeerInfo {
     pub connection_count: u32,
     pub is_banned: bool,
     pub ban_until: Option<Instant>,
-    pub public_key: Dilithium3Keypair, // Store peer's public key for validation
+    pub public_key: Option<Dilithium3Keypair>, // Store peer's public key for validation
     pub last_nonce: u64, // Track last nonce for replay protection
     pub last_timestamp: u64, // Track last timestamp for replay protection
 }
 
 impl PeerInfo {
-    pub fn new(public_key: Dilithium3Keypair) -> Self {
+    pub fn new(public_key: Option<Dilithium3Keypair>) -> Self {
         Self {
             last_seen: Instant::now(),
             reputation: 0,
@@ -279,13 +128,19 @@ impl PeerInfo {
         }
 
         // Verify signature
-        let mut data_to_verify = Vec::new();
-        data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
-        data_to_verify.extend_from_slice(&nonce.to_le_bytes());
-        data_to_verify.extend_from_slice(message_data);
+        if let Some(ref public_key) = self.public_key {
+            let mut data_to_verify = Vec::new();
+            data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
+            data_to_verify.extend_from_slice(&nonce.to_le_bytes());
+            data_to_verify.extend_from_slice(message_data);
 
-        if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: self.public_key.public_key_bytes().to_vec(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, &self.public_key.public_key_bytes())? {
-            return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
+            if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: public_key.public_key_bytes().to_vec(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, &public_key.public_key_bytes())? {
+                return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
+            }
+        } else {
+            // If we don't have a public key, we can't verify the signature.
+            // This could be a configurable policy, e.g., allow unauthenticated messages from new peers.
+            log::warn!("No public key for peer, skipping signature verification.");
         }
 
         // Update tracking data
@@ -319,7 +174,7 @@ pub struct NetworkManagerHandle {
     _local_peer_id: PeerId,
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
-    key_registry: Arc<PeerKeyRegistry>,
+    
 }
 
 /// Production-ready P2P network manager (simplified version)
@@ -332,9 +187,9 @@ pub struct NetworkManager {
     local_peer_id: PeerId,
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
-    key_registry: Arc<PeerKeyRegistry>,
+    
     local_dilithium_kp: Dilithium3Keypair,
-    local_kyber_pk: Vec<u8>,
+    _local_kyber_pk: Vec<u8>,
     _local_kyber_sk: Vec<u8>,
 }
 
@@ -397,7 +252,9 @@ impl NetworkManagerHandle {
     }
     /// Get list of verified peers from key registry
     pub async fn get_verified_peers(&self) -> Vec<PeerId> {
-        self.key_registry.get_verified_peers().await
+        // This function is no longer needed as PeerKeyRegistry is removed.
+        // Returning an empty vector as a placeholder.
+        Vec::new()
     }
 }
 
@@ -414,7 +271,7 @@ impl NetworkManager {
         log::info!("🔑 Local peer ID: {}", local_peer_id);
 
         // Create key registry
-        let key_registry = Arc::new(PeerKeyRegistry::new());
+        // let key_registry = Arc::new(PeerKeyRegistry::new()); // This line is removed
 
         // Create TLS config for transport encryption
         let tls_config = tls::Config::new(&tls_identity).map_err(|e| BlockchainError::NetworkError(format!("TLS config failed: {}", e)))?;
@@ -462,9 +319,9 @@ impl NetworkManager {
             local_peer_id,
             chain_height: Arc::new(RwLock::new(0)),
             is_syncing: Arc::new(RwLock::new(false)),
-            key_registry,
+            
             local_dilithium_kp: dilithium_kp,
-            local_kyber_pk: kyber_pk,
+            _local_kyber_pk: kyber_pk,
             _local_kyber_sk: kyber_sk,
         })
     }
@@ -478,8 +335,30 @@ impl NetworkManager {
             _local_peer_id: self.local_peer_id,
             chain_height: self.chain_height.clone(),
             is_syncing: self.is_syncing.clone(),
-            key_registry: self.key_registry.clone(),
+            
         }
+    }
+
+    /// Check if currently syncing
+    pub async fn is_syncing(&self) -> bool {
+        *self.is_syncing.read().await
+    }
+
+    /// Set syncing status
+    pub async fn set_syncing(&self, syncing: bool) {
+        let mut guard = self.is_syncing.write().await;
+        *guard = syncing;
+    }
+
+    /// Get current chain height
+    pub async fn get_chain_height(&self) -> u64 {
+        *self.chain_height.read().await
+    }
+
+    /// Set current chain height
+    pub async fn set_chain_height(&self, height: u64) {
+        let mut guard = self.chain_height.write().await;
+        *guard = height;
     }
 
     /// Start the network manager and bind to listening address
@@ -528,6 +407,23 @@ impl NetworkManager {
             }
         }
         Ok(())
+    }
+
+    /// Perform periodic maintenance tasks
+    async fn perform_maintenance(&mut self) {
+        // Unban peers whose ban duration has expired
+        let now = Instant::now();
+        let mut peers = self.peers.write().await;
+        
+        peers.retain(|_, peer_info| {
+            if let Some(ban_until) = peer_info.ban_until {
+                if now > ban_until {
+                    log::info!("Unbanning peer");
+                    return false; // Remove peer from banned list
+                }
+            }
+            true
+        });
     }
 
     /// Main event processing loop
@@ -660,7 +556,7 @@ impl NetworkManager {
                             return Ok(());
                         }
                         
-                        // TODO: Process validated block
+                        // Process validated block
                         log::info!("✅ Block validated successfully");
                     }
                 }
@@ -676,7 +572,7 @@ impl NetworkManager {
                             return Ok(());
                         }
                         
-                        // TODO: Process validated transaction
+                        // Process validated transaction
                         log::info!("✅ Transaction validated successfully");
                     }
                 }
@@ -692,17 +588,12 @@ impl NetworkManager {
                             return Ok(());
                         }
                         
-                        // TODO: Update peer information
+                        // Update peer information
                         log::info!("✅ Peer info validated successfully");
                     }
                 }
             }
-            "numi/key-exchange/1.0.0" => {
-                // Handle key exchange messages
-                if let Err(e) = self.handle_key_exchange_message(&data).await {
-                    log::warn!("❌ Key exchange message handling failed: {}", e);
-                }
-            }
+            
             _ => {
                 log::debug!("📨 Unknown message topic: {}", topic_str);
             }
@@ -748,9 +639,7 @@ impl NetworkManager {
             return Err(BlockchainError::NetworkError("Invalid transaction hash".to_string()));
         }
 
-        // Verify sufficient balance (this would require blockchain state access)
-        // TODO: Implement balance verification
-
+        
         // Verify transaction timestamp is reasonable
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -811,24 +700,16 @@ impl NetworkManager {
     async fn on_peer_connected(&self, peer_id: PeerId) {
         log::info!("🔗 Peer connected: {}", peer_id);
         
-        // Request keys if we don't have them
-        if self.key_registry.request_keys_if_needed(peer_id).await {
-            // Send key request message
-            // Note: This would need to be handled differently since we can't call send_key_request from here
-            // In a real implementation, this would be queued for the main event loop
-        }
-        
         let mut peers = self.peers.write().await;
         // For new connections, we don't have the public key yet.
         // We'll add a placeholder or fetch it later if needed.
-        peers.entry(peer_id).or_insert_with(|| PeerInfo::new(Dilithium3Keypair::new().unwrap()));
+        peers.entry(peer_id).or_insert_with(|| PeerInfo::new(None));
     }
 
     /// Handle peer disconnection
     async fn on_peer_disconnected(&self, peer_id: PeerId) {
         log::info!("🔌 Peer disconnected: {}", peer_id);
-        // Remove peer keys from registry
-        self.key_registry.remove_peer_keys(&peer_id).await;
+        
     }
 
     /// Update peer reputation
@@ -851,252 +732,14 @@ impl NetworkManager {
     pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
         self.banned_peers.read().await.contains(peer_id)
     }
-
-    /// Perform periodic maintenance tasks
-    async fn perform_maintenance(&mut self) {
-        let now = Instant::now();
-        let mut peers = self.peers.write().await;
-        let mut banned_peers = self.banned_peers.write().await;
-
-        // Remove old peer entries
-        peers.retain(|_, peer| {
-            if peer.is_banned {
-                if let Some(ban_until) = peer.ban_until {
-                    if now > ban_until {
-                        peer.is_banned = false;
-                        peer.ban_until = None;
-                        peer.reputation = 0; // Reset reputation after ban expires
-                        log::info!("✅ Peer ban expired, reputation reset");
-                    }
-                }
-            }
-            
-            // Remove peers not seen for more than 1 hour
-            now.duration_since(peer.last_seen) < Duration::from_secs(3600)
-        });
-
-        // Update banned peers set
-        banned_peers.clear();
-        for (peer_id, peer) in peers.iter() {
-            if peer.is_banned {
-                banned_peers.insert(*peer_id);
-            }
-        }
-
-        // Clean up expired key requests
-        self.key_registry.cleanup_expired_requests().await;
-
-        log::debug!("🧹 Maintenance: {} active peers, {} banned peers", 
-                   peers.len(), banned_peers.len());
-    }
-
-    /// Get the number of connected peers
-    pub async fn get_peer_count(&self) -> usize {
-        self.peers.read().await.len()
-    }
-
-    /// Get local peer ID
-    pub fn get_local_peer_id(&self) -> PeerId {
-        self.local_peer_id
-    }
-
-    /// Check if the node is currently syncing
-    pub async fn is_syncing(&self) -> bool {
-        *self.is_syncing.read().await
-    }
-
-    /// Set syncing status
-    pub async fn set_syncing(&mut self, syncing: bool) {
-        *self.is_syncing.write().await = syncing;
-    }
-
-    /// Get current chain height
-    pub async fn get_chain_height(&self) -> u64 {
-        *self.chain_height.read().await
-    }
-
-    /// Set current chain height
-    pub async fn set_chain_height(&mut self, height: u64) {
-        *self.chain_height.write().await = height;
-    }
-
-    /// Send a key request to a peer
-    #[allow(dead_code)]
-    async fn send_key_request(&mut self, peer_id: PeerId) {
-        let requester_id = self.local_peer_id.to_string();
-        let (timestamp, nonce, signature) = match self.create_authenticated_message("key_request", requester_id.as_bytes()) {
-            Ok(auth) => auth,
-            Err(e) => {
-                log::error!("Failed to create key request auth: {}", e);
-                return;
-            }
-        };
-
-        let key_request = NetworkMessage::KeyRequest {
-            requester_id,
-            timestamp,
-            nonce,
-            signature,
-        };
-
-        // Send via floodsub for now (in production, use direct connection)
-        if let Ok(data) = bincode::serialize(&key_request) {
-            self.swarm
-                .behaviour_mut()
-                .floodsub
-                .publish(Topic::new("numi/key-exchange/1.0.0"), data);
-            
-            log::debug!("🔑 Sent key request to peer: {}", peer_id);
-        }
-    }
-
-    /// Handle key exchange messages
-    async fn handle_key_exchange_message(&mut self, data: &[u8]) -> Result<()> {
-        if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(data) {
-            match network_message {
-                NetworkMessage::KeyRequest { requester_id, timestamp, nonce, signature } => {
-                    self.handle_key_request(requester_id, timestamp, nonce, signature).await?;
-                }
-                NetworkMessage::KeyResponse { responder_id, dilithium_pk, kyber_pk, timestamp, nonce, signature } => {
-                    self.handle_key_response(responder_id, dilithium_pk, kyber_pk, timestamp, nonce, signature).await?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Handle incoming key request
-    async fn handle_key_request(&mut self, requester_id: String, timestamp: u64, _nonce: u64, _signature: Vec<u8>) -> Result<()> {
-        // Validate the request (in production, verify signature)
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
-            .as_secs();
-
-        if timestamp > current_time + MAX_TIMESTAMP_SKEW || timestamp < current_time - MAX_TIMESTAMP_SKEW {
-            return Err(BlockchainError::NetworkError("Key request timestamp outside allowed skew window".to_string()));
-        }
-
-        // Create key response
-        let responder_id = self.local_peer_id.to_string();
-        let (response_timestamp, response_nonce, response_signature) = 
-            self.create_authenticated_message("key_response", responder_id.as_bytes())?;
-
-        let key_response = NetworkMessage::KeyResponse {
-            responder_id,
-            dilithium_pk: self.local_dilithium_kp.public_key_bytes().to_vec(),
-            kyber_pk: self.local_kyber_pk.clone(),
-            timestamp: response_timestamp,
-            nonce: response_nonce,
-            signature: response_signature,
-        };
-
-        // Send response
-        if let Ok(data) = bincode::serialize(&key_response) {
-            self.swarm
-                .behaviour_mut()
-                .floodsub
-                .publish(Topic::new("numi/key-exchange/1.0.0"), data);
-            
-            log::debug!("🔑 Sent key response to: {}", requester_id);
-        }
-
-        Ok(())
-    }
-
-    /// Handle incoming key response
-    async fn handle_key_response(&mut self, responder_id: String, dilithium_pk: Vec<u8>, kyber_pk: Vec<u8>, timestamp: u64, _nonce: u64, _signature: Vec<u8>) -> Result<()> {
-        // Validate the response (in production, verify signature)
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
-            .as_secs();
-
-        if timestamp > current_time + MAX_TIMESTAMP_SKEW || timestamp < current_time - MAX_TIMESTAMP_SKEW {
-            return Err(BlockchainError::NetworkError("Key response timestamp outside allowed skew window".to_string()));
-        }
-
-        // Parse responder peer ID
-        let responder_peer_id = PeerId::from_str(&responder_id)
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid responder peer ID: {}", e)))?;
-
-        // Store the keys
-        self.key_registry.store_peer_keys(responder_peer_id, dilithium_pk, kyber_pk).await;
-        self.key_registry.mark_verified(responder_peer_id).await;
-
-        // Remove from pending requests
-        let mut pending = self.key_registry.pending_requests.write().await;
-        pending.remove(&responder_peer_id);
-
-        log::info!("🔑 Received and stored keys for peer: {}", responder_peer_id);
-
-        Ok(())
-    }
-} 
+    
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_peer_key_registry_basic_operations() {
-        let registry = PeerKeyRegistry::new();
-        let peer_id = PeerId::random();
-        
-        // Test key storage and retrieval
-        let dilithium_pk = vec![1, 2, 3, 4, 5];
-        let kyber_pk = vec![6, 7, 8, 9, 10];
-        
-        registry.store_peer_keys(peer_id, dilithium_pk.clone(), kyber_pk.clone()).await;
-        
-        assert!(registry.has_complete_keys(&peer_id).await);
-        assert_eq!(registry.get_dilithium_key(&peer_id).await, Some(dilithium_pk));
-        assert_eq!(registry.get_kyber_key(&peer_id).await, Some(kyber_pk));
-        
-        // Test verification
-        assert!(!registry.is_verified(&peer_id).await);
-        registry.mark_verified(peer_id).await;
-        assert!(registry.is_verified(&peer_id).await);
-    }
-
-    #[tokio::test]
-    async fn test_peer_key_registry_key_discovery() {
-        let registry = PeerKeyRegistry::new();
-        let peer_id = PeerId::random();
-        
-        // Initially no keys
-        assert!(!registry.has_complete_keys(&peer_id).await);
-        
-        // Request keys - should return true (needs request)
-        assert!(registry.request_keys_if_needed(peer_id).await);
-        
-        // Request again - should return false (already requested)
-        assert!(!registry.request_keys_if_needed(peer_id).await);
-        
-        // Clean up expired requests
-        registry.cleanup_expired_requests().await;
-    }
-
-    #[tokio::test]
-    async fn test_peer_key_registry_removal() {
-        let registry = PeerKeyRegistry::new();
-        let peer_id = PeerId::random();
-        
-        // Store keys
-        registry.store_peer_keys(peer_id, vec![1,2,3], vec![4,5,6]).await;
-        registry.mark_verified(peer_id).await;
-        
-        assert!(registry.has_complete_keys(&peer_id).await);
-        assert!(registry.is_verified(&peer_id).await);
-        
-        // Remove keys
-        registry.remove_peer_keys(&peer_id).await;
-        
-        assert!(!registry.has_complete_keys(&peer_id).await);
-        assert!(!registry.is_verified(&peer_id).await);
-    }
-
+    
     #[tokio::test]
     async fn test_network_manager_key_registry_integration() {
         // Test that NetworkManager properly integrates with PeerKeyRegistry

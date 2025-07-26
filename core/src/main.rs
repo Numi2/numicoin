@@ -16,6 +16,15 @@ use tokio;
 use fs2::FileExt;
 use hex;
 use bincode;
+use tokio::net::TcpListener;
+
+// Helper function to check if a port is available
+async fn is_port_available(port: u16) -> bool {
+    match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "numi-node")]
@@ -471,8 +480,29 @@ async fn start_full_node(config: Config) -> Result<()> {
         )?;
         
         tokio::spawn(async move {
-            if let Err(e) = rpc_server.start(port).await {
-                log::error!("❌ RPC server failed: {}", e);
+            // Check if the port is available before starting the server
+            let mut port_to_use = port;
+            let max_attempts = 5;
+            
+            // Find an available port
+            for attempt in 1..=max_attempts {
+                if is_port_available(port_to_use).await {
+                    break;
+                } else if attempt < max_attempts {
+                    log::warn!("⚠️ Port {} is in use, trying port {} (attempt {}/{})", 
+                             port_to_use, port_to_use + 1, attempt, max_attempts);
+                    port_to_use += 1;
+                } else {
+                    log::error!("❌ Could not find available port after {} attempts", max_attempts);
+                    return;
+                }
+            }
+            
+            // Start the server on the available port
+            if let Err(e) = rpc_server.start(port_to_use).await {
+                log::error!("❌ RPC server failed to start on port {}: {}", port_to_use, e);
+            } else {
+                log::info!("✅ RPC server started successfully on port {}", port_to_use);
             }
         });
         
@@ -495,19 +525,24 @@ async fn start_full_node(config: Config) -> Result<()> {
         let target_block_time = config.consensus.target_block_time;
         tokio::spawn(async move {
             loop {
-                // Snapshot chain state
+                // Get fresh chain state for each mining cycle
                 let height = blockchain_clone.read().get_current_height();
                 let previous_hash = blockchain_clone.read().get_latest_block_hash();
                 let difficulty = blockchain_clone.read().get_current_difficulty();
                 let pending_txs = blockchain_clone.read().get_transactions_for_block(1_000_000, 1000);
+                
+                log::info!("🔍 Mining loop: current height={}, difficulty={}, pending_txs={}", 
+                          height, difficulty, pending_txs.len());
+                
                 // Clone parameters for blocking closure
                 let mining_cfg_clone = mining_cfg.clone();
                 let height_clone = height;
                 let previous_hash_clone = previous_hash;
                 let difficulty_clone = difficulty;
                 let pending_txs_clone = pending_txs.clone();
+                
                 // Perform mining in a blocking task
-                if let Ok(Ok(Some(result))) = tokio::task::spawn_blocking(move || {
+                let mining_result = tokio::task::spawn_blocking(move || {
                     let mut miner = Miner::new().unwrap();
                     miner.update_config(mining_cfg_clone.into());
                     miner.mine_block(
@@ -517,45 +552,68 @@ async fn start_full_node(config: Config) -> Result<()> {
                         difficulty_clone,
                         0,
                     )
-                }).await
-                {
-                    // On success, add and persist block, then broadcast
-                    let block = result.block.clone();
-                    let block_hash = hex::encode(block.calculate_hash().unwrap_or_default());
-                    log::info!("⛏️ Mined block {} with hash {}", 
-                        block.header.height, 
-                        block_hash
-                    );
-                    
-                    // Add the mined block to the blockchain using spawn_blocking to avoid Send trait issues
-                    let blockchain_clone_for_blocking = blockchain_clone.clone();
-                    let block_clone = block.clone();
-                    let add_block_result = tokio::task::spawn_blocking(move || {
-                        // Use futures::executor::block_on to run the async add_block method
-                        futures::executor::block_on(async {
-                            blockchain_clone_for_blocking.write().add_block(block_clone).await
-                        })
-                    }).await;
-                    
-                    match add_block_result {
-                        Ok(Ok(true)) => {
-                            log::info!("✅ Successfully added mined block {} to blockchain", block.header.height);
-                            // Broadcast the block to the network
-                            let _ = network_handle_clone.broadcast_block(block).await;
+                }).await;
+                
+                match mining_result {
+                    Ok(Ok(Some(result))) => {
+                        // On success, add and persist block, then broadcast
+                        let block = result.block.clone();
+                        let block_hash = hex::encode(block.calculate_hash().unwrap_or_default());
+                        log::info!("⛏️ Mined block {} with hash {}", 
+                            block.header.height, 
+                            block_hash
+                        );
+                        
+                        // Add the mined block to the blockchain using spawn_blocking to avoid Send trait issues
+                        let blockchain_clone_for_blocking = blockchain_clone.clone();
+                        let block_clone = block.clone();
+                        log::info!("🔧 Adding block to blockchain...");
+                        let add_block_result = 
+                            // Use futures::executor::block_on to run the async add_block method
+                            futures::executor::block_on(async {
+                                blockchain_clone_for_blocking.write().add_block(block_clone).await
+                            });
+                        
+                        match add_block_result {
+                            Ok(true) => {
+                                log::info!("✅ Successfully added mined block {} to blockchain", block.header.height);
+                                // Broadcast the block to the network
+                                log::info!("📡 Broadcasting block to network...");
+                                let _ = network_handle_clone.broadcast_block(block).await;
+                                
+                                // Verify the blockchain state was updated correctly
+                                let new_height = blockchain_clone.read().get_current_height();
+                                log::info!("📊 Blockchain height updated: {} -> {}", height, new_height);
+                                
+                                if new_height <= height {
+                                    log::warn!("⚠️ Blockchain height did not increase after adding block! This might indicate a state issue.");
+                                }
+                                log::info!("✅ Block processing completed successfully");
+                            }
+                            Ok(false) => {
+                                log::warn!("⚠️ Mined block {} was already in blockchain", block.header.height);
+                            }
+                            Err(e) => {
+                                log::error!("❌ Failed to add mined block {} to blockchain: {}", block.header.height, e);
+                            }
                         }
-                        Ok(Ok(false)) => {
-                            log::warn!("⚠️ Mined block {} was already in blockchain", block.header.height);
-                        }
-                        Ok(Err(e)) => {
-                            log::error!("❌ Failed to add mined block {} to blockchain: {}", block.header.height, e);
-                        }
-                        Err(e) => {
-                            log::error!("❌ Failed to spawn blocking task for block {}: {}", block.header.height, e);
-                        }
+                        log::info!("🏁 Mining cycle completed, preparing for next cycle...");
+                    }
+                    Ok(Ok(None)) => {
+                        log::info!("⏰ Mining timeout - no block found in this cycle");
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("❌ Mining error: {}", e);
+                    }
+                    Err(e) => {
+                        log::error!("❌ Mining task panicked: {:?}", e);
                     }
                 }
+                
                 // Wait for the configured block time before mining next block
+                log::info!("⏳ Waiting for next block time ({} seconds)...", target_block_time.as_secs());
                 time::sleep(target_block_time).await;
+                log::info!("🏁 Starting next mining cycle...");
             }
         });
     }
@@ -678,7 +736,7 @@ async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: 
             amount,
             memo,
         },
-        1, // Nonce - in real implementation, get from account state
+        blockchain.get_account_state_or_default(&sender_keypair.public_key).nonce + 1,
     );
     
     // Sign transaction

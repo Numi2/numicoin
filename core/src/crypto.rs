@@ -41,7 +41,6 @@ pub struct PemKeyPair {
 pub struct Dilithium3Keypair {
     #[zeroize(skip)] // Public key doesn't need zeroization
     pub public_key: Vec<u8>,
-    #[serde(skip)] // Never serialize secret keys
     #[zeroize] // Zeroize secret key on drop
     secret_key: Vec<u8>,
     /// Key fingerprint for integrity checking

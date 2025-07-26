@@ -96,3 +96,8 @@ finality_depth = 200
 genesis_supply = 1000000000000000  # 1M NUMI
 mining_reward_halving_interval = 100000
 initial_mining_reward = 100000000000  # 100 NUMI 
+
+# Add missing target_block_time for consensus
+[consensus.target_block_time]
+secs = 15
+nanos = 0 

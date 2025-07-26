@@ -14,6 +14,8 @@ use numi_core::{
 use std::path::PathBuf;
 use tokio;
 use fs2::FileExt;
+use hex;
+use bincode;
 
 #[derive(Parser)]
 #[command(name = "numi-node")]
@@ -106,7 +108,23 @@ enum Commands {
         #[arg(long)]
         memo: Option<String>,
     },
-    
+
+    /// Sign a transaction payload and output the signature
+    SignTransaction {
+        /// Keypair file path
+        #[arg(long)]
+        key: PathBuf,
+        /// Recipient public key (hex)
+        #[arg(long)]
+        to: String,
+        /// Amount in smallest units
+        #[arg(long)]
+        amount: u64,
+        /// Transaction nonce
+        #[arg(long)]
+        nonce: u64,
+    },
+
     /// Get blockchain and node status
     Status {
         /// Show detailed statistics
@@ -264,6 +282,9 @@ async fn main() -> Result<()> {
         Commands::Submit { from_key, to, amount, fee, memo } => {
             submit_transaction_command(config, from_key, to, amount, fee, memo).await?;
         }
+        Commands::SignTransaction { key, to, amount, nonce } => {
+            sign_transaction_command(key, to, amount, nonce).await?;
+        }
         Commands::Status { detailed, format } => {
             show_status_command(config, detailed, format).await?;
         }
@@ -375,7 +396,22 @@ fn acquire_data_dir_lock<P: AsRef<std::path::Path>>(data_dir: P) -> std::io::Res
 
 
 async fn start_full_node(config: Config) -> Result<()> {
-    use tokio::task;
+    use tokio::task::spawn_blocking;
+    // ------------------------------------------------------
+    // Spawn the RPC server in the background if enabled
+    if config.rpc.enabled {
+        let rpc_cfg = config.clone();
+        let _ = spawn_blocking(move || {
+            if let Err(e) = tokio::runtime::Handle::current().block_on(start_rpc_server_command(rpc_cfg)) {
+                log::error!("❌ RPC server failed: {}", e);
+            }
+        });
+        log::info!(
+            "🚀 RPC API server spawned in background on {}:{}",
+            config.rpc.bind_address,
+            config.rpc.port
+        );
+    }
     use tokio::time::{self, Duration};
 
     log::info!("🚀 Starting Numi blockchain node...");
@@ -403,8 +439,8 @@ async fn start_full_node(config: Config) -> Result<()> {
 
     // Spawn the async event-loop so it doesn’t block our main task
     let network_handle = network.create_handle();
-    task::spawn(async move {
-        network.run_event_loop().await;
+    let _ = spawn_blocking(move || {
+        tokio::runtime::Handle::current().block_on(network.run_event_loop());
     });
 
     // ----------------------- Miner -------------------------------
@@ -558,6 +594,24 @@ async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: 
     println!("📥 To: {}", to);
     println!("💰 Amount: {} NUMI", amount as f64 / 1_000_000_000.0);
     
+    Ok(())
+}
+
+async fn sign_transaction_command(key_path: PathBuf, to: String, amount: u64, nonce: u64) -> Result<()> {
+    // Load keypair and build transaction
+    let keypair = Dilithium3Keypair::load_from_file(&key_path)?;
+    let recipient = hex::decode(&to)
+        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid recipient hex: {}", e)))?;
+    let mut tx = Transaction::new(
+        keypair.public_key.clone(),
+        TransactionType::Transfer { to: recipient, amount, memo: None },
+        nonce,
+    );
+    // Sign and serialize signature
+    tx.sign(&keypair)?;
+    let sig = tx.signature.as_ref().ok_or_else(|| numi_core::BlockchainError::CryptographyError("Missing signature".to_string()))?;
+    let sig_bytes = bincode::serialize(sig).map_err(|e| numi_core::BlockchainError::CryptographyError(format!("Serialize error: {}", e)))?;
+    println!("{}", hex::encode(sig_bytes));
     Ok(())
 }
 

@@ -1,10 +1,34 @@
+#!/bin/bash
+
+# NumiCoin Validator Script
+# Run this script to start a validator node
+
+set -e
+
+echo "🔐 Starting NumiCoin validator node..."
+
+# Check if binary exists
+if [ ! -f "target/release/numi-core" ]; then
+    echo "Error: numi-core binary not found. Please run setup-miner.sh first."
+    exit 1
+fi
+
+# Check if validator wallet exists
+if [ ! -f "validator-wallet.json" ]; then
+    echo "Error: validator-wallet.json not found. Please copy a validator key first."
+    exit 1
+fi
+
+# Create validator config
+cat > validator.toml << EOF
 [network]
 enabled = true
 listen_address = "0.0.0.0"
-listen_port = 8333
+listen_port = 8335
 max_peers = 10
 connection_timeout_secs = 10
 bootstrap_nodes = [
+    "/ip4/127.0.0.1/tcp/8333",
     "/ip4/127.0.0.1/tcp/8334"
 ]
 enable_upnp = false
@@ -15,26 +39,12 @@ ban_duration_secs = 300
 rate_limit_per_peer = 1000
 
 [mining]
-enabled = true
-thread_count = 8
-nonce_chunk_size = 5000
-stats_update_interval_secs = 5
-enable_cpu_affinity = false
-thermal_throttle_temp = 70.0
-power_limit_watts = 50.0
-target_block_time_secs = 5
-difficulty_adjustment_interval = 10
-
-[mining.argon2_config]
-memory_cost = 2048
-time_cost = 1
-parallelism = 1
-output_length = 32
-salt_length = 16
+enabled = false
+thread_count = 0
 
 [rpc]
 enabled = true
-bind_address = "0.0.0.0"
+bind_address = "127.0.0.1"
 port = 8082
 max_connections = 100
 request_timeout_secs = 30
@@ -44,29 +54,15 @@ allowed_origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3000",
-    "*"
 ]
 rate_limit_requests_per_minute = 1000
 rate_limit_burst_size = 100
 enable_authentication = false
 admin_endpoints_enabled = true
 
-[security]
-jwt_secret = "GiGC7FId5m1s75iIRYmWny1OKSmST8J2"
-jwt_expiry_hours = 1
-admin_api_key = "OJK7DSybNYDaraV9UmQQxScEecVbhKt4"
-enable_rate_limiting = true
-enable_ip_blocking = true
-max_failed_attempts = 10
-block_duration_minutes = 1
-enable_request_signing = false
-require_https = false
-enable_firewall = false
-trusted_proxies = []
-
 [storage]
-data_directory = "./core-data"
-backup_directory = "./dev-backups"
+data_directory = "./validator-data"
+backup_directory = "./validator-backups"
 max_database_size_mb = 1024
 cache_size_mb = 128
 enable_compression = false
@@ -77,17 +73,22 @@ retention_days = 30
 sync_mode = "Fast"
 
 [consensus]
-difficulty_adjustment_interval = 10
+difficulty_adjustment_interval = 20
 max_block_size = 524288
 max_transactions_per_block = 100
-min_transaction_fee = 100
+min_transaction_fee = 1000
 max_reorg_depth = 10
-checkpoint_interval = 20
-finality_depth = 50
+checkpoint_interval = 50
+finality_depth = 100
 genesis_supply = 21000000000000000
 mining_reward_halving_interval = 210000
 initial_mining_reward = 50000000000
 
 [consensus.target_block_time]
-secs = 5
+secs = 10
 nanos = 0
+EOF
+
+# Start validator node
+echo "Starting validator node on port 8335..."
+./target/release/numi-core --config validator.toml start 

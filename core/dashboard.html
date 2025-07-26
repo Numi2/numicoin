@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NumiCoin Mining Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            padding: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #3498db;
+        }
+
+        .stat-card h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #3498db;
+            margin-bottom: 10px;
+        }
+
+        .stat-label {
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-online {
+            background-color: #27ae60;
+        }
+
+        .status-offline {
+            background-color: #e74c3c;
+        }
+
+        .controls {
+            padding: 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            margin-right: 10px;
+            transition: transform 0.2s;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+        }
+
+        .button.danger {
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+        }
+
+        .button.success {
+            background: linear-gradient(135deg, #27ae60 0%, #229954 100%);
+        }
+
+        .log-container {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 30px;
+            font-family: 'Courier New', monospace;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
+        }
+
+        .log-info {
+            background: rgba(52, 152, 219, 0.2);
+        }
+
+        .log-warning {
+            background: rgba(241, 196, 15, 0.2);
+        }
+
+        .log-error {
+            background: rgba(231, 76, 60, 0.2);
+        }
+
+        .refresh-info {
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⛏️ NumiCoin Mining Dashboard</h1>
+            <p>Monitor your quantum-safe blockchain node</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Node Status</h3>
+                <div class="stat-value">
+                    <span class="status-indicator" id="status-indicator"></span>
+                    <span id="node-status">Checking...</span>
+                </div>
+                <div class="stat-label">Current node status</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Block Height</h3>
+                <div class="stat-value" id="block-height">-</div>
+                <div class="stat-label">Latest block number</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Total Blocks</h3>
+                <div class="stat-value" id="total-blocks">-</div>
+                <div class="stat-label">Blocks in blockchain</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Difficulty</h3>
+                <div class="stat-value" id="difficulty">-</div>
+                <div class="stat-label">Current mining difficulty</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Active Miners</h3>
+                <div class="stat-value" id="active-miners">-</div>
+                <div class="stat-label">Connected mining nodes</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Pending Transactions</h3>
+                <div class="stat-value" id="pending-tx">-</div>
+                <div class="stat-label">Transactions in mempool</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>CPU Usage</h3>
+                <div class="stat-value" id="cpu-usage">-</div>
+                <div class="stat-label">Current CPU utilization</div>
+            </div>
+
+            <div class="stat-card">
+                <h3>Memory Usage</h3>
+                <div class="stat-value" id="memory-usage">-</div>
+                <div class="stat-label">RAM usage by node</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="button success" onclick="startMining()">Start Mining</button>
+            <button class="button danger" onclick="stopMining()">Stop Mining</button>
+            <button class="button" onclick="refreshStats()">Refresh Stats</button>
+            <button class="button" onclick="viewLogs()">View Logs</button>
+        </div>
+
+        <div class="log-container" id="log-container" style="display: none;">
+            <h3>Node Logs</h3>
+            <div id="log-content"></div>
+        </div>
+
+        <div class="refresh-info">
+            Auto-refreshing every 10 seconds | Last updated: <span id="last-update">Never</span>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshStats();
+            startAutoRefresh();
+        });
+
+        function startAutoRefresh() {
+            refreshInterval = setInterval(refreshStats, 10000); // Refresh every 10 seconds
+        }
+
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        }
+
+        async function refreshStats() {
+            try {
+                // Check if node is running
+                const nodeRunning = await checkNodeStatus();
+                updateNodeStatus(nodeRunning);
+
+                if (nodeRunning) {
+                    // Get blockchain status
+                    const status = await getBlockchainStatus();
+                    updateStats(status);
+                } else {
+                    resetStats();
+                }
+
+                updateLastUpdate();
+            } catch (error) {
+                console.error('Error refreshing stats:', error);
+                updateNodeStatus(false);
+            }
+        }
+
+        async function checkNodeStatus() {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/health', {
+                    method: 'GET',
+                    timeout: 2000
+                });
+                return response.ok;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        async function getBlockchainStatus() {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/status');
+                return await response.json();
+            } catch (error) {
+                throw new Error('Failed to get blockchain status');
+            }
+        }
+
+        function updateNodeStatus(running) {
+            const indicator = document.getElementById('status-indicator');
+            const status = document.getElementById('node-status');
+            
+            if (running) {
+                indicator.className = 'status-indicator status-online';
+                status.textContent = 'Online';
+            } else {
+                indicator.className = 'status-indicator status-offline';
+                status.textContent = 'Offline';
+            }
+        }
+
+        function updateStats(data) {
+            document.getElementById('block-height').textContent = data.height || '-';
+            document.getElementById('total-blocks').textContent = data.total_blocks || '-';
+            document.getElementById('difficulty').textContent = data.difficulty || '-';
+            document.getElementById('active-miners').textContent = data.active_miners || '-';
+            document.getElementById('pending-tx').textContent = data.pending_transactions || '-';
+            document.getElementById('cpu-usage').textContent = data.cpu_usage || '-';
+            document.getElementById('memory-usage').textContent = data.memory_usage || '-';
+        }
+
+        function resetStats() {
+            document.getElementById('block-height').textContent = '-';
+            document.getElementById('total-blocks').textContent = '-';
+            document.getElementById('difficulty').textContent = '-';
+            document.getElementById('active-miners').textContent = '-';
+            document.getElementById('pending-tx').textContent = '-';
+            document.getElementById('cpu-usage').textContent = '-';
+            document.getElementById('memory-usage').textContent = '-';
+        }
+
+        function updateLastUpdate() {
+            const now = new Date();
+            document.getElementById('last-update').textContent = now.toLocaleTimeString();
+        }
+
+        async function startMining() {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/mining/start', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    alert('Mining started successfully!');
+                    refreshStats();
+                } else {
+                    alert('Failed to start mining');
+                }
+            } catch (error) {
+                alert('Error starting mining: ' + error.message);
+            }
+        }
+
+        async function stopMining() {
+            try {
+                const response = await fetch('http://127.0.0.1:8080/mining/stop', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    alert('Mining stopped successfully!');
+                    refreshStats();
+                } else {
+                    alert('Failed to stop mining');
+                }
+            } catch (error) {
+                alert('Error stopping mining: ' + error.message);
+            }
+        }
+
+        function viewLogs() {
+            const container = document.getElementById('log-container');
+            const content = document.getElementById('log-content');
+            
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                content.innerHTML = `
+                    <div class="log-entry log-info">[INFO] Loading logs...</div>
+                    <div class="log-entry log-info">[INFO] Dashboard started at ${new Date().toLocaleString()}</div>
+                    <div class="log-entry log-warning">[WARNING] RPC server may not be running</div>
+                    <div class="log-entry log-info">[INFO] Auto-refresh enabled</div>
+                `;
+            } else {
+                container.style.display = 'none';
+            }
+        }
+
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopAutoRefresh();
+            } else {
+                startAutoRefresh();
+                refreshStats();
+            }
+        });
+    </script>
+</body>
+</html> 

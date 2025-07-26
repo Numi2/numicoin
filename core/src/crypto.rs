@@ -301,7 +301,7 @@ impl Dilithium3Keypair {
 
         // Test randomness quality
         let mut test_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut test_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut test_bytes);
 
         // Basic entropy test - check for patterns
         let mut ones = 0;
@@ -659,7 +659,7 @@ pub fn generate_random_bytes(length: usize) -> Result<Vec<u8>> {
     }
     
     let mut bytes = vec![0u8; length];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     
     // Basic quality check for small lengths
     if length <= 32 {

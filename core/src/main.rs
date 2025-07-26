@@ -6,7 +6,7 @@ use numi_core::{
     network::NetworkManager,
     crypto::Dilithium3Keypair,
     transaction::{Transaction, TransactionType},
-    rpc::RpcServer,
+    rpc::{RpcServer, RateLimitConfig, AuthConfig},
     config::Config,
     BlockchainError,
     Result,
@@ -396,40 +396,53 @@ fn acquire_data_dir_lock<P: AsRef<std::path::Path>>(data_dir: P) -> std::io::Res
 
 
 async fn start_full_node(config: Config) -> Result<()> {
-    use tokio::task::spawn_blocking;
-    // ------------------------------------------------------
-    // Spawn the RPC server in the background if enabled
-    if config.rpc.enabled {
-        let rpc_cfg = config.clone();
-        let _ = spawn_blocking(move || {
-            if let Err(e) = tokio::runtime::Handle::current().block_on(start_rpc_server_command(rpc_cfg)) {
-                log::error!("❌ RPC server failed: {}", e);
-            }
-        });
-        log::info!(
-            "🚀 RPC API server spawned in background on {}:{}",
-            config.rpc.bind_address,
-            config.rpc.port
-        );
-    }
-    use tokio::time::{self, Duration};
+    // removed unused spawn_blocking import
 
     log::info!("🚀 Starting Numi blockchain node...");
 
     // ----------------------- Storage & Chain -----------------------
-    let storage = BlockchainStorage::new(&config.storage.data_directory)?;
+    let storage = std::sync::Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
     log::info!("✅ Storage initialized at {:?}", config.storage.data_directory);
 
     // Load existing chain or create new one
-    let blockchain = match NumiBlockchain::load_from_storage(&storage).await {
+    let initial_chain = match NumiBlockchain::load_from_storage(&*storage).await {
         Ok(chain) => chain,
         Err(_) => {
             log::warn!("🆕 No existing chain found – creating new genesis");
             NumiBlockchain::new()?
         }
     };
+    let blockchain = std::sync::Arc::new(parking_lot::RwLock::new(initial_chain));
+    log::info!("✅ Blockchain ready (height: {})", blockchain.read().get_current_height());
 
-    log::info!("✅ Blockchain ready (height: {})", blockchain.get_current_height());
+    // Prepare RPC configuration if enabled
+    let rpc_config = if config.rpc.enabled {
+        let rate_limit_cfg = RateLimitConfig {
+            requests_per_minute: config.rpc.rate_limit_requests_per_minute,
+            burst_size: config.rpc.rate_limit_burst_size,
+            cleanup_interval: std::time::Duration::from_secs(config.rpc.request_timeout_secs),
+        };
+        let mut auth_cfg = AuthConfig::default();
+        auth_cfg.require_auth = config.rpc.enable_authentication;
+
+        let blockchain_clone = blockchain.clone();
+        let _storage_clone = storage.clone();
+        let miner = std::sync::Arc::new(parking_lot::RwLock::new(Miner::new()?));
+
+        // Store RPC config for later use after network is started
+        Some((
+            blockchain_clone,
+            _storage_clone,
+            rate_limit_cfg,
+            auth_cfg,
+            miner,
+            config.rpc.port,
+            config.rpc.bind_address.clone(),
+        ))
+    } else {
+        None
+    };
+    use tokio::time::{self, Duration};
 
     // ----------------------- Networking ---------------------------
     let mut network = NetworkManager::new()?;
@@ -437,26 +450,115 @@ async fn start_full_node(config: Config) -> Result<()> {
     network.start(&network_addr).await?;
     log::info!("✅ Network started on {}", network_addr);
 
-    // Spawn the async event-loop so it doesn’t block our main task
+    // Spawn the async event-loop so it doesn't block our main task
     let network_handle = network.create_handle();
-    let _ = spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(network.run_event_loop());
+    tokio::spawn(async move {
+        // Run the network event loop (no error return expected)
+        network.run_event_loop().await;
     });
 
-    // ----------------------- Miner -------------------------------
-    let mut miner = if config.mining.enabled {
-        match Miner::new() {
-            Ok(m) => Some(m),
-            Err(e) => {
-                log::error!("❌ Failed to initialize miner: {}", e);
-                None
+    // Start RPC server after network is initialized
+    if let Some((blockchain_clone, _storage_clone, rate_limit_cfg, auth_cfg, miner, port, bind_addr)) = rpc_config {
+        let network_handle_clone = network_handle.clone();
+        
+        let rpc_server = RpcServer::with_shared_components(
+            blockchain_clone,
+            _storage_clone,
+            rate_limit_cfg,
+            auth_cfg,
+            network_handle_clone,
+            miner,
+        )?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = rpc_server.start(port).await {
+                log::error!("❌ RPC server failed: {}", e);
             }
-        }
-    } else {
-        None
-    };
+        });
+        
+        log::info!(
+            "🚀 RPC API server spawned in background on {}:{}",
+            bind_addr,
+            port
+        );
+    }
 
+    // ----------------------- Miner -------------------------------
     log::info!("🎯 Node is running! Press Ctrl+C to stop.");
+
+    // Spawn background mining loop if enabled
+    if config.mining.enabled {
+        let blockchain_clone = blockchain.clone();
+        let _storage_clone = storage.clone();
+        let network_handle_clone = network_handle.clone();
+        let mining_cfg = config.mining.clone();
+        let target_block_time = config.consensus.target_block_time;
+        tokio::spawn(async move {
+            loop {
+                // Snapshot chain state
+                let height = blockchain_clone.read().get_current_height();
+                let previous_hash = blockchain_clone.read().get_latest_block_hash();
+                let difficulty = blockchain_clone.read().get_current_difficulty();
+                let pending_txs = blockchain_clone.read().get_transactions_for_block(1_000_000, 1000);
+                // Clone parameters for blocking closure
+                let mining_cfg_clone = mining_cfg.clone();
+                let height_clone = height;
+                let previous_hash_clone = previous_hash;
+                let difficulty_clone = difficulty;
+                let pending_txs_clone = pending_txs.clone();
+                // Perform mining in a blocking task
+                if let Ok(Ok(Some(result))) = tokio::task::spawn_blocking(move || {
+                    let mut miner = Miner::new().unwrap();
+                    miner.update_config(mining_cfg_clone.into());
+                    miner.mine_block(
+                        height_clone + 1,
+                        previous_hash_clone,
+                        pending_txs_clone,
+                        difficulty_clone,
+                        0,
+                    )
+                }).await
+                {
+                    // On success, add and persist block, then broadcast
+                    let block = result.block.clone();
+                    let block_hash = hex::encode(block.calculate_hash().unwrap_or_default());
+                    log::info!("⛏️ Mined block {} with hash {}", 
+                        block.header.height, 
+                        block_hash
+                    );
+                    
+                    // Add the mined block to the blockchain using spawn_blocking to avoid Send trait issues
+                    let blockchain_clone_for_blocking = blockchain_clone.clone();
+                    let block_clone = block.clone();
+                    let add_block_result = tokio::task::spawn_blocking(move || {
+                        // Use futures::executor::block_on to run the async add_block method
+                        futures::executor::block_on(async {
+                            blockchain_clone_for_blocking.write().add_block(block_clone).await
+                        })
+                    }).await;
+                    
+                    match add_block_result {
+                        Ok(Ok(true)) => {
+                            log::info!("✅ Successfully added mined block {} to blockchain", block.header.height);
+                            // Broadcast the block to the network
+                            let _ = network_handle_clone.broadcast_block(block).await;
+                        }
+                        Ok(Ok(false)) => {
+                            log::warn!("⚠️ Mined block {} was already in blockchain", block.header.height);
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("❌ Failed to add mined block {} to blockchain: {}", block.header.height, e);
+                        }
+                        Err(e) => {
+                            log::error!("❌ Failed to spawn blocking task for block {}: {}", block.header.height, e);
+                        }
+                    }
+                }
+                // Wait for the configured block time before mining next block
+                time::sleep(target_block_time).await;
+            }
+        });
+    }
 
     // Periodic status & graceful shutdown handling
     let mut status_interval = time::interval(Duration::from_secs(10));
@@ -467,20 +569,17 @@ async fn start_full_node(config: Config) -> Result<()> {
                 log::info!("🛑 Ctrl+C received – beginning graceful shutdown");
 
                 // Flush blockchain state
-                if let Err(e) = blockchain.save_to_storage(&storage) {
+                if let Err(e) = blockchain.read().save_to_storage(&*storage) {
                     log::error!("❌ Failed to persist chain state: {}", e);
                 }
 
-                // Stop miner if running
-                if let Some(ref mut m) = miner {
-                    m.stop();
-                }
+                // Background miner tasks will be dropped on shutdown
 
                 log::info!("👋 Shutdown complete. Goodbye!");
                 break;
             }
             _ = status_interval.tick() => {
-                let state = blockchain.get_chain_state();
+                let state = blockchain.read().get_chain_state();
                 let peer_cnt = network_handle.get_peer_count().await;
                 log::info!("📈 Status – Blocks: {}, Difficulty: {}, Peers: {}", 
                     state.total_blocks, state.current_difficulty, peer_cnt);

@@ -153,7 +153,7 @@ where
         .duration_since(UNIX_EPOCH)
         .map_err(|e| BlockchainError::CryptographyError(format!("Time error: {}", e)))?
         .as_secs();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let nonce = rng.next_u64();
     let mut transcript = Vec::new();
     transcript.extend_from_slice(our_dilithium_pk);

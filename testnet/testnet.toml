@@ -7,7 +7,9 @@ listen_address = "0.0.0.0"
 listen_port = 8334  # Testnet port
 max_peers = 20
 connection_timeout_secs = 15
-bootstrap_nodes = []
+bootstrap_nodes = [
+    "/ip4/127.0.0.1/tcp/8333"
+]
 enable_upnp = false
 enable_mdns = true
 peer_discovery_interval_secs = 120

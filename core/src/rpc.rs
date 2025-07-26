@@ -100,19 +100,23 @@ impl Default for AuthConfig {
         Self {
             jwt_secret: std::env::var("NUMI_JWT_SECRET")
                 .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("JWT_SECRET not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
             token_expiry: Duration::from_secs(3600), // 1 hour
             require_auth: true, // Require authentication by default
             admin_api_key: std::env::var("NUMI_ADMIN_KEY")
                 .unwrap_or_else(|_| {
-                    log::warn!("ADMIN_KEY not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("ADMIN_KEY not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
         }
     }
@@ -441,6 +445,39 @@ impl RpcServer {
             blocked_ips: Arc::new(DashMap::new()),
             network_manager: Some(network_handle),
             miner: Arc::new(RwLock::new(miner)),
+        })
+    }
+    
+    /// Create RPC server using shared blockchain and storage (no DB reopen)
+    pub fn with_shared_components(
+        blockchain: Arc<RwLock<NumiBlockchain>>,
+        storage: Arc<BlockchainStorage>,
+        rate_limit_config: RateLimitConfig,
+        auth_config: AuthConfig,
+        network_manager: NetworkManagerHandle,
+        miner: Arc<RwLock<Miner>>,
+    ) -> Result<Self> {
+        let stats = RpcStats {
+            total_requests: 0,
+            successful_requests: 0,
+            failed_requests: 0,
+            rate_limited_requests: 0,
+            active_connections: 0,
+            blocked_ips: 0,
+            uptime_seconds: 0,
+            average_response_time_ms: 0.0,
+        };
+        Ok(Self {
+            blockchain,
+            _storage: storage,
+            rate_limiter: Arc::new(DashMap::new()),
+            rate_limit_config,
+            _auth_config: auth_config,
+            stats: Arc::new(RwLock::new(stats)),
+            start_time: Instant::now(),
+            blocked_ips: Arc::new(DashMap::new()),
+            network_manager: Some(network_manager),
+            miner: miner,
         })
     }
     

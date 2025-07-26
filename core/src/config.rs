@@ -456,18 +456,22 @@ impl Default for SecurityConfig {
         Self {
             jwt_secret: std::env::var("NUMI_JWT_SECRET")
                 .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("JWT_SECRET not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
             jwt_expiry_hours: 1,
             admin_api_key: std::env::var("NUMI_ADMIN_KEY")
                 .unwrap_or_else(|_| {
-                    log::warn!("ADMIN_KEY not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("ADMIN_KEY not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
             enable_rate_limiting: true,
             enable_ip_blocking: true,
@@ -486,18 +490,22 @@ impl SecurityConfig {
         Self {
             jwt_secret: std::env::var("NUMI_JWT_SECRET")
                 .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("JWT_SECRET not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
             jwt_expiry_hours: 24,
             admin_api_key: std::env::var("NUMI_ADMIN_KEY")
                 .unwrap_or_else(|_| {
-                    log::warn!("ADMIN_KEY not set in environment, using random value");
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    (0..32).map(|_| rng.sample(rand::distributions::Alphanumeric) as char).collect()
+                    log::warn!("ADMIN_KEY not set in environment, using cryptographically secure random value");
+                    use rand::RngCore;
+                    let mut rng = rand::rngs::OsRng;
+                    let mut bytes = [0u8; 32];
+                    rng.fill_bytes(&mut bytes);
+                    hex::encode(bytes)
                 }),
             enable_rate_limiting: true,
             enable_ip_blocking: true,

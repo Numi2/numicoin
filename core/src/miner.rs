@@ -62,6 +62,20 @@ pub struct MiningConfig {
     pub power_limit_watts: f32,
 }
 
+impl From<crate::config::MiningConfig> for MiningConfig {
+    fn from(cfg: crate::config::MiningConfig) -> Self {
+        Self {
+            thread_count: cfg.thread_count,
+            nonce_chunk_size: cfg.nonce_chunk_size,
+            stats_update_interval: cfg.stats_update_interval_secs,
+            argon2_config: cfg.argon2_config,
+            enable_cpu_affinity: cfg.enable_cpu_affinity,
+            thermal_throttle_temp: cfg.thermal_throttle_temp,
+            power_limit_watts: cfg.power_limit_watts,
+        }
+    }
+}
+
 impl Default for MiningConfig {
     fn default() -> Self {
         Self {

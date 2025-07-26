@@ -2,14 +2,14 @@
 enabled = true
 listen_address = "0.0.0.0"
 listen_port = 8333
-max_peers = 10
+max_peers = 100
 connection_timeout_secs = 10
 bootstrap_nodes = [
     "/ip4/127.0.0.1/tcp/8334"
 ]
 enable_upnp = false
 enable_mdns = true
-peer_discovery_interval_secs = 60
+peer_discovery_interval_secs = 30
 max_message_size = 10485760
 ban_duration_secs = 300
 rate_limit_per_peer = 1000
@@ -22,13 +22,13 @@ stats_update_interval_secs = 5
 enable_cpu_affinity = false
 thermal_throttle_temp = 70.0
 power_limit_watts = 50.0
-target_block_time_secs = 5
-difficulty_adjustment_interval = 10
+target_block_time_secs = 1
+difficulty_adjustment_interval = 600
 
 [mining.argon2_config]
-memory_cost = 2048
+memory_cost = 65536
 time_cost = 1
-parallelism = 1
+parallelism = 4
 output_length = 32
 salt_length = 16
 
@@ -77,17 +77,17 @@ retention_days = 30
 sync_mode = "Fast"
 
 [consensus]
-difficulty_adjustment_interval = 10
+difficulty_adjustment_interval = 600
 max_block_size = 524288
 max_transactions_per_block = 100
-min_transaction_fee = 100
+min_transaction_fee = 1
 max_reorg_depth = 10
 checkpoint_interval = 20
 finality_depth = 50
-genesis_supply = 21000000000000000
-mining_reward_halving_interval = 210000
-initial_mining_reward = 50000000000
+genesis_supply = 100000000000000000
+mining_reward_halving_interval = 1000000
+initial_mining_reward = 10000000000
 
 [consensus.target_block_time]
-secs = 5
-nanos = 0
+secs = 1
+nanos = 500000000

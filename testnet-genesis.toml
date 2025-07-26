@@ -64,9 +64,9 @@ finality_depth = 200
 [genesis.mining]
 # Mining parameters for testnet
 initial_difficulty = 1
-mining_reward = 100_000_000_000  # 100 NUMI per block
-halving_interval = 100_000  # Every 100,000 blocks
-max_supply = 1_000_000_000_000_000  # 1M NUMI total supply
+mining_reward = 10_000_000_000  # 10 NUMI per block
+halving_interval = 1_000_000  # Every 1,000,000 blocks
+max_supply = 100_000_000_000_000_000  # 100M NUMI total supply
 
 [genesis.network]
 # Network parameters for testnet

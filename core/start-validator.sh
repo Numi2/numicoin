@@ -80,9 +80,9 @@ min_transaction_fee = 1000
 max_reorg_depth = 10
 checkpoint_interval = 50
 finality_depth = 100
-genesis_supply = 21000000000000000
-mining_reward_halving_interval = 210000
-initial_mining_reward = 50000000000
+genesis_supply = 100000000000000000
+mining_reward_halving_interval = 1000000
+initial_mining_reward = 10000000000
 
 [consensus.target_block_time]
 secs = 10

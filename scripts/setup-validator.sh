@@ -143,9 +143,9 @@ min_transaction_fee = 500  # Lower fees for testnet
 max_reorg_depth = 20
 checkpoint_interval = 100
 finality_depth = 200
-genesis_supply = 1000000000000000  # 1M NUMI
-mining_reward_halving_interval = 100000
-initial_mining_reward = 100000000000  # 100 NUMI
+genesis_supply = 100000000000000000  # 100M NUMI
+mining_reward_halving_interval = 1000000
+initial_mining_reward = 10000000000  # 10 NUMI
 
 [miner]
 public_key = "$PUBLIC_KEY"

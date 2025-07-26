@@ -112,7 +112,7 @@ impl Default for ChainState {
         Self {
             total_blocks: 0,
             total_supply: 0,
-            current_difficulty: 1,
+            current_difficulty: 8, // Match the initial difficulty from calculate_next_difficulty
             average_block_time: 30,
             last_block_time: Utc::now(),
             active_miners: 0,
@@ -862,7 +862,7 @@ impl NumiBlockchain {
                 self.miner_keypair.public_key.clone(),
                 TransactionType::MiningReward {
                     block_height: 0,
-                    amount: 21_000_000_000_000_000, // 21M NUMI * 10^9 (total supply)
+                    amount: 100_000_000_000_000_000, // 100M NUMI * 10^9 (total supply)
                     pool_address: None,
                 },
                 0,
@@ -1157,7 +1157,7 @@ impl NumiBlockchain {
     /// Calculate next difficulty adjustment
     fn calculate_next_difficulty(&self, height: u64) -> u32 {
         if height < self.difficulty_adjustment_interval {
-            return 1; // Initial difficulty
+            return 8; // Higher initial difficulty for more challenging mining
         }
         
         if height % self.difficulty_adjustment_interval != 0 {

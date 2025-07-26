@@ -694,9 +694,9 @@ impl Default for ConsensusConfig {
             max_reorg_depth: 144,
             checkpoint_interval: 1000,
             finality_depth: 2016,
-            genesis_supply: 21_000_000_000_000_000, // 21M NUMI
-            mining_reward_halving_interval: 210_000,
-            initial_mining_reward: 50_000_000_000, // 50 NUMI
+            genesis_supply: 100_000_000_000_000_000, // 100M NUMI
+            mining_reward_halving_interval: 1_000_000,
+            initial_mining_reward: 10_000_000_000, // 10 NUMI
         }
     }
 }
@@ -733,9 +733,9 @@ impl ConsensusConfig {
             max_reorg_depth: 20,
             checkpoint_interval: 100,
             finality_depth: 200,
-            genesis_supply: 1_000_000_000_000_000, // 1M NUMI for testnet
-            mining_reward_halving_interval: 100_000, // Faster halving for testnet
-            initial_mining_reward: 100_000_000_000, // 100 NUMI initial reward
+            genesis_supply: 100_000_000_000_000_000, // 100M NUMI for testnet
+            mining_reward_halving_interval: 1_000_000, // 1M blocks halving for testnet
+            initial_mining_reward: 10_000_000_000, // 10 NUMI initial reward
             ..Default::default()
         }
     }

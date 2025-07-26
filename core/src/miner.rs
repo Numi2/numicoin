@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
-use chrono::Utc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -366,8 +365,6 @@ impl Miner {
         let mut last_stats_update = Instant::now();
         let thread_start_time = Instant::now();
         let mut last_health_check = Instant::now();
-        // Track when to refresh block timestamp
-        let mut last_time_update = Instant::now();
         
         // Set CPU affinity if enabled
         if config.enable_cpu_affinity {
@@ -462,11 +459,8 @@ impl Miner {
                         }
                     }
                 }
-                // Periodically update block timestamp to avoid stale headers
-                if last_time_update.elapsed().as_secs() >= config.stats_update_interval {
-                    block.header.timestamp = Utc::now();
-                    last_time_update = Instant::now();
-                }
+                // Note: We don't update the timestamp during mining to avoid PoW verification issues
+                // The timestamp is set once at the beginning and remains constant during mining
             }
         }
         

@@ -453,11 +453,11 @@ async fn start_full_node(config: Config) -> Result<()> {
     log::info!("✅ Storage initialized at {:?}", config.storage.data_directory);
 
     // Load existing chain or create new one
-    let initial_chain = match NumiBlockchain::load_from_storage(&*storage).await {
+    let initial_chain = match NumiBlockchain::load_from_storage_with_config(&*storage, Some(config.consensus.clone())).await {
         Ok(chain) => chain,
         Err(_) => {
             log::warn!("🆕 No existing chain found – creating new genesis");
-            NumiBlockchain::new()?
+            NumiBlockchain::new_with_config(Some(config.consensus.clone()), None)?
         }
     };
     let blockchain = std::sync::Arc::new(parking_lot::RwLock::new(initial_chain));
@@ -1140,8 +1140,8 @@ async fn init_blockchain_command(config: Config, _force: bool, _genesis_config_p
             kp
         }
     };
-    // Initialize blockchain with specified miner keypair
-    let blockchain = NumiBlockchain::new_with_keypair(Some(miner_keypair))?;
+    // Initialize blockchain with specified miner keypair and consensus config
+    let blockchain = NumiBlockchain::new_with_config(Some(config.consensus.clone()), Some(miner_keypair))?;
     log::info!("✅ Blockchain initialized with miner wallet {:?}", wallet_path);
     
     // Save initial state and blocks

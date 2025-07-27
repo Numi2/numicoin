@@ -692,7 +692,7 @@ impl Default for ConsensusConfig {
             difficulty_adjustment_interval: 144,
             max_block_size: 2 * 1024 * 1024, // 2MB
             max_transactions_per_block: 10000,
-            min_transaction_fee: 1000, // 0.000001 NUMI
+            min_transaction_fee: 1, // 1 NANO (aligned with transaction.rs constants)
             max_reorg_depth: 144,
             checkpoint_interval: 1000,
             finality_depth: 2016,
@@ -731,7 +731,7 @@ impl ConsensusConfig {
             difficulty_adjustment_interval: 30,
             max_block_size: 1024 * 1024, // 1MB
             max_transactions_per_block: 500,
-            min_transaction_fee: 500, // Lower fees for testnet
+            min_transaction_fee: 1, // Same as mainnet for consistency
             max_reorg_depth: 20,
             checkpoint_interval: 100,
             finality_depth: 200,

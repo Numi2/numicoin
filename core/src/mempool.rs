@@ -6,9 +6,10 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::transaction::{Transaction, TransactionId, TransactionType};
+use crate::transaction::{Transaction, TransactionId, TransactionType, TransactionFee, MIN_TRANSACTION_FEE};
 use crate::{Result, BlockchainError};
 use crate::blockchain::NumiBlockchain;
+use crate::config::ConsensusConfig;
 
 // AI Agent Note: This is a production not ready. transaction mempool implementation
 // Features implemented:
@@ -88,11 +89,11 @@ pub struct TransactionMempool {
     /// A handle to the blockchain for state-aware validation
     blockchain: Option<Arc<RwLock<NumiBlockchain>>>,
 
-    /// Configuration parameters
+    /// Configuration parameters (from ConsensusConfig)
+    consensus_config: ConsensusConfig,
     max_mempool_size: usize,         // Maximum memory usage in bytes
     max_transactions: usize,         // Maximum number of transactions
-    min_fee_rate: u64,              // Minimum fee rate per byte
-    max_tx_age: Duration,           // aMaximum transaction age before expiry
+    max_tx_age: Duration,           // Maximum transaction age before expiry
     _max_account_txs: usize,         // Maximum pending transactions per account
     
     /// Anti-spam protection
@@ -112,8 +113,13 @@ impl Default for TransactionMempool {
 }
 
 impl TransactionMempool {
-    /// Create new mempool with production-ready configuration
+    /// Create new mempool with default configuration
     pub fn new() -> Self {
+        Self::new_with_config(ConsensusConfig::default())
+    }
+    
+    /// Create new mempool with specific consensus configuration
+    pub fn new_with_config(consensus_config: ConsensusConfig) -> Self {
         Self {
             priority_queue: Arc::new(RwLock::new(BTreeMap::new())),
             transactions: Arc::new(DashMap::new()),
@@ -121,12 +127,12 @@ impl TransactionMempool {
             transactions_by_account: Arc::new(DashMap::new()),
             blockchain: None,
             
-            // Conservative production limits
-            max_mempool_size: 256 * 1024 * 1024,  // 256 MB
-            max_transactions: 100_000,             // 100k transactions
-            min_fee_rate: 1000,                    // 1000 satoshis per byte
+            // Use configuration values
+            max_mempool_size: consensus_config.max_block_size * 256, // 256x block size for mempool
+            max_transactions: consensus_config.max_transactions_per_block * 1000, // 1000x block tx limit
             max_tx_age: Duration::from_secs(3600), // 1 hour
             _max_account_txs: 1000,                 // 1000 pending txs per account
+            consensus_config,
             
             // Anti-spam: 100 submissions per hour per account
             account_submission_rates: Arc::new(DashMap::new()),
@@ -357,7 +363,7 @@ impl TransactionMempool {
     /// This creates economic incentives by raising the bar for inclusion when the
     /// mempool is congested and lowering it when there is plenty of capacity.
     fn dynamic_min_fee_rate(&self) -> u64 {
-        let base = self.min_fee_rate;
+        let base = self.consensus_config.min_transaction_fee;
         let size_utilisation = *self.current_size_bytes.read() as f64 / self.max_mempool_size as f64;
         let count_utilisation = self.transactions.len() as f64 / self.max_transactions as f64;
         let utilisation = size_utilisation.max(count_utilisation);
@@ -408,10 +414,28 @@ impl TransactionMempool {
     }
 
     async fn validate_transaction(&self, transaction: &Transaction) -> Result<ValidationResult> {
-        // Check transaction size
-        let tx_size = self.calculate_transaction_size(transaction);
-        if tx_size > 1024 * 1024 { // 1 MB limit
-            return Ok(ValidationResult::TransactionTooLarge);
+        // Use transaction's built-in validation which includes proper fee checks
+        if let Err(e) = transaction.validate_structure() {
+            match e {
+                BlockchainError::InvalidTransaction(msg) if msg.contains("too large") => {
+                    return Ok(ValidationResult::TransactionTooLarge);
+                }
+                BlockchainError::InvalidTransaction(msg) if msg.contains("fee") => {
+                    // Extract fee information for validation result
+                    let tx_size = self.calculate_transaction_size(transaction);
+                    if let Ok(min_fee_info) = TransactionFee::minimum_for_size(tx_size) {
+                        return Ok(ValidationResult::FeeTooLow {
+                            minimum: min_fee_info.total,
+                            got: transaction.fee,
+                        });
+                    }
+                    return Ok(ValidationResult::FeeTooLow {
+                        minimum: MIN_TRANSACTION_FEE,
+                        got: transaction.fee,
+                    });
+                }
+                _ => return Err(e),
+            }
         }
         
         // Validate signature
@@ -464,11 +488,14 @@ impl TransactionMempool {
         bincode::serialize(transaction).map(|bytes| bytes.len()).unwrap_or(512)
     }
 
-    fn calculate_fee_rate(&self, _transaction: &Transaction, size_bytes: usize) -> u64 {
-        // Simple fee calculation - in production, extract from transaction
-        let base_fee = 1000; // Base fee per transaction
-        let size_fee = size_bytes as u64 * 1000; // 1000 satoshis per byte for testing
-        (base_fee + size_fee) / size_bytes as u64
+    fn calculate_fee_rate(&self, transaction: &Transaction, size_bytes: usize) -> u64 {
+        // Use the transaction's actual fee to calculate rate
+        if size_bytes == 0 {
+            return 0;
+        }
+        
+        // Fee rate is transaction fee divided by size in bytes
+        transaction.fee / size_bytes as u64
     }
 
     fn has_space_for_transaction(&self, tx_size: usize, fee_rate: u64) -> bool {
@@ -578,6 +605,7 @@ mod tests {
         let mempool = TransactionMempool::new();
         let keypair = Dilithium3Keypair::new().unwrap();
         
+        // Create transaction with proper fee calculation
         let mut transaction = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -587,6 +615,7 @@ mod tests {
             },
             1,
         );
+        
         transaction.sign(&keypair).unwrap();
         
         let result = mempool.add_transaction(transaction).await.unwrap();
@@ -601,6 +630,7 @@ mod tests {
         let mempool = TransactionMempool::new();
         let keypair = Dilithium3Keypair::new().unwrap();
         
+        // Create transaction with proper fee calculation
         let mut transaction = Transaction::new(
             keypair.public_key.clone(),
             TransactionType::Transfer {
@@ -610,6 +640,7 @@ mod tests {
             },
             1,
         );
+        
         transaction.sign(&keypair).unwrap();
         
         // Add first time - should succeed

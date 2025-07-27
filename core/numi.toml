@@ -89,6 +89,12 @@ genesis_supply = 1000
 mining_reward_halving_interval = 1000000
 initial_mining_reward = 1000
 
+# Transaction fee structure (aligned with transaction.rs constants)
+# - Base fee: 1 NANO per transaction
+# - Size fee: 1 NANO per byte  
+# - Min fee: 1 NANO total
+# - Max fee: 100000 NANO (1000 NUMI)
+
 [consensus.target_block_time]
 secs = 1
 nanos = 500000000

@@ -270,6 +270,11 @@ impl NumiBlockchain {
 
     /// Create new blockchain with optional keypair
     pub fn new_with_keypair(keypair: Option<Dilithium3Keypair>) -> Result<Self> {
+        Self::new_with_config(None, keypair)
+    }
+    
+    /// Create new blockchain with consensus configuration and optional keypair
+    pub fn new_with_config(consensus_config: Option<crate::config::ConsensusConfig>, keypair: Option<Dilithium3Keypair>) -> Result<Self> {
         let miner_keypair = if let Some(kp) = keypair {
             kp
         } else {
@@ -308,7 +313,11 @@ impl NumiBlockchain {
         };
 
         let blockchain_arc = Arc::new(RwLock::new(blockchain));
-        let mut mempool = TransactionMempool::new();
+        let mut mempool = if let Some(ref config) = consensus_config {
+            TransactionMempool::new_with_config(config.clone())
+        } else {
+            TransactionMempool::new()
+        };
         mempool.set_blockchain_handle(blockchain_arc.clone());
         
         let mut locked_blockchain = blockchain_arc.write();
@@ -342,6 +351,11 @@ impl NumiBlockchain {
     
     /// Load blockchain from storage with validation
     pub async fn load_from_storage(storage: &crate::storage::BlockchainStorage) -> Result<Self> {
+        Self::load_from_storage_with_config(storage, None).await
+    }
+    
+    /// Load blockchain from storage with consensus configuration
+    pub async fn load_from_storage_with_config(storage: &crate::storage::BlockchainStorage, consensus_config: Option<crate::config::ConsensusConfig>) -> Result<Self> {
         // Try to load from default wallet file first, fall back to new keypair
         let default_wallet_path = "miner-wallet.json";
         let miner_keypair = match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
@@ -355,7 +369,11 @@ impl NumiBlockchain {
             }
         };
         
-        let mempool = Arc::new(TransactionMempool::new());
+        let mempool = Arc::new(if let Some(ref config) = consensus_config {
+            TransactionMempool::new_with_config(config.clone())
+        } else {
+            TransactionMempool::new()
+        });
         
         let mut blockchain = Self {
             blocks: Arc::new(DashMap::new()),

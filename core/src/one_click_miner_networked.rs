@@ -86,14 +86,14 @@ async fn main() -> Result<()> {
     println!("🔧 Initializing blockchain...");
     let storage = Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
     
-    let blockchain = match NumiBlockchain::load_from_storage(&*storage).await {
+    let blockchain = match NumiBlockchain::load_from_storage_with_config(&*storage, Some(config.consensus.clone())).await {
         Ok(chain) => {
             println!("📦 Loaded existing blockchain (height: {})", chain.get_current_height());
             chain
         }
         Err(_) => {
             println!("🆕 Creating new blockchain...");
-            let chain = NumiBlockchain::new_with_keypair(Some(wallet.clone()))?;
+            let chain = NumiBlockchain::new_with_config(Some(config.consensus.clone()), Some(wallet.clone()))?;
             chain.save_to_storage(&*storage)?;
             println!("✅ Blockchain initialized with genesis block");
             chain

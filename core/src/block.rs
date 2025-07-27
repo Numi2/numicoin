@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use crate::crypto::{Hash, blake3_hash, blake3_hash_hex, Dilithium3Signature};
+use chrono::{DateTime, Utc, Duration};
+use crate::crypto::{Hash, blake3_hash, Dilithium3Signature};
 use crate::transaction::Transaction;
 use crate::error::BlockchainError;
 use crate::Result;
@@ -56,11 +56,11 @@ impl Block {
     
     pub fn calculate_hash(&self) -> Result<BlockHash> {
         let header_data = self.serialize_header_for_hashing()?;
-        Ok(blake3_hash(&header_data))
+        Ok(crate::crypto::blake3_hash_block(&header_data))
     }
     
     pub fn get_hash_hex(&self) -> Result<String> {
-        Ok(blake3_hash_hex(&self.calculate_hash()?))
+        Ok(crate::crypto::blake3_hash_hex(&self.calculate_hash()?))
     }
     
     pub fn sign(&mut self, keypair: &crate::crypto::Dilithium3Keypair) -> Result<()> {
@@ -133,6 +133,9 @@ impl Block {
             if self.header.height != 0 {
                 return Err(BlockchainError::InvalidBlock("Genesis block must have height 0".to_string()));
             }
+            if self.header.previous_hash != [0u8; 32] {
+                return Err(BlockchainError::InvalidBlock("Genesis block previous_hash must be zero".to_string()));
+            }
         }
         
         // Verify Merkle root
@@ -149,9 +152,10 @@ impl Block {
         
         // Verify timestamp is reasonable
         let now = Utc::now();
-        let time_diff = (now - self.header.timestamp).num_seconds().abs();
-        if time_diff > 3600 { // 1 hour tolerance
-            return Err(BlockchainError::InvalidBlock("Block timestamp too far from current time".to_string()));
+        let earliest = now - Duration::hours(1);
+        let latest = now + Duration::minutes(10);
+        if self.header.timestamp < earliest || self.header.timestamp > latest {
+            return Err(BlockchainError::InvalidBlock("Block timestamp outside allowed range".to_string()));
         }
         
         Ok(())

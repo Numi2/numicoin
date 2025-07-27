@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -86,8 +86,10 @@ pub struct TransactionMempool {
     /// Transactions by sender account for efficient account queries
     transactions_by_account: Arc<DashMap<Vec<u8>, HashSet<TransactionId>>>,
     
-    /// A handle to the blockchain for state-aware validation
-    blockchain: Option<Arc<RwLock<NumiBlockchain>>>,
+    /// Weak reference to the blockchain for state-aware validation.  A weak
+    /// reference breaks the strong reference cycle between `NumiBlockchain`
+    /// and `TransactionMempool` while still allowing on-demand access.
+    blockchain: Option<Weak<RwLock<NumiBlockchain>>>,
 
     /// Configuration parameters (from ConsensusConfig)
     consensus_config: ConsensusConfig,
@@ -145,8 +147,8 @@ impl TransactionMempool {
     }
 
     /// Set a blockchain handle for state-aware validation
-    pub fn set_blockchain_handle(&mut self, blockchain: Arc<RwLock<NumiBlockchain>>) {
-        self.blockchain = Some(blockchain);
+    pub fn set_blockchain_handle(&mut self, blockchain: &Arc<RwLock<NumiBlockchain>>) {
+        self.blockchain = Some(Arc::downgrade(blockchain));
     }
 
     /// Add transaction to mempool with full validation
@@ -460,14 +462,16 @@ impl TransactionMempool {
                     return Err(BlockchainError::InvalidTransaction("Zero amount transfer".to_string()));
                 }
                 
-                if let Some(blockchain) = &self.blockchain {
-                    let blockchain = blockchain.read();
+                if let Some(weak_chain) = &self.blockchain {
+                    if let Some(blockchain_arc) = weak_chain.upgrade() {
+                        let blockchain = blockchain_arc.read();
                     let account_state = blockchain.get_account_state_or_default(&transaction.from);
                     if account_state.balance < transaction.get_required_balance() {
                         return Ok(ValidationResult::InsufficientBalance {
                             required: transaction.get_required_balance(),
                             available: account_state.balance,
                         });
+                    }
                     }
                 }
             }

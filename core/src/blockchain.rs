@@ -312,41 +312,33 @@ impl NumiBlockchain {
             block_processing_times: Arc::new(RwLock::new(VecDeque::new())),
         };
 
+        // Wrap the partially-constructed blockchain in an Arc so that we can
+        // hand a *weak* reference to the mempool without creating a reference
+        // cycle.  Afterwards we unwrap the Arc to return an owned `Self` so
+        // external callers can keep using plain values (no Arc required).
         let blockchain_arc = Arc::new(RwLock::new(blockchain));
+
+        // Build the mempool and provide a weak reference to the blockchain.
         let mut mempool = if let Some(ref config) = consensus_config {
             TransactionMempool::new_with_config(config.clone())
         } else {
             TransactionMempool::new()
         };
-        mempool.set_blockchain_handle(blockchain_arc.clone());
-        
-        let mut locked_blockchain = blockchain_arc.write();
-        locked_blockchain.mempool = Arc::new(mempool);
-        
-        locked_blockchain.create_genesis_block()?;
+        mempool.set_blockchain_handle(&blockchain_arc);
 
-        // TODO: Refactor this to avoid cloning the blockchain.
-        // This is a temporary solution to break the Arc cycle.
-        let final_blockchain = NumiBlockchain {
-            blocks: locked_blockchain.blocks.clone(),
-            main_chain: locked_blockchain.main_chain.clone(),
-            accounts: locked_blockchain.accounts.clone(),
-            state: locked_blockchain.state.clone(),
-            checkpoints: locked_blockchain.checkpoints.clone(),
-            orphan_pool: locked_blockchain.orphan_pool.clone(),
-            orphan_by_peer: locked_blockchain.orphan_by_peer.clone(),
-            mempool: locked_blockchain.mempool.clone(),
-            block_times: locked_blockchain.block_times.clone(),
-            peer_metrics: locked_blockchain.peer_metrics.clone(),
-            genesis_hash: locked_blockchain.genesis_hash,
-            miner_keypair: locked_blockchain.miner_keypair.clone(),
-            target_block_time: locked_blockchain.target_block_time,
-            difficulty_adjustment_interval: locked_blockchain.difficulty_adjustment_interval,
-            max_orphan_blocks: locked_blockchain.max_orphan_blocks,
-            max_reorg_depth: locked_blockchain.max_reorg_depth,
-            block_processing_times: locked_blockchain.block_processing_times.clone(),
-        };
-        Ok(final_blockchain)
+        {
+            let mut locked_blockchain = blockchain_arc.write();
+            locked_blockchain.mempool = Arc::new(mempool);
+            locked_blockchain.create_genesis_block()?;
+        }
+
+        // Attempt to unwrap the Arc; this should succeed because the only
+        // remaining strong reference is `blockchain_arc` itself (the mempool
+        // kept a `Weak`).
+        match Arc::try_unwrap(blockchain_arc) {
+            Ok(rwlock) => Ok(rwlock.into_inner()),
+            Err(_) => Err(BlockchainError::ConsensusError("Failed to unwrap blockchain Arc".to_string())),
+        }
     }
     
     /// Load blockchain from storage with validation

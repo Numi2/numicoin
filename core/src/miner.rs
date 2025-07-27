@@ -277,7 +277,7 @@ impl Miner {
             let stats = Arc::clone(&self.stats);
             let config = self.config.clone();
             let block_template = block.clone();
-            let difficulty_target = difficulty_target.clone();
+            let difficulty_target = difficulty_target;
             
             let handle = std::thread::spawn(move || {
                 // Catch panics in worker threads
@@ -353,7 +353,7 @@ impl Miner {
     fn mining_thread_worker(
         thread_id: usize,
         mut block: Block,
-        difficulty_target: Vec<u8>,
+        difficulty_target: [u8; 32],
         is_mining: Arc<AtomicBool>,
         is_paused: Arc<AtomicBool>,
         should_stop: Arc<AtomicBool>,

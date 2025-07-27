@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use crate::crypto::{Dilithium3Keypair, Dilithium3Signature, blake3_hash, blake3_hash_hex};
+use crate::crypto::{Dilithium3Keypair, Dilithium3Signature, blake3_hash_hex};
 use crate::error::BlockchainError;
 use crate::Result;
 
@@ -65,18 +65,21 @@ pub struct TransactionFee {
 
 impl TransactionFee {
     /// Calculate fee for given transaction size and priority
-    pub fn calculate(size_bytes: usize, priority_multiplier: f64) -> Result<Self> {
+    pub fn calculate(size_bytes: usize, priority_multiplier: u32) -> Result<Self> {
         if size_bytes > MAX_TRANSACTION_SIZE {
             return Err(BlockchainError::InvalidTransaction("Transaction too large".to_string()));
         }
-        
-        if priority_multiplier < 0.0 || priority_multiplier > 10.0 {
+
+        if priority_multiplier > 10 {
             return Err(BlockchainError::InvalidTransaction("Invalid priority multiplier".to_string()));
         }
-        
+
         let base_fee = BASE_TRANSACTION_FEE;
         let size_fee = (size_bytes as u64) * STANDARD_FEE_PER_BYTE;
-        let priority_fee = ((base_fee + size_fee) as f64 * priority_multiplier) as u64;
+        // Using integer arithmetic avoids consensus differences across CPU
+        // architectures.  The multiplier is hundred-percent increments where
+        // 0 → no priority fee, 1 → +100 %, 2 → +200 %, …
+        let priority_fee = (base_fee + size_fee) * priority_multiplier as u64;
         let total = base_fee + size_fee + priority_fee;
         
         if total < MIN_TRANSACTION_FEE {
@@ -97,7 +100,7 @@ impl TransactionFee {
     
     /// Calculate minimum fee for transaction size
     pub fn minimum_for_size(size_bytes: usize) -> Result<Self> {
-        Self::calculate(size_bytes, 0.0)
+        Self::calculate(size_bytes, 0)
     }
     
     /// Validate fee amount against calculated minimum
@@ -202,7 +205,7 @@ impl Transaction {
     
     pub fn calculate_hash(&self) -> TransactionId {
         let data = self.serialize_for_signing().unwrap_or_default();
-        blake3_hash(&data)
+        crate::crypto::blake3_hash_tx(&data)
     }
     
     pub fn get_hash_hex(&self) -> String {
@@ -490,14 +493,14 @@ mod tests {
         assert_eq!(fee_info.total, fee_info.base_fee + fee_info.size_fee);
         
         // Test priority fee calculation
-        let priority_fee = TransactionFee::calculate(500, 1.0).unwrap();
+        let priority_fee = TransactionFee::calculate(500, 1).unwrap();
         assert!(priority_fee.priority_fee > 0);
         assert!(priority_fee.total > fee_info.total);
         
         // Test validation
-        assert!(TransactionFee::calculate(MAX_TRANSACTION_SIZE + 1, 0.0).is_err());
-        assert!(TransactionFee::calculate(500, -1.0).is_err());
-        assert!(TransactionFee::calculate(500, 11.0).is_err());
+        assert!(TransactionFee::calculate(MAX_TRANSACTION_SIZE + 1, 0).is_err());
+        // Negative value not possible now, so skip equivalent test
+        assert!(TransactionFee::calculate(500, 11).is_err());
     }
     
     #[test]

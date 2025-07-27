@@ -96,6 +96,17 @@ impl Dilithium3Keypair {
     
     /// Load keypair from file (JSON format)
     pub fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        // Add permission check for key file
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(path.as_ref())
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file metadata: {}", e)))?;
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(BlockchainError::CryptographyError(format!("Insecure key file permissions: {:o}", mode)));
+            }
+        }
         let file_content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file: {}", e)))?;
         
@@ -117,10 +128,28 @@ impl Dilithium3Keypair {
     pub fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         let json_content = serde_json::to_string_pretty(self)
             .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {}", e)))?;
-        
-        std::fs::write(path.as_ref(), json_content)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to write key file: {}", e)))?;
-        
+        // Harden file writing with secure permissions
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::io::Write;
+
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path.as_ref())
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to open key file: {}", e)))?;
+            file.write_all(json_content.as_bytes())
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to write key file: {}", e)))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path.as_ref(), json_content)
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to write key file: {}", e)))?;
+        }
         Ok(())
     }
     
@@ -449,6 +478,29 @@ pub fn blake3_hash_hex(data: &[u8]) -> String {
     let hash = blake3_hash(data);
     hex::encode(hash)
 }
+/// Domain-separated BLAKE3 hash for blocks
+pub fn blake3_hash_block(data: &[u8]) -> Hash {
+    if data.is_empty() {
+        return [0u8; 32];
+    }
+    let mut hasher = Hasher::new_derive_key("block_hash");
+    hasher.update(data);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hasher.finalize().as_bytes()[..32]);
+    hash
+}
+
+/// Domain-separated BLAKE3 hash for transactions
+pub fn blake3_hash_tx(data: &[u8]) -> Hash {
+    if data.is_empty() {
+        return [0u8; 32];
+    }
+    let mut hasher = Hasher::new_derive_key("transaction_id");
+    hasher.update(data);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hasher.finalize().as_bytes()[..32]);
+    hash
+}
 
 /// Incremental BLAKE3 hasher for large data
 pub struct Blake3Hasher {
@@ -483,6 +535,12 @@ impl Blake3Hasher {
     
     pub fn bytes_processed(&self) -> usize {
         self.bytes_processed
+    }
+}
+/// Implement Default for Blake3Hasher
+impl Default for Blake3Hasher {
+    fn default() -> Self {
+        Blake3Hasher::new()
     }
 }
 
@@ -579,14 +637,14 @@ pub fn verify_pow(header_blob: &[u8], nonce: u64, difficulty_target: &[u8]) -> R
 }
 
 /// Generate difficulty target with enhanced validation
-pub fn generate_difficulty_target(difficulty: u32) -> Vec<u8> {
+pub fn generate_difficulty_target(difficulty: u32) -> [u8; 32] {
     // Validate difficulty range
     let difficulty = difficulty.min(255); // Cap at 255 for safety
     
     let mut target = [0xFFu8; 32];
     
     if difficulty == 0 {
-        return target.to_vec(); // Maximum target (easiest)
+        return target; // Maximum target (easiest)
     }
     
     // Calculate position of leading zeros more precisely
@@ -609,7 +667,7 @@ pub fn generate_difficulty_target(difficulty: u32) -> Vec<u8> {
         }
     }
     
-    target.to_vec()
+    target
 }
 
 /// Calculate difficulty from target with improved precision

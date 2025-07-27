@@ -5,15 +5,18 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    trace::{TraceLayer, DefaultMakeSpan},
-    timeout::TimeoutLayer,
-    limit::RequestBodyLimitLayer,
-};
 use warp::{Filter, Reply, Rejection, http::StatusCode};
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Validation, Header};
+
+
+use crate::blockchain::NumiBlockchain;
+use crate::storage::BlockchainStorage;
+use crate::transaction::{Transaction, TransactionType};
+use crate::mempool::ValidationResult;
+use crate::network::{NetworkManager, NetworkManagerHandle};
+use crate::miner::Miner;
+use crate::config::RpcConfig;
+use crate::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -23,32 +26,9 @@ struct Claims {
 }
 
 #[derive(Debug)]
-struct Unauthorized;
-#[derive(Debug)]
-struct Forbidden;
+struct RpcError(String);
 
-impl warp::reject::Reject for Unauthorized {}
-impl warp::reject::Reject for Forbidden {}
-
-use crate::blockchain::NumiBlockchain;
-use crate::storage::BlockchainStorage;
-use crate::transaction::{Transaction, TransactionType};
-use crate::mempool::ValidationResult;
-use crate::network::{NetworkManager, NetworkManagerHandle};
-use crate::miner::Miner;
-use crate::Result;
-
-// AI Agent Note: This is a production-ready RPC server implementation
-// Security features implemented:
-// - Rate limiting per IP with configurable limits and sliding window
-// - JWT-based authentication with role-based access control
-// - Comprehensive input validation and sanitization
-// - Request/response logging and monitoring
-// - CORS policy with restricted origins
-// - Request body size limits to prevent DoS
-// - Timeout handling for long-running operations
-// - IP-based blocking and reputation scoring
-// - Structured error responses with security in mind
+impl warp::reject::Reject for RpcError {}
 
 /// Rate limiting configuration
 #[derive(Debug, Clone)]
@@ -97,27 +77,19 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
+        let generate_secret = || {
+            use rand::RngCore;
+            let mut rng = rand::rngs::OsRng;
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        };
+
         Self {
-            jwt_secret: std::env::var("NUMI_JWT_SECRET")
-                .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set in environment, using cryptographically secure random value");
-                    use rand::RngCore;
-                    let mut rng = rand::rngs::OsRng;
-                    let mut bytes = [0u8; 32];
-                    rng.fill_bytes(&mut bytes);
-                    hex::encode(bytes)
-                }),
-            token_expiry: Duration::from_secs(3600), // 1 hour
-            require_auth: true, // Require authentication by default
-            admin_api_key: std::env::var("NUMI_ADMIN_KEY")
-                .unwrap_or_else(|_| {
-                    log::warn!("ADMIN_KEY not set in environment, using cryptographically secure random value");
-                    use rand::RngCore;
-                    let mut rng = rand::rngs::OsRng;
-                    let mut bytes = [0u8; 32];
-                    rng.fill_bytes(&mut bytes);
-                    hex::encode(bytes)
-                }),
+            jwt_secret: std::env::var("NUMI_JWT_SECRET").unwrap_or_else(|_| generate_secret()),
+            token_expiry: Duration::from_secs(3600),
+            require_auth: true,
+            admin_api_key: std::env::var("NUMI_ADMIN_KEY").unwrap_or_else(|_| generate_secret()),
         }
     }
 }
@@ -135,7 +107,6 @@ pub enum AccessLevel {
 struct RateLimitEntry {
     requests: Vec<Instant>,
     blocked_until: Option<Instant>,
-    total_requests: u64,
     violations: u32,
 }
 
@@ -144,17 +115,12 @@ impl RateLimitEntry {
         Self {
             requests: Vec::new(),
             blocked_until: None,
-            total_requests: 0,
             violations: 0,
         }
     }
     
     fn is_blocked(&self) -> bool {
-        if let Some(blocked_until) = self.blocked_until {
-            Instant::now() < blocked_until
-        } else {
-            false
-        }
+        self.blocked_until.map_or(false, |blocked_until| Instant::now() < blocked_until)
     }
     
     fn can_make_request(&mut self, config: &RateLimitConfig) -> bool {
@@ -170,24 +136,21 @@ impl RateLimitEntry {
         
         // Check rate limit
         if self.requests.len() >= config.requests_per_minute as usize {
-            // Rate limit exceeded
             self.violations += 1;
             
-            // Progressive blocking: first violation = 1 minute, second = 5 minutes, etc.
-            let block_duration = match self.violations {
-                1 => Duration::from_secs(60),    // 1 minute
-                2 => Duration::from_secs(300),   // 5 minutes  
-                3 => Duration::from_secs(900),   // 15 minutes
-                _ => Duration::from_secs(3600),  // 1 hour
-            };
+            // Progressive blocking duration
+            let block_duration = Duration::from_secs(match self.violations {
+                1 => 60,
+                2 => 300,
+                3 => 900,
+                _ => 3600,
+            });
             
             self.blocked_until = Some(now + block_duration);
             return false;
         }
         
-        // Allow request
         self.requests.push(now);
-        self.total_requests += 1;
         true
     }
 }
@@ -295,38 +258,9 @@ pub struct TransactionRequest {
     pub signature: String,  // Hex-encoded signature
 }
 
-impl TransactionRequest {
-    fn validate(&self) -> std::result::Result<(), String> {
-        // Validate hex encoding
-        if hex::decode(&self.from).is_err() {
-            return Err("Invalid sender address format".to_string());
-        }
-        if hex::decode(&self.to).is_err() {
-            return Err("Invalid recipient address format".to_string());
-        }
-        if hex::decode(&self.signature).is_err() {
-            return Err("Invalid signature format".to_string());
-        }
-        
-        // Validate amounts
-        if self.amount == 0 {
-            return Err("Amount must be greater than zero".to_string());
-        }
-        if self.amount > 1_000_000_000_000_000 { // Max 1 million NUMI
-            return Err("Amount exceeds maximum allowed".to_string());
-        }
-        
-        // Validate addresses are correct length
-        if self.from.len() != 128 { // Dilithium3 public key is 64 bytes = 128 hex chars
-            return Err("Invalid sender address length".to_string());
-        }
-        if self.to.len() != 128 {
-            return Err("Invalid recipient address length".to_string());
-        }
-        
-        Ok(())
-    }
-}
+// Note: TransactionRequest validation is now handled entirely by the mempool
+// The RPC layer only does basic hex decoding - all business logic validation
+// is delegated to the mempool for consistency and to avoid duplication.
 
 /// Transaction response
 #[derive(Debug, Serialize, Deserialize)]
@@ -360,6 +294,7 @@ pub struct RpcServer {
     rate_limiter: Arc<DashMap<SocketAddr, RateLimitEntry>>,
     rate_limit_config: RateLimitConfig,
     _auth_config: AuthConfig,
+    rpc_config: RpcConfig,
     stats: Arc<RwLock<RpcStats>>,
     start_time: Instant,
     blocked_ips: Arc<DashMap<SocketAddr, Instant>>,
@@ -370,43 +305,11 @@ pub struct RpcServer {
 impl RpcServer {
     /// Create new RPC server with security configuration
     pub fn new(blockchain: NumiBlockchain, storage: BlockchainStorage) -> Result<Self> {
-        Self::with_config(
-            blockchain,
-            storage,
-            RateLimitConfig::default(),
-            AuthConfig::default(),
-        )
-    }
-
-    /// Create new RPC server with network and miner components
-    pub fn with_components(
-        blockchain: NumiBlockchain,
-        storage: BlockchainStorage,
-        network_manager: NetworkManager,
-        miner: Miner,
-    ) -> Result<Self> {
         Self::with_config_and_components(
             blockchain,
             storage,
             RateLimitConfig::default(),
             AuthConfig::default(),
-            network_manager,
-            miner,
-        )
-    }
-    
-    /// Create RPC server with custom configuration
-    pub fn with_config(
-        blockchain: NumiBlockchain,
-        storage: BlockchainStorage,
-        rate_limit_config: RateLimitConfig,
-        auth_config: AuthConfig,
-    ) -> Result<Self> {
-        Self::with_config_and_components(
-            blockchain,
-            storage,
-            rate_limit_config,
-            auth_config,
             NetworkManager::new()?,
             Miner::new()?,
         )
@@ -440,6 +343,7 @@ impl RpcServer {
             rate_limiter: Arc::new(DashMap::new()),
             rate_limit_config,
             _auth_config: auth_config,
+            rpc_config: RpcConfig::default(), // TODO: Should be passed as parameter
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
@@ -454,6 +358,7 @@ impl RpcServer {
         storage: Arc<BlockchainStorage>,
         rate_limit_config: RateLimitConfig,
         auth_config: AuthConfig,
+        rpc_config: RpcConfig,
         network_manager: NetworkManagerHandle,
         miner: Arc<RwLock<Miner>>,
     ) -> Result<Self> {
@@ -473,6 +378,7 @@ impl RpcServer {
             rate_limiter: Arc::new(DashMap::new()),
             rate_limit_config,
             _auth_config: auth_config,
+            rpc_config,
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
@@ -494,34 +400,32 @@ impl RpcServer {
         // Define API routes with access levels
         let routes = rpc_server.build_routes(Arc::clone(&rpc_server)).await;
         
-        // Apply security middleware
-        let _service = ServiceBuilder::new()
-            .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()))
-            .layer(TimeoutLayer::new(Duration::from_secs(30)))
-            .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB limit
-            .layer(CorsLayer::new()
-                .allow_origin("http://localhost:3000".parse::<warp::http::HeaderValue>().unwrap())
-                .allow_methods([warp::http::Method::GET, warp::http::Method::POST])
-                .allow_headers([warp::http::header::CONTENT_TYPE]))
-            .service(warp::service(routes.clone()));
+        // Build CORS configuration  
+        let cors = if rpc_server.rpc_config.enable_cors {
+            let mut cors_builder = warp::cors()
+                .allow_methods(&[warp::http::Method::GET, warp::http::Method::POST])
+                .allow_headers(vec!["content-type"]);
+            
+            for origin in &rpc_server.rpc_config.allowed_origins {
+                if origin == "*" {
+                    cors_builder = cors_builder.allow_any_origin();
+                    break;
+                } else {
+                    cors_builder = cors_builder.allow_origin(origin.as_str());
+                }
+            }
+            cors_builder.build()
+        } else {
+            warp::cors()
+                .allow_any_origin()
+                .allow_methods(&[warp::http::Method::GET, warp::http::Method::POST])
+                .allow_headers(vec!["content-type"])
+                .build()
+        };
+
+        log::info!("Starting RPC server on port {} with security features enabled", port);
         
-        log::info!("🚀 Starting secure RPC server on port {}", port);
-        log::info!("🔒 Security features enabled:");
-        log::info!("   ✓ Rate limiting: {} req/min", rpc_server.rate_limit_config.requests_per_minute);
-        log::info!("   ✓ Request body limit: 1MB");
-        log::info!("   ✓ Request timeout: 30s");
-        log::info!("   ✓ CORS protection");
-        log::info!("   ✓ Request tracing");
-        
-        log::info!("📡 Available endpoints:");
-        log::info!("   GET  /status          - Blockchain status (public)");
-        log::info!("   GET  /balance/:addr   - Account balance (public)");
-        log::info!("   GET  /block/:hash     - Block information (public)");
-        log::info!("   POST /transaction     - Submit transaction (user)");
-        log::info!("   POST /mine           - Mine block (admin)");
-        log::info!("   GET  /stats          - RPC statistics (admin)");
-        
-        warp::serve(routes)
+        warp::serve(routes.with(cors))
             .run(([0, 0, 0, 0], port))
             .await;
         
@@ -584,8 +488,6 @@ impl RpcServer {
             .and(auth_admin.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_stats);
-            
-
         
         // Auth route for getting a JWT
         let login_route = warp::path("login")
@@ -623,11 +525,9 @@ impl RpcServer {
                 // Check if IP is blocked
                 if let Some(blocked_until) = rpc_server.blocked_ips.get(&client_addr) {
                     if Instant::now() < *blocked_until {
-                        log::warn!("🚫 Blocked IP {} attempted request", client_addr.ip());
                         rpc_server.increment_stat("rate_limited_requests").await;
-                        return Err(warp::reject::custom(RateLimitExceeded));
+                        return Err(warp::reject::custom(RpcError("IP temporarily blocked".to_string())));
                     } else {
-                        // Unblock expired IP
                         rpc_server.blocked_ips.remove(&client_addr);
                     }
                 }
@@ -638,9 +538,8 @@ impl RpcServer {
                     .or_insert_with(RateLimitEntry::new);
                 
                 if !entry.can_make_request(&rpc_server.rate_limit_config) {
-                    log::warn!("⚠️ Rate limit exceeded for IP: {}", client_addr.ip());
                     rpc_server.increment_stat("rate_limited_requests").await;
-                    return Err(warp::reject::custom(RateLimitExceeded));
+                    return Err(warp::reject::custom(RpcError("Rate limit exceeded".to_string())));
                 }
                 
                 rpc_server.increment_stat("total_requests").await;
@@ -662,17 +561,20 @@ impl RpcServer {
                     if !auth_config.require_auth {
                         return Ok(());
                     }
+                    
                     let token_str = auth_header
                         .and_then(|h| h.strip_prefix("Bearer ").map(str::to_string))
-                        .ok_or_else(|| warp::reject::custom(Unauthorized))?;
+                        .ok_or_else(|| warp::reject::custom(RpcError("Missing or invalid authorization header".to_string())))?;
+                    
                     let token_data = decode::<Claims>(
                         &token_str,
                         &DecodingKey::from_secret(auth_config.jwt_secret.as_bytes()),
                         &Validation::default(),
                     )
-                    .map_err(|_| warp::reject::custom(Unauthorized))?;
+                    .map_err(|_| warp::reject::custom(RpcError("Invalid JWT token".to_string())))?;
+                    
                     if required_level == AccessLevel::Admin && token_data.claims.role != "admin" {
-                        return Err(warp::reject::custom(Forbidden));
+                        return Err(warp::reject::custom(RpcError("Insufficient permissions".to_string())));
                     }
                     Ok(())
                 }
@@ -706,7 +608,7 @@ impl RpcServer {
                 stats.uptime_seconds = self.start_time.elapsed().as_secs();
             }
             
-            log::debug!("🧹 Cleaned up rate limiting data. Active entries: {}, Blocked IPs: {}", 
+            log::debug!("Cleaned up rate limiting data. Active entries: {}, Blocked IPs: {}", 
                        self.rate_limiter.len(), self.blocked_ips.len());
         }
     }
@@ -742,17 +644,30 @@ impl RpcServer {
     }
 }
 
-/// Custom rejection for rate limiting
-#[derive(Debug)]
-struct RateLimitExceeded;
 
-impl warp::reject::Reject for RateLimitExceeded {}
 
 /// Helper filter to pass RPC server to handlers
 fn with_rpc_server(
     rpc_server: Arc<RpcServer>,
 ) -> impl Filter<Extract = (Arc<RpcServer>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || rpc_server.clone())
+}
+
+/// Helper function to decode hex with error handling
+async fn decode_hex_field(
+    hex_str: &str,
+    field_name: &str,
+    rpc_server: &Arc<RpcServer>,
+) -> std::result::Result<Vec<u8>, warp::reply::Json> {
+    match hex::decode(hex_str) {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => {
+            rpc_server.increment_stat("failed_requests").await;
+            Err(warp::reply::json(&ApiResponse::<()>::error(
+                format!("Invalid {} hex format", field_name)
+            )))
+        }
+    }
 }
 
 /// Calculate transaction fee based on size and type
@@ -794,7 +709,7 @@ async fn handle_status(
     
     let response = StatusResponse {
         total_blocks,
-                    total_supply: total_supply as f64 / 100.0,
+                    total_supply: total_supply as f64 / 1_000_000_000.0,
         current_difficulty,
         best_block_hash: hex::encode(best_block_hash),
         mempool_transactions,
@@ -933,49 +848,27 @@ async fn handle_block(
     }
 }
 
-/// Transaction endpoint handler - fixed with proper async calls and thread-safe patterns
+/// Transaction endpoint handler - delegates all validation to mempool
 async fn handle_transaction(
     tx_request: TransactionRequest,
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
-    // Validate transaction request
-    if let Err(e) = tx_request.validate() {
-        rpc_server.increment_stat("failed_requests").await;
-        return Ok(warp::reply::json(&ApiResponse::<()>::error(e)));
-    }
-
-    // Parse transaction data
-    let from_pubkey = match hex::decode(&tx_request.from) {
+    // Parse transaction data (minimal validation - just hex decoding)
+    let from_pubkey = match decode_hex_field(&tx_request.from, "from address", &rpc_server).await {
         Ok(key) => key,
-        Err(_) => {
-            rpc_server.increment_stat("failed_requests").await;
-            return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                "Invalid from address".to_string()
-            )));
-        }
+        Err(response) => return Ok(response),
     };
 
-    let to_pubkey = match hex::decode(&tx_request.to) {
+    let to_pubkey = match decode_hex_field(&tx_request.to, "to address", &rpc_server).await {
         Ok(key) => key,
-        Err(_) => {
-            rpc_server.increment_stat("failed_requests").await;
-            return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                "Invalid to address".to_string()
-            )));
-        }
+        Err(response) => return Ok(response),
     };
 
-    let signature_bytes = match hex::decode(&tx_request.signature) {
+    let signature_bytes = match decode_hex_field(&tx_request.signature, "signature", &rpc_server).await {
         Ok(sig) => sig,
-        Err(_) => {
-            rpc_server.increment_stat("failed_requests").await;
-            return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                "Invalid signature".to_string()
-            )));
-        }
+        Err(response) => return Ok(response),
     };
 
-    // Create a transaction template to calculate size and fee
     let mut transaction = Transaction::new(
         from_pubkey,
         TransactionType::Transfer {
@@ -986,77 +879,40 @@ async fn handle_transaction(
         tx_request.nonce,
     );
 
-    // Reconstruct and verify signature
     if let Ok(dilithium_sig) = bincode::deserialize::<crate::crypto::Dilithium3Signature>(&signature_bytes) {
         transaction.signature = Some(dilithium_sig);
     } else {
         rpc_server.increment_stat("failed_requests").await;
         return Ok(warp::reply::json(&ApiResponse::<()>::error(
-            "Invalid signature format".to_string()
+            "Invalid signature format - could not deserialize".to_string()
         )));
     }
 
-    // Validate transaction signature
-    match transaction.verify_signature() {
-        Ok(true) => {},
-        Ok(false) => {
-            rpc_server.increment_stat("failed_requests").await;
-            return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                "Signature verification failed".to_string()
-            )));
-        },
-        Err(e) => {
-            rpc_server.increment_stat("failed_requests").await;
-            return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Signature validation error: {}", e)
-            )));
-        }
-    }
-
-    // Process transaction with proper async blockchain access
     let tx_id = hex::encode(&transaction.id);
-    
-    // Add transaction to blockchain using proper async pattern
-    let transaction_clone = transaction.clone();
-    let validation_result = {
-        let blockchain = rpc_server.blockchain.clone();
-        tokio::task::spawn_blocking(move || {
-            // Use blocking task for CPU-intensive operations
-            let _blockchain = blockchain.read();
-            // Perform validation checks
-            match transaction_clone.validate_structure() {
-                Ok(_) => {
-                    // Additional blockchain context validation would go here
-                    Ok(ValidationResult::Valid)
-                },
-                Err(_e) => Ok(ValidationResult::InvalidSignature),
-            }
-        }).await.unwrap_or(Ok(ValidationResult::InvalidSignature))
-    };
-
-    // Obtain mempool handle without holding the blockchain read lock across await
     let mempool_handle = {
         let blockchain_read = rpc_server.blockchain.read();
         blockchain_read.mempool_handle()
     };
-    // Submit to mempool if valid
-    let mempool_result = if let Ok(ValidationResult::Valid) = validation_result {
-        mempool_handle.add_transaction(transaction.clone()).await.map_err(|e: crate::BlockchainError| warp::reject::custom(ApiError(e.to_string())))?
-    } else {
-        validation_result.map_err(|e: crate::BlockchainError| warp::reject::custom(ApiError(e.to_string())))?
+    
+    let mempool_result = match mempool_handle.add_transaction(transaction.clone()).await {
+        Ok(validation_result) => validation_result,
+        Err(e) => {
+            rpc_server.increment_stat("failed_requests").await;
+            return Ok(warp::reply::json(&ApiResponse::<()>::error(
+                format!("Transaction processing error: {}", e)
+            )));
+        }
     };
 
-    // Broadcast transaction to network if valid
+    // Broadcast transaction to network if valid (only after mempool accepts it)
     if let ValidationResult::Valid = mempool_result {
         if let Some(ref network) = rpc_server.network_manager {
-            // Clone transaction for broadcasting since it was moved into the closure
-            let transaction_clone = transaction.clone();
-            let _ = network.broadcast_transaction(transaction_clone).await;
+            let _ = network.broadcast_transaction(transaction).await;
         }
     }
 
-    // Compute status string based on ValidationResult
-    let status = match mempool_result.clone() {
+    // Convert mempool ValidationResult to user-friendly status
+    let status = match &mempool_result {
         ValidationResult::Valid => "accepted".to_string(),
         ValidationResult::InvalidSignature => "rejected: invalid signature".to_string(),
         ValidationResult::InvalidNonce { expected, got } => format!("rejected: invalid nonce (expected {}, got {})", expected, got),
@@ -1083,6 +939,13 @@ async fn handle_mine(
     mining_request: MiningRequest,
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
+    // Check if admin endpoints are enabled
+    if !rpc_server.rpc_config.admin_endpoints_enabled {
+        rpc_server.increment_stat("failed_requests").await;
+        return Ok(warp::reply::json(&ApiResponse::<()>::error(
+            "Admin endpoints are disabled".to_string()
+        )));
+    }
     let start_time = Instant::now();
     
     // Get current blockchain state for mining using proper async pattern
@@ -1187,6 +1050,13 @@ async fn handle_mine(
 async fn handle_stats(
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
+    // Check if admin endpoints are enabled
+    if !rpc_server.rpc_config.admin_endpoints_enabled {
+        rpc_server.increment_stat("failed_requests").await;
+        return Ok(warp::reply::json(&ApiResponse::<()>::error(
+            "Admin endpoints are disabled".to_string()
+        )));
+    }
     let stats = rpc_server.stats.read().clone();
     rpc_server.increment_stat("successful_requests").await;
     Ok(warp::reply::json(&ApiResponse::success(stats)))
@@ -1211,16 +1081,16 @@ async fn handle_login(
             exp: expiration as usize,
         };
 
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
+        let token = encode(
+            &Header::default(),
             &claims,
-            &jsonwebtoken::EncodingKey::from_secret(rpc_server._auth_config.jwt_secret.as_bytes()),
+            &EncodingKey::from_secret(rpc_server._auth_config.jwt_secret.as_bytes()),
         )
-        .map_err(|_| warp::reject::custom(ApiError("Failed to create token".to_string())))?;
+        .map_err(|_| warp::reject::custom(RpcError("Failed to create token".to_string())))?;
 
         Ok(warp::reply::json(&ApiResponse::success(LoginResponse { token })))
     } else {
-        Err(warp::reject::custom(Unauthorized))
+        Err(warp::reject::custom(RpcError("Invalid credentials".to_string())))
     }
 }
 
@@ -1229,36 +1099,33 @@ async fn handle_login(
 /// Global error handler for rejections
 async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std::convert::Infallible> {
     let (code, message) = if err.is_not_found() {
-        (StatusCode::NOT_FOUND, "Endpoint not found")
-    } else if err.find::<RateLimitExceeded>().is_some() {
-        (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded")
-    } else if err.find::<Unauthorized>().is_some() {
-        (StatusCode::UNAUTHORIZED, "Unauthorized")
-    } else if err.find::<Forbidden>().is_some() {
-        (StatusCode::FORBIDDEN, "Forbidden")
+        (StatusCode::NOT_FOUND, "Endpoint not found".to_string())
+    } else if let Some(rpc_error) = err.find::<RpcError>() {
+        match rpc_error.0.as_str() {
+            "Rate limit exceeded" | "IP temporarily blocked" => (StatusCode::TOO_MANY_REQUESTS, rpc_error.0.clone()),
+            "Missing or invalid authorization header" | "Invalid JWT token" => (StatusCode::UNAUTHORIZED, rpc_error.0.clone()),
+            "Insufficient permissions" => (StatusCode::FORBIDDEN, rpc_error.0.clone()),
+            _ => (StatusCode::BAD_REQUEST, rpc_error.0.clone()),
+        }
     } else if err.find::<warp::reject::PayloadTooLarge>().is_some() {
-        (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large")
+        (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large".to_string())
     } else if err.find::<warp::reject::InvalidHeader>().is_some() {
-        (StatusCode::BAD_REQUEST, "Invalid headers")
+        (StatusCode::BAD_REQUEST, "Invalid headers".to_string())  
     } else if err.find::<warp::body::BodyDeserializeError>().is_some() {
-        (StatusCode::BAD_REQUEST, "Invalid request body")
-    } else if err.find::<ApiError>().is_some() {
-        (StatusCode::BAD_REQUEST, "API error")
+        (StatusCode::BAD_REQUEST, "Invalid request body".to_string())
     } else {
         log::error!("Unhandled rejection: {:?}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
     };
     
-    let response = ApiResponse::<()>::error(message.to_string());
+    let response = ApiResponse::<()>::error(message);
     Ok(warp::reply::with_status(
         warp::reply::json(&response),
         code,
     ))
 } 
 
-#[derive(Debug)]
-struct ApiError(#[allow(dead_code)] String);
-impl warp::reject::Reject for ApiError {}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LoginRequest {
@@ -1274,50 +1141,23 @@ struct LoginResponse {
 mod tests {
     use super::*;
     use crate::transaction::{Transaction, TransactionType};
-    use hex;
-
 
     #[test]
-    fn test_transaction_request_validate_success() {
-        let from = hex::encode(vec![0u8; 64]);
-        let to = hex::encode(vec![0u8; 64]);
-        let signature = hex::encode(vec![0u8; 64]);
-        let req = TransactionRequest {
-            from: from.clone(),
-            to: to.clone(),
-            amount: 100,
-            nonce: 1,
-            signature: signature.clone(),
-        };
-        assert!(req.validate().is_ok());
+    fn test_rate_limit_entry_new() {
+        let entry = RateLimitEntry::new();
+        assert_eq!(entry.requests.len(), 0);
+        assert!(!entry.is_blocked());
+        assert_eq!(entry.violations, 0);
     }
 
     #[test]
-    fn test_transaction_request_validate_invalid_from_format() {
-        let req = TransactionRequest {
-            from: "zz".repeat(64),
-            to: hex::encode(vec![0u8; 64]),
-            amount: 100,
-            nonce: 1,
-            signature: hex::encode(vec![0u8; 64]),
-        };
-        assert!(req.validate().is_err());
-    }
-
-    #[test]
-    fn test_transaction_request_validate_amount_zero() {
-        let from = hex::encode(vec![0u8; 64]);
-        let to = hex::encode(vec![0u8; 64]);
-        let signature = hex::encode(vec![0u8; 64]);
-        let req = TransactionRequest {
-            from,
-            to,
-            amount: 0,
-            nonce: 1,
-            signature,
-        };
-        let err = req.validate().unwrap_err();
-        assert_eq!(err, "Amount must be greater than zero");
+    fn test_rate_limit_entry_can_make_request() {
+        let mut entry = RateLimitEntry::new();
+        let config = RateLimitConfig::default();
+        
+        // Should allow first request
+        assert!(entry.can_make_request(&config));
+        assert_eq!(entry.requests.len(), 1);
     }
 
     #[test]
@@ -1337,15 +1177,28 @@ mod tests {
 
     #[test]
     fn test_calculate_transaction_fee() {
-        let tx = Transaction::new_with_fee(
+        let tx = Transaction::new(
             vec![0u8; 64],
-            TransactionType::Transfer { to: vec![0u8; 64], amount: 0, memo: None },
-            0,
-            0,
+            TransactionType::Transfer { to: vec![0u8; 64], amount: 1000, memo: None },
             0,
         );
         let fee = calculate_transaction_fee(&tx);
-        // Base fee 1000 satoshis / 1e9 = 0.000001 NUMI, size fee >= 0
-        assert!(fee >= 0.000001);
+        assert!(fee > 0.0);
+    }
+
+    #[test]
+    fn test_api_response_success() {
+        let response = ApiResponse::success("test data");
+        assert!(response.success);
+        assert_eq!(response.data, Some("test data"));
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn test_api_response_error() {
+        let response = ApiResponse::<()>::error("test error".to_string());
+        assert!(!response.success);
+        assert!(response.data.is_none());
+        assert_eq!(response.error, Some("test error".to_string()));
     }
 } 

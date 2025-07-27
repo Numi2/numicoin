@@ -753,7 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_sync_flags() {
-        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
         // Initially not syncing
         assert!(!manager.is_syncing().await);
         // Set syncing
@@ -766,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_chain_height() {
-        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
         // Initial height is 0
         assert_eq!(manager.get_chain_height().await, 0);
         // Update chain height
@@ -776,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_handle_sync_and_height() {
-        let mut manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
         let handle = manager.create_handle();
         // Initially not syncing and height 0
         assert!(!handle.is_syncing().await);

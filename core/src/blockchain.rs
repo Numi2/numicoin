@@ -1286,32 +1286,7 @@ impl NumiBlockchain {
         }
     }
     
-    /// Update average block time tracking
-    async fn update_average_block_time(&self, current_height: u64) {
-        let mut block_times = self.block_times.write();
-        
-        // Add current block time
-        block_times.push_back((current_height, Utc::now()));
-        
-        // Keep only recent blocks for calculation
-        let keep_blocks = (self.difficulty_adjustment_interval * 2).max(100);
-        while block_times.len() > keep_blocks as usize {
-            block_times.pop_front();
-        }
-        
-        // Calculate new average
-        if block_times.len() >= 2 {
-            let times_vec: Vec<_> = block_times.iter().collect();
-            let total_time: i64 = times_vec.windows(2)
-                .map(|w| (w[1].1 - w[0].1).num_seconds())
-                .sum();
-            
-            let avg_time = (total_time as u64) / (block_times.len() as u64 - 1);
-            
-            let mut state = self.state.write();
-            state.average_block_time = avg_time;
-        }
-    }
+
     
     /// Find oldest orphan block for eviction
     fn find_oldest_orphan(&self) -> Option<BlockHash> {

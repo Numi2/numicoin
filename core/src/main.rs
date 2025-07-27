@@ -514,6 +514,7 @@ async fn start_full_node(config: Config) -> Result<()> {
             _storage_clone,
             rate_limit_cfg,
             auth_cfg,
+            config.rpc.clone(),
             network_handle_clone,
             miner,
         )?;
@@ -1171,7 +1172,14 @@ async fn start_rpc_server_command(config: Config) -> Result<()> {
     let miner = Miner::new()?;
     
     // Create and start RPC server with components
-    let rpc_server = RpcServer::with_components(blockchain, storage, network_manager, miner)?;
+    let rpc_server = RpcServer::with_config_and_components(
+        blockchain, 
+        storage, 
+        RateLimitConfig::default(),
+        AuthConfig::default(),
+        network_manager, 
+        miner
+    )?;
     rpc_server.start(config.rpc.port).await?;
     
     Ok(())
@@ -1363,38 +1371,4 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-/// Load the most recently created wallet from the test-wallets directory
-fn load_most_recent_wallet() -> Result<Dilithium3Keypair> {
-    let test_wallets_dir = std::path::Path::new("test-wallets");
-    if !test_wallets_dir.exists() {
-        return Err(BlockchainError::StorageError(
-            "test-wallets directory not found".to_string()
-        ));
-    }
-    
-    // Find all wallet files
-    let mut wallet_files = Vec::new();
-    for entry in std::fs::read_dir(test_wallets_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            let metadata = std::fs::metadata(&path)?;
-            wallet_files.push((path, metadata.modified()?));
-        }
-    }
-    
-    if wallet_files.is_empty() {
-        return Err(BlockchainError::StorageError(
-            "No wallet files found in test-wallets directory".to_string()
-        ));
-    }
-    
-    // Sort by modification time (most recent first)
-    wallet_files.sort_by(|a, b| b.1.cmp(&a.1));
-    
-    // Load the most recent wallet
-    let most_recent_wallet_path = &wallet_files[0].0;
-    log::info!("📁 Loading most recent wallet: {}", most_recent_wallet_path.display());
-    
-    Dilithium3Keypair::load_from_file(most_recent_wallet_path)
-}
+

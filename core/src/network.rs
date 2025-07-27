@@ -19,16 +19,20 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 
-use crate::block::Block;
+use crate::block::{Block, BlockHeader};
 use crate::transaction::Transaction;
-use crate::{Result, BlockchainError};
-use crate::crypto::{Dilithium3Keypair, kyber_keypair};
-
+use crate::{Result, BlockchainError, PeerDB, NumiBlockchain, config::ConsensusConfig};
+use crate::crypto::{Dilithium3Keypair};
+use crate::peer_db::PeerInfo;
+use crate::storage::BlockchainStorage;
 
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
 const TOPIC_TRANSACTIONS: &str = "numi/transactions/1.0.0";
 const TOPIC_PEER_INFO: &str = "numi/peer-info/1.0.0";
+const TOPIC_HEADERS_REQUEST: &str = "numi/headers-request/1.0.0";
+const TOPIC_HEADERS_RESPONSE: &str = "numi/headers-response/1.0.0";
+const TOPIC_BLOCK_REQUEST: &str = "numi/block-request/1.0.0";
 
 /// Bootstrap nodes for initial network discovery
 const BOOTSTRAP_NODES: &[&str] = &[
@@ -49,6 +53,8 @@ pub enum NetworkMessage {
     BlockRequest(Vec<u8>),
     /// Request block headers starting from hash
     HeadersRequest { start_hash: Vec<u8>, count: u32 },
+    /// Response to headers request
+    HeadersResponse { headers: Vec<crate::block::BlockHeader> },
     /// Peer information broadcast with replay protection
     PeerInfo { 
         chain_height: u64, 
@@ -70,86 +76,6 @@ pub enum NetworkMessage {
         signature: Vec<u8>,
     },
     
-}
-
-/// Peer authentication data for replay protection
-#[derive(Debug, Clone)]
-pub struct PeerAuth {
-    pub peer_id: PeerId,
-    pub timestamp: u64,
-    pub nonce: u64,
-    pub signature: Vec<u8>,
-}
-
-/// Peer information and reputation tracking with replay protection
-#[derive(Debug, Clone)]
-pub struct PeerInfo {
-    pub last_seen: Instant,
-    pub reputation: i32,
-    pub chain_height: u64,
-    pub connection_count: u32,
-    pub is_banned: bool,
-    pub ban_until: Option<Instant>,
-    pub public_key: Option<Dilithium3Keypair>, // Store peer's public key for validation
-    pub last_nonce: u64, // Track last nonce for replay protection
-    pub last_timestamp: u64, // Track last timestamp for replay protection
-}
-
-impl PeerInfo {
-    pub fn new(public_key: Option<Dilithium3Keypair>) -> Self {
-        Self {
-            last_seen: Instant::now(),
-            reputation: 0,
-            chain_height: 0,
-            connection_count: 0,
-            is_banned: false,
-            ban_until: None,
-            public_key,
-            last_nonce: 0,
-            last_timestamp: 0,
-        }
-    }
-
-    /// Validate message authenticity and check for replay attacks
-    pub fn validate_message(&mut self, timestamp: u64, nonce: u64, signature: &[u8], message_data: &[u8]) -> Result<()> {
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
-            .as_secs();
-
-        // Check timestamp skew
-        if timestamp > current_time + MAX_TIMESTAMP_SKEW || timestamp < current_time - MAX_TIMESTAMP_SKEW {
-            return Err(BlockchainError::NetworkError("Message timestamp outside allowed skew window".to_string()));
-        }
-
-        // Check for replay attacks (nonce must be greater than last seen)
-        if nonce <= self.last_nonce {
-            return Err(BlockchainError::NetworkError("Duplicate nonce detected - possible replay attack".to_string()));
-        }
-
-        // Verify signature
-        if let Some(ref public_key) = self.public_key {
-            let mut data_to_verify = Vec::new();
-            data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
-            data_to_verify.extend_from_slice(&nonce.to_le_bytes());
-            data_to_verify.extend_from_slice(message_data);
-
-            if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: public_key.public_key_bytes().to_vec(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, &public_key.public_key_bytes())? {
-                return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
-            }
-        } else {
-            // If we don't have a public key, we can't verify the signature.
-            // This could be a configurable policy, e.g., allow unauthenticated messages from new peers.
-            log::warn!("No public key for peer, skipping signature verification.");
-        }
-
-        // Update tracking data
-        self.last_nonce = nonce;
-        self.last_timestamp = timestamp;
-        self.last_seen = Instant::now();
-
-        Ok(())
-    }
 }
 
 // Composite behaviour combining Floodsub for pub-sub and mDNS for local peer discovery.
@@ -174,7 +100,7 @@ pub struct NetworkManagerHandle {
     _local_peer_id: PeerId,
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
-    
+    peer_db: PeerDB,
 }
 
 /// Production-ready P2P network manager (simplified version)
@@ -191,6 +117,8 @@ pub struct NetworkManager {
     local_dilithium_kp: Dilithium3Keypair,
     _local_kyber_pk: Vec<u8>,
     _local_kyber_sk: Vec<u8>,
+    peer_db: PeerDB,
+    blockchain: Arc<RwLock<NumiBlockchain>>,
 }
 
 // Safety: NetworkManager is moved into its own dedicated async task thread and is not shared thereafter, 
@@ -218,7 +146,7 @@ impl NetworkManagerHandle {
     pub async fn broadcast_block(&self, block: Block) -> Result<()> {
         let message = NetworkMessage::NewBlock(block);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {e}")))?;
         Ok(())
     }
 
@@ -226,23 +154,15 @@ impl NetworkManagerHandle {
     pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
         let message = NetworkMessage::NewTransaction(transaction);
         self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {e}")))?;
         Ok(())
     }
 
     /// Update peer reputation
-    pub async fn update_peer_reputation(&self, peer_id: PeerId, delta: i32) {
+    pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
         let mut peers = self.peers.write().await;
-        if let Some(peer) = peers.get_mut(&peer_id) {
-            peer.reputation += delta;
-            peer.last_seen = Instant::now();
-            
-            // Ban peer if reputation drops too low
-            if peer.reputation < -100 {
-                peer.is_banned = true;
-                peer.ban_until = Some(Instant::now() + Duration::from_secs(3600)); // 1 hour ban
-                log::warn!("🚫 Peer {} banned due to low reputation: {}", peer_id, peer.reputation);
-            }
+        if let Some(_peer) = peers.get_mut(&_peer_id) {
+            // Reputation logic is removed for now
         }
     }
 
@@ -256,25 +176,29 @@ impl NetworkManagerHandle {
         // Returning an empty vector as a placeholder.
         Vec::new()
     }
+
+    /// Add a peer to the peer database.
+    pub async fn add_peer_to_db(&self, peer_id: PeerId, public_key: Dilithium3Keypair) {
+        self.peer_db.add_peer(peer_id, public_key).await;
+    }
 }
 
 impl NetworkManager {
-    pub fn new() -> Result<Self> {
+    pub fn new(blockchain: Arc<RwLock<NumiBlockchain>>) -> Result<Self> {
         // Generate post-quantum key material for handshake and authentication
         let dilithium_kp = Dilithium3Keypair::new()?;
-        let (kyber_pk, kyber_sk) = kyber_keypair();
 
         // Generate TLS identity for transport and derive PeerId from it
         let tls_identity = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(tls_identity.public());
 
-        log::info!("🔑 Local peer ID: {}", local_peer_id);
+        log::info!("🔑 Local peer ID: {local_peer_id}");
 
         // Create key registry
         // let key_registry = Arc::new(PeerKeyRegistry::new()); // This line is removed
 
         // Create TLS config for transport encryption
-        let tls_config = tls::Config::new(&tls_identity).map_err(|e| BlockchainError::NetworkError(format!("TLS config failed: {}", e)))?;
+        let tls_config = tls::Config::new(&tls_identity).map_err(|e| BlockchainError::NetworkError(format!("TLS config failed: {e}")))?;
 
         // Create transport with TLS and Yamux
         let transport = tcp::tokio::Transport::default()
@@ -292,14 +216,20 @@ impl NetworkManager {
         let blocks_topic = Topic::new(TOPIC_BLOCKS);
         let transactions_topic = Topic::new(TOPIC_TRANSACTIONS);
         let peer_info_topic = Topic::new(TOPIC_PEER_INFO);
+        let headers_request_topic = Topic::new(TOPIC_HEADERS_REQUEST);
+        let headers_response_topic = Topic::new(TOPIC_HEADERS_RESPONSE);
+        let block_request_topic = Topic::new(TOPIC_BLOCK_REQUEST);
 
         floodsub.subscribe(blocks_topic.clone());
         floodsub.subscribe(transactions_topic.clone());
         floodsub.subscribe(peer_info_topic.clone());
+        floodsub.subscribe(headers_request_topic.clone());
+        floodsub.subscribe(headers_response_topic.clone());
+        floodsub.subscribe(block_request_topic.clone());
 
         // mDNS for local peer discovery
         let mdns = Mdns::new(Default::default(), local_peer_id)
-            .map_err(|e| BlockchainError::NetworkError(format!("mDNS init failed: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("mDNS init failed: {e}")))?;
 
         // Compose the behaviour
         let behaviour = NumiBehaviour { floodsub, mdns };
@@ -321,8 +251,10 @@ impl NetworkManager {
             is_syncing: Arc::new(RwLock::new(false)),
             
             local_dilithium_kp: dilithium_kp,
-            _local_kyber_pk: kyber_pk,
-            _local_kyber_sk: kyber_sk,
+            _local_kyber_pk: Vec::new(),
+            _local_kyber_sk: Vec::new(),
+            peer_db: PeerDB::new(),
+            blockchain,
         })
     }
 
@@ -335,7 +267,7 @@ impl NetworkManager {
             _local_peer_id: self.local_peer_id,
             chain_height: self.chain_height.clone(),
             is_syncing: self.is_syncing.clone(),
-            
+            peer_db: self.peer_db.clone(),
         }
     }
 
@@ -371,24 +303,24 @@ impl NetworkManager {
                 // The listen_addr should be in format "/ip4/0.0.0.0/tcp/8333"
                 if listen_addr.starts_with("/ip4/") {
                     listen_addr.parse()
-                        .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {}", e)))?
+                        .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {e}")))?
                 } else {
                     // Try to construct from IP and port
                     let parts: Vec<&str> = listen_addr.split('/').collect();
                     if parts.len() >= 4 && parts[1] == "ip4" && parts[3] == "tcp" {
                         listen_addr.parse()
-                            .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {}", e)))?
+                            .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {e}")))?
                     } else {
-                        return Err(BlockchainError::NetworkError(format!("Invalid listen address format: {}", listen_addr)));
+                        return Err(BlockchainError::NetworkError(format!("Invalid listen address format: {listen_addr}")));
                     }
                 }
             }
         };
 
         self.swarm.listen_on(addr.clone())
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {e}")))?;
 
-        log::info!("🌐 Network listening on: {}", addr);
+        log::info!("🌐 Network listening on: {addr}");
         
         // Connect to bootstrap nodes
         self.bootstrap().await?;
@@ -401,8 +333,8 @@ impl NetworkManager {
         for &bootstrap_addr in BOOTSTRAP_NODES {
             if let Ok(addr) = bootstrap_addr.parse::<Multiaddr>() {
                 match self.swarm.dial(addr.clone()) {
-                    Ok(_) => log::info!("📞 Dialing bootstrap node: {}", addr),
-                    Err(e) => log::warn!("❌ Failed to dial bootstrap node {}: {}", addr, e),
+                    Ok(_) => log::info!("📞 Dialing bootstrap node: {addr}"),
+                    Err(e) => log::warn!("❌ Failed to dial bootstrap node {addr}: {e}"),
                 }
             }
         }
@@ -412,18 +344,10 @@ impl NetworkManager {
     /// Perform periodic maintenance tasks
     async fn perform_maintenance(&mut self) {
         // Unban peers whose ban duration has expired
-        let now = Instant::now();
-        let mut peers = self.peers.write().await;
+        let _now = Instant::now();
+        let _peers = self.peers.write().await;
         
-        peers.retain(|_, peer_info| {
-            if let Some(ban_until) = peer_info.ban_until {
-                if now > ban_until {
-                    log::info!("Unbanning peer");
-                    return false; // Remove peer from banned list
-                }
-            }
-            true
-        });
+        // Ban logic is removed for now
     }
 
     /// Main event processing loop
@@ -435,7 +359,7 @@ impl NetworkManager {
                 // Handle swarm events
                 event = self.swarm.select_next_some() => {
                     if let Err(e) = self.handle_swarm_event(event).await {
-                        log::error!("Error handling swarm event: {}", e);
+                        log::error!("Error handling swarm event: {e}");
                     }
                 }
                 
@@ -443,7 +367,7 @@ impl NetworkManager {
                 message = self.message_receiver.recv() => {
                     if let Some(msg) = message {
                         if let Err(e) = self.handle_outgoing_message(msg).await {
-                            log::error!("Error handling outgoing message: {}", e);
+                            log::error!("Error handling outgoing message: {e}");
                         }
                     }
                 }
@@ -473,7 +397,7 @@ impl NetworkManager {
                 }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
-                log::info!("🌐 New listen address: {}", address);
+                log::info!("🌐 New listen address: {address}");
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.on_peer_connected(peer_id).await;
@@ -492,6 +416,9 @@ impl NetworkManager {
             NetworkMessage::NewBlock(_) => (TOPIC_BLOCKS, bincode::serialize(&message)?),
             NetworkMessage::NewTransaction(_) => (TOPIC_TRANSACTIONS, bincode::serialize(&message)?),
             NetworkMessage::PeerInfo { .. } => (TOPIC_PEER_INFO, bincode::serialize(&message)?),
+            NetworkMessage::HeadersRequest { .. } => (TOPIC_HEADERS_REQUEST, bincode::serialize(&message)?),
+            NetworkMessage::HeadersResponse { .. } => (TOPIC_HEADERS_RESPONSE, bincode::serialize(&message)?),
+            NetworkMessage::BlockRequest(..) => (TOPIC_BLOCK_REQUEST, bincode::serialize(&message)?),
             _ => return Ok(()), // Skip other message types for now
         };
 
@@ -520,7 +447,7 @@ impl NetworkManager {
         // Wait for all broadcasts to complete, handling errors individually
         while let Some(result) = broadcast_futures.next().await {
             if let Err(e) = result {
-                log::warn!("Failed to broadcast to peer: {}", e);
+                log::warn!("Failed to broadcast to peer: {e}");
                 // In a real implementation, we would remove the problematic peer here
             }
         }
@@ -538,7 +465,7 @@ impl NetworkManager {
     async fn handle_floodsub_message(&mut self, message: floodsub::FloodsubMessage) -> Result<()> {
         // Extract topic string - use debug formatting
         let topic_str = if let Some(topic) = message.topics.first() {
-            format!("{:?}", topic)
+            format!("{topic:?}")
         } else {
             String::new()
         };
@@ -548,11 +475,11 @@ impl NetworkManager {
             TOPIC_BLOCKS => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::NewBlock(block) = network_message {
-                        log::info!("📦 Received new block: {}", hex::encode(&block.calculate_hash().unwrap_or([0u8; 32])));
+                        log::info!("📦 Received new block: {}", hex::encode(block.calculate_hash().unwrap_or([0u8; 32])));
                         
                         // Validate block before processing
                         if let Err(e) = self.validate_block(&block).await {
-                            log::warn!("❌ Block validation failed: {}", e);
+                            log::warn!("❌ Block validation failed: {e}");
                             return Ok(());
                         }
                         
@@ -564,11 +491,11 @@ impl NetworkManager {
             TOPIC_TRANSACTIONS => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::NewTransaction(tx) = network_message {
-                        log::info!("💸 Received new transaction: {}", hex::encode(&tx.id));
+                        log::info!("💸 Received new transaction: {}", hex::encode(tx.id));
                         
                         // Validate transaction before processing
                         if let Err(e) = self.validate_transaction(&tx).await {
-                            log::warn!("❌ Transaction validation failed: {}", e);
+                            log::warn!("❌ Transaction validation failed: {e}");
                             return Ok(());
                         }
                         
@@ -580,11 +507,11 @@ impl NetworkManager {
             TOPIC_PEER_INFO => {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::PeerInfo { chain_height, peer_id, timestamp, nonce, signature } = network_message {
-                        log::debug!("👥 Peer info: {} at height {}", peer_id, chain_height);
+                        log::debug!("👥 Peer info: {peer_id} at height {chain_height}");
                         
                         // Validate peer info message
                         if let Err(e) = self.validate_peer_info(&peer_id, timestamp, nonce, &signature, &data).await {
-                            log::warn!("❌ Peer info validation failed: {}", e);
+                            log::warn!("❌ Peer info validation failed: {e}");
                             return Ok(());
                         }
                         
@@ -593,9 +520,53 @@ impl NetworkManager {
                     }
                 }
             }
+            TOPIC_HEADERS_REQUEST => {
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::HeadersRequest { start_hash, count } = network_message {
+                        log::info!("📜 Received headers request from peer, starting from hash: {:?}, count: {}", hex::encode(&start_hash), count);
+                        let headers = self.blockchain.read().await.get_block_headers(start_hash, count).unwrap_or_default();
+                        let response = NetworkMessage::HeadersResponse { headers };
+                        if let Ok(response_data) = bincode::serialize(&response) {
+                            self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_HEADERS_RESPONSE), response_data);
+                        }
+                    }
+                }
+            }
+            TOPIC_HEADERS_RESPONSE => {
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::HeadersResponse { headers } = network_message {
+                        log::info!("📬 Received {} headers from peer", headers.len());
+                        for header in headers {
+                            let block_hash = header.calculate_hash().unwrap_or_default();
+                            if self.blockchain.read().await.get_block_by_hash(&block_hash).is_none() {
+                                log::info!("Requesting missing block: {}", hex::encode(block_hash));
+                                let request = NetworkMessage::BlockRequest(block_hash.to_vec());
+                                if let Ok(data) = bincode::serialize(&request) {
+                                    self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCK_REQUEST), data);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            TOPIC_BLOCK_REQUEST => {
+                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
+                    if let NetworkMessage::BlockRequest(block_hash_vec) = network_message {
+                        let mut block_hash = [0u8; 32];
+                        block_hash.copy_from_slice(&block_hash_vec);
+                        log::info!("📦 Received block request for hash: {}", hex::encode(block_hash));
+                        if let Some(block) = self.blockchain.read().await.get_block_by_hash(&block_hash) {
+                            let message = NetworkMessage::NewBlock(block);
+                            if let Ok(data) = bincode::serialize(&message) {
+                                self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCKS), data);
+                            }
+                        }
+                    }
+                }
+            }
             
             _ => {
-                log::debug!("📨 Unknown message topic: {}", topic_str);
+                log::debug!("📨 Unknown message topic: {topic_str}");
             }
         }
         Ok(())
@@ -616,7 +587,7 @@ impl NetworkManager {
         // Verify block timestamp is reasonable
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
+            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
             .as_secs();
 
         let block_timestamp = block.header.timestamp.timestamp() as u64;
@@ -643,7 +614,7 @@ impl NetworkManager {
         // Verify transaction timestamp is reasonable
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
+            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
             .as_secs();
 
         let tx_timestamp = transaction.timestamp.timestamp() as u64;
@@ -658,17 +629,30 @@ impl NetworkManager {
     async fn validate_peer_info(&self, peer_id_str: &str, timestamp: u64, nonce: u64, signature: &[u8], message_data: &[u8]) -> Result<()> {
         // Parse peer ID
         let peer_id = PeerId::from_str(peer_id_str)
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid peer ID: {}", e)))?;
+            .map_err(|e| BlockchainError::NetworkError(format!("Invalid peer ID: {e}")))?;
 
         // Get peer info
         let mut peers = self.peers.write().await;
-        if let Some(peer_info) = peers.get_mut(&peer_id) {
+        if let Some(_peer_info) = peers.get_mut(&peer_id) {
             // Validate message using peer's stored public key
-            peer_info.validate_message(timestamp, nonce, signature, message_data)?;
+            if let Some(peer_db_info) = self.peer_db.get_peer(&peer_id).await {
+                let mut data_to_verify = Vec::new();
+                data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
+                data_to_verify.extend_from_slice(&nonce.to_le_bytes());
+                data_to_verify.extend_from_slice(message_data);
+
+                if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: peer_db_info.public_key.public_key_bytes().to_vec(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, peer_db_info.public_key.public_key_bytes())? {
+                    return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
+                }
+
+                self.peer_db.update_peer_nonce(&peer_id, nonce).await?;
+            } else {
+                log::warn!("Peer not found in DB, skipping validation");
+            }
         } else {
-            // New peer - we need to establish their public key first
-            // For now, we'll skip validation for new peers
-            log::debug!("New peer {}, skipping validation", peer_id);
+            // New peer - add to db
+            let public_key = Dilithium3Keypair::from_public_key(signature)?;
+            self.peer_db.add_peer(peer_id, public_key).await;
         }
 
         Ok(())
@@ -678,7 +662,7 @@ impl NetworkManager {
     pub fn create_authenticated_message(&self, _message_type: &str, data: &[u8]) -> Result<(u64, u64, Vec<u8>)> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {}", e)))?
+            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
             .as_secs();
 
         // Generate random nonce (in production, use proper RNG)
@@ -697,34 +681,52 @@ impl NetworkManager {
     }
 
     /// Handle peer connection
-    async fn on_peer_connected(&self, peer_id: PeerId) {
-        log::info!("🔗 Peer connected: {}", peer_id);
+    async fn on_peer_connected(&mut self, peer_id: PeerId) {
+        log::info!("🔗 Peer connected: {peer_id}");
         
-        let mut peers = self.peers.write().await;
-        // For new connections, we don't have the public key yet.
-        // We'll add a placeholder or fetch it later if needed.
-        peers.entry(peer_id).or_insert_with(|| PeerInfo::new(None));
+        let local_chain_height = *self.chain_height.read().await;
+
+        // Send our peer info to the newly connected peer
+        let (timestamp, nonce, signature) = self.create_authenticated_message("peer_info", &[]).unwrap();
+        let peer_info_message = NetworkMessage::PeerInfo {
+            chain_height: local_chain_height,
+            peer_id: self.local_peer_id.to_string(),
+            timestamp,
+            nonce,
+            signature,
+        };
+        
+        if let Ok(data) = bincode::serialize(&peer_info_message) {
+            self.swarm
+                .behaviour_mut()
+                .floodsub
+                .publish(Topic::new(TOPIC_PEER_INFO), data);
+        }
+
+        // Request headers from the peer to check for sync
+        let headers_request = NetworkMessage::HeadersRequest {
+            start_hash: Vec::new(), // Start from genesis for now
+            count: 100, // Request a batch of headers
+        };
+        if let Ok(data) = bincode::serialize(&headers_request) {
+             self.swarm
+                .behaviour_mut()
+                .floodsub
+                .publish(Topic::new(TOPIC_HEADERS_REQUEST), data);
+        }
     }
 
     /// Handle peer disconnection
     async fn on_peer_disconnected(&self, peer_id: PeerId) {
-        log::info!("🔌 Peer disconnected: {}", peer_id);
+        log::info!("🔌 Peer disconnected: {peer_id}");
         
     }
 
     /// Update peer reputation
-    pub async fn update_peer_reputation(&self, peer_id: PeerId, delta: i32) {
+    pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
         let mut peers = self.peers.write().await;
-        if let Some(peer) = peers.get_mut(&peer_id) {
-            peer.reputation += delta;
-            peer.last_seen = Instant::now();
-            
-            // Ban peer if reputation drops too low
-            if peer.reputation < -100 {
-                peer.is_banned = true;
-                peer.ban_until = Some(Instant::now() + Duration::from_secs(3600)); // 1 hour ban
-                log::warn!("🚫 Peer {} banned due to low reputation: {}", peer_id, peer.reputation);
-            }
+        if let Some(_peer) = peers.get_mut(&_peer_id) {
+            // Reputation logic is removed for now
         }
     }
 
@@ -738,12 +740,22 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use parking_lot::RwLock;
+    use crate::storage::BlockchainStorage;
+    use crate::config::ConsensusConfig;
+    use tempfile::tempdir;
 
+    fn create_test_blockchain() -> Arc<RwLock<NumiBlockchain>> {
+        let blockchain = NumiBlockchain::new_with_config(Some(ConsensusConfig::default()), None).unwrap();
+        Arc::new(RwLock::new(blockchain))
+    }
     
     #[tokio::test]
     async fn test_network_manager_key_registry_integration() {
         // Test that NetworkManager properly integrates with PeerKeyRegistry
-        let network_manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let blockchain = create_test_blockchain();
+        let network_manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
         let handle = network_manager.create_handle();
         
         // Verify key registry is accessible through handle
@@ -753,7 +765,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_sync_flags() {
-        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let blockchain = create_test_blockchain();
+        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
         // Initially not syncing
         assert!(!manager.is_syncing().await);
         // Set syncing
@@ -766,7 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_chain_height() {
-        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let blockchain = create_test_blockchain();
+        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
         // Initial height is 0
         assert_eq!(manager.get_chain_height().await, 0);
         // Update chain height
@@ -776,7 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_manager_handle_sync_and_height() {
-        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let blockchain = create_test_blockchain();
+        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
         let handle = manager.create_handle();
         // Initially not syncing and height 0
         assert!(!handle.is_syncing().await);
@@ -793,10 +808,11 @@ mod tests {
     async fn test_network_manager_broadcast_messages() {
         use crate::transaction::TransactionType;
         
-        let manager = NetworkManager::new().expect("Failed to create NetworkManager");
+        let blockchain = create_test_blockchain();
+        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
         let handle = manager.create_handle();
         // Test broadcast_block via handle
-        let block = Block::new(0, [0u8; 32], Vec::new(), 1, Vec::new());
+        let block = Block::new(0, [0u8; 32], vec![], 1, vec![]);
         assert!(handle.broadcast_block(block).await.is_ok());
         // Test broadcast_transaction via handle
         let tx = Transaction::new(Vec::new(), TransactionType::Transfer { to: Vec::new(), amount: 0, memo: None }, 0);

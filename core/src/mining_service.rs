@@ -4,6 +4,7 @@ use crate::{
     crypto::Dilithium3Keypair,
     config::MiningConfig,
     network::NetworkManagerHandle,
+    error::MiningServiceError,
 };
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -16,6 +17,7 @@ pub struct MiningService {
     config: MiningConfig,
     data_directory: PathBuf,
     target_block_time: Duration,
+    wallet_path: PathBuf,
 }
 
 impl MiningService {
@@ -25,6 +27,7 @@ impl MiningService {
         config: MiningConfig,
         data_directory: PathBuf,
         target_block_time: Duration,
+        wallet_path: PathBuf,
     ) -> Self {
         Self {
             blockchain,
@@ -32,6 +35,7 @@ impl MiningService {
             config,
             data_directory,
             target_block_time,
+            wallet_path,
         }
     }
 
@@ -74,29 +78,29 @@ impl MiningService {
         let difficulty_clone = difficulty;
         let pending_txs_clone = pending_txs.clone();
         let data_directory_clone = self.data_directory.clone();
+        let wallet_path_clone = self.wallet_path.clone();
         
         // Perform mining in a blocking task
         let mining_result = tokio::task::spawn_blocking(move || {
             // Load the miner wallet for mining rewards using configured path
-            let wallet_path = if mining_cfg_clone.wallet_path.is_absolute() {
-                mining_cfg_clone.wallet_path.clone()
+            let wallet_path = if wallet_path_clone.is_absolute() {
+                wallet_path_clone
             } else {
                 // If relative path, resolve it relative to data directory
-                data_directory_clone.join(&mining_cfg_clone.wallet_path)
+                data_directory_clone.join(&wallet_path_clone)
             };
             
-            let miner_keypair = match Dilithium3Keypair::load_from_file(&wallet_path) {
-                Ok(keypair) => {
-                    log::info!("💰 Using miner wallet from {:?}", wallet_path);
-                    keypair
-                }
-                Err(e) => {
-                    log::warn!("⚠️ Failed to load miner wallet from {:?}: {}. Using default miner keypair.", wallet_path, e);
-                    Dilithium3Keypair::new().unwrap()
-                }
-            };
+            let miner_keypair = Dilithium3Keypair::load_from_file(&wallet_path)
+                .map_err(|e| {
+                    log::error!("⛔ Failed to load miner wallet from {wallet_path:?}: {e}. Please ensure a wallet is configured for mining.");
+                    MiningServiceError::WalletNotFound(e.to_string())
+                })?;
+
+            log::info!("💰 Using miner wallet from {wallet_path:?}");
             
-            let mut miner = Miner::with_config_and_keypair(mining_cfg_clone.into(), miner_keypair).unwrap();
+            let mut miner = Miner::with_config_and_keypair(mining_cfg_clone.into(), miner_keypair)
+                .map_err(|e| MiningServiceError::MinerInitialization(e.to_string()))?;
+
             miner.mine_block(
                 height_clone + 1,
                 previous_hash_clone,
@@ -104,6 +108,7 @@ impl MiningService {
                 difficulty_clone,
                 0,
             )
+            .map_err(|e| MiningServiceError::MiningError(e.to_string()))
         }).await;
         
         // Process mining result
@@ -115,10 +120,10 @@ impl MiningService {
                 log::info!("⏰ Mining timeout - no block found in this cycle");
             }
             Ok(Err(e)) => {
-                log::error!("❌ Mining error: {}", e);
+                log::error!("❌ Mining error: {e}");
             }
             Err(e) => {
-                log::error!("❌ Mining task panicked: {:?}", e);
+                log::error!("❌ Mining task panicked: {e:?}");
             }
         }
     }
@@ -150,7 +155,7 @@ impl MiningService {
                 
                 // Verify the blockchain state was updated correctly
                 let new_height = self.blockchain.read().get_current_height();
-                log::info!("📊 Blockchain height updated: {} -> {}", height, new_height);
+                log::info!("📊 Blockchain height updated: {height} -> {new_height}");
                 
                 if new_height <= height {
                     log::warn!("⚠️ Blockchain height did not increase after adding block! This might indicate a state issue.");

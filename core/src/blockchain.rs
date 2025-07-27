@@ -13,6 +13,8 @@ use crate::crypto::{Dilithium3Keypair, generate_difficulty_target, verify_pow, b
 use crate::mempool::{TransactionMempool, ValidationResult};
 use crate::error::BlockchainError;
 use crate::{Result};
+use ripemd::{Ripemd160, Digest};
+use bs58;
 
 use num_traits::{Zero, ToPrimitive};
 
@@ -201,6 +203,8 @@ pub struct OrphanBlock {
     pub processing_attempts: u8,
     pub peer_id: Option<String>,
     pub size_bytes: usize,
+    pub processing_time_total: u64,
+    pub rate_limit_violations: u64,
 }
 
 /// DoS protection metrics per peer
@@ -213,6 +217,8 @@ pub struct PeerMetrics {
     pub processing_time_total: u64,
     pub rate_limit_violations: u64,
 }
+
+type BlockTimeInfo = VecDeque<(u64, DateTime<Utc>)>;
 
 /// Production-ready blockchain with enhanced security and performance
 pub struct NumiBlockchain {
@@ -241,7 +247,7 @@ pub struct NumiBlockchain {
     mempool: Arc<TransactionMempool>,
     
     /// Block arrival times for difficulty adjustment
-    block_times: Arc<RwLock<VecDeque<(u64, DateTime<Utc>)>>>,
+    block_times: Arc<RwLock<BlockTimeInfo>>,
     
     /// DoS protection metrics by peer
     peer_metrics: Arc<DashMap<String, PeerMetrics>>,
@@ -282,11 +288,11 @@ impl NumiBlockchain {
             let default_wallet_path = "miner-wallet.json";
             match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
                 Ok(kp) => {
-                    log::info!("🔑 Loaded existing miner wallet from {}", default_wallet_path);
+                    log::info!("🔑 Loaded existing miner wallet from {default_wallet_path}");
                     kp
                 }
                 Err(_) => {
-                    log::info!("🔑 Creating new miner keypair (no existing wallet found at {})", default_wallet_path);
+                    log::info!("🔑 Creating new miner keypair (no existing wallet found at {default_wallet_path})");
                     crate::crypto::Dilithium3Keypair::new()?
                 }
             }
@@ -352,11 +358,11 @@ impl NumiBlockchain {
         let default_wallet_path = "miner-wallet.json";
         let miner_keypair = match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
             Ok(kp) => {
-                log::info!("🔑 Loaded existing miner wallet from {}", default_wallet_path);
+                log::info!("🔑 Loaded existing miner wallet from {default_wallet_path}");
                 kp
             }
             Err(_) => {
-                log::info!("🔑 Creating new miner keypair (no existing wallet found at {})", default_wallet_path);
+                log::info!("🔑 Creating new miner keypair (no existing wallet found at {default_wallet_path})");
                 crate::crypto::Dilithium3Keypair::new()?
             }
         };
@@ -394,7 +400,7 @@ impl NumiBlockchain {
         for block in stored_blocks {
             blocks_by_height
                 .entry(block.header.height)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(block);
         }
         
@@ -495,7 +501,7 @@ impl NumiBlockchain {
                     metrics.invalid_blocks += 1;
                 });
             }
-            log::warn!("❌ Block {} failed validation: {}", hex::encode(&block_hash), e);
+            log::warn!("❌ Block {} failed validation: {}", hex::encode(block_hash), e);
             return Err(e);
         }
         
@@ -508,11 +514,11 @@ impl NumiBlockchain {
         
         // Wrap block processing (including any I/O) in a timeout to bound total time
         let processing_future = async {
-            log::info!("🔄 Starting block processing for block {}", hex::encode(&block_hash));
+            log::info!("🔄 Starting block processing for block {}", hex::encode(block_hash));
             
             // Process the block and its transactions
             let was_reorganization = self.connect_block_enhanced(block, peer_id.clone()).await?;
-            log::info!("✅ Block processing completed, was_reorganization={}", was_reorganization);
+            log::info!("✅ Block processing completed, was_reorganization={was_reorganization}");
 
             // Update CPU processing time metric
             let cpu_time = processing_start.elapsed().as_millis() as u64;
@@ -521,7 +527,7 @@ impl NumiBlockchain {
                     metrics.processing_time_total += cpu_time;
                 });
             }
-            log::info!("⏱️ CPU processing time: {}ms", cpu_time);
+            log::info!("⏱️ CPU processing time: {cpu_time}ms");
 
             // Process any orphan blocks that might now be valid
             log::info!("🔍 Processing orphan blocks...");
@@ -556,14 +562,14 @@ impl NumiBlockchain {
         
         // Basic block validation
         if let Err(e) = self.validate_block_basic(&block).await {
-            log::warn!("❌ Block {} failed basic validation: {}", hex::encode(&block_hash), e);
+            log::warn!("❌ Block {} failed basic validation: {}", hex::encode(block_hash), e);
             return Err(e);
         }
         
         // Verify proof of work (skip for genesis and loading from storage)
         if validate_pow && !block.is_genesis() {
             if let Err(e) = self.verify_proof_of_work(&block) {
-                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(&block_hash), e);
+                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(block_hash), e);
                 return Err(e);
             }
         }
@@ -634,8 +640,8 @@ impl NumiBlockchain {
             log::info!("🔄 New best chain found, performing reorganization");
             return self.reorganize_to_block(block_hash).await;
         } else {
-            log::debug!("📦 Block {} added to side chain", hex::encode(&block_hash));
-            return Ok(false);
+            log::debug!("📦 Block {} added to side chain", hex::encode(block_hash));
+            Ok(false)
         }
     }
     
@@ -775,7 +781,7 @@ impl NumiBlockchain {
             if let Err(e) = self.validate_transaction_in_context(transaction).await {
                 return Err(BlockchainError::InvalidTransaction(
                     format!("Transaction {} invalid in block context: {}", 
-                           hex::encode(&transaction.get_hash_hex()), e)));
+                           hex::encode(transaction.get_hash_hex()), e)));
             }
         }
         
@@ -816,7 +822,7 @@ impl NumiBlockchain {
         main_chain[block.header.height as usize] = block_hash;
         
         log::debug!("📝 Updated main chain: block {} at height {}", 
-                   hex::encode(&block_hash), block.header.height);
+                   hex::encode(block_hash), block.header.height);
         
         Ok(())
     }
@@ -835,7 +841,7 @@ impl NumiBlockchain {
         }
         
         // Add to orphan pool
-        let previous_hash = hex::encode(&block.header.previous_hash);
+        let previous_hash = hex::encode(block.header.previous_hash);
         let size_bytes = block.serialize_header_for_hashing()?.len();
         let orphan = OrphanBlock {
             block,
@@ -843,11 +849,13 @@ impl NumiBlockchain {
             processing_attempts: 0,
             peer_id: None,
             size_bytes,
+            processing_time_total: 0,
+            rate_limit_violations: 0,
         };
         
         self.orphan_pool.insert(block_hash, orphan);
         log::info!("👻 Block {} added to orphan pool (parent: {})",
-                  hex::encode(&block_hash),
+                  hex::encode(block_hash),
                   previous_hash);
         
         Ok(false)
@@ -874,15 +882,23 @@ impl NumiBlockchain {
                     // Check if parent now exists
                     if self.blocks.contains_key(&parent_hash) || orphan.block.is_genesis() {
                         log::info!("🎯 Processing orphan block {} (parent now available)",
-                                  hex::encode(&orphan_hash));
+                                  hex::encode(orphan_hash));
+                        
+                        // Remove from peer tracking
+                        if let Some(ref peer_id) = orphan.peer_id {
+                            if let Some(mut peer_orphans) = self.orphan_by_peer.get_mut(peer_id) {
+                                peer_orphans.retain(|&h| h != orphan_hash);
+                            }
+                        }
                         
                         let block = orphan.block.clone();
-                        match self.process_block_internal(block, true).await {
+                        let peer_id = orphan.peer_id.clone();
+                        match self.add_block_from_peer(block, peer_id.clone()).await {
                             Ok(_) => {
                                 processed_any = true;
                             }
                             Err(e) => {
-                                log::warn!("❌ Orphan block processing failed: {}", e);
+                                log::warn!("❌ Orphan block processing failed: {e}");
                                 // Increment processing attempts
                                 orphan.processing_attempts += 1;
                                 if orphan.processing_attempts < 3 {
@@ -900,7 +916,7 @@ impl NumiBlockchain {
         }
         
         if iteration_count >= MAX_ITERATIONS {
-            log::warn!("⚠️ Orphan processing stopped after {} iterations to prevent DoS", MAX_ITERATIONS);
+            log::warn!("⚠️ Orphan processing stopped after {MAX_ITERATIONS} iterations to prevent DoS");
         }
         
         Ok(())
@@ -912,18 +928,22 @@ impl NumiBlockchain {
                   hex::encode(&self.miner_keypair.public_key), 
                   self.miner_keypair.public_key.len());
         
-        let genesis_transactions = vec![
-            // Genesis block mining reward (same as other blocks)
-            Transaction::new(
-                self.miner_keypair.public_key.clone(),
-                TransactionType::MiningReward {
-                    block_height: 0,
-                    amount: 1000, // 10 NUMI = 1000 NANO
-                    pool_address: None,
-                },
-                0,
-            )
-        ];
+        let mut genesis_transaction = Transaction::new_with_fee(
+            self.miner_keypair.public_key.clone(),
+            TransactionType::MiningReward {
+                block_height: 0,
+                amount: 1000, // 10 NUMI = 1000 NANO
+                pool_address: None,
+            },
+            0,
+            0, // Zero fee for mining rewards
+            0, // Zero gas limit
+        );
+        
+        // Sign the genesis transaction
+        genesis_transaction.sign(&self.miner_keypair)?;
+        
+        let genesis_transactions = vec![genesis_transaction];
         
         let mut genesis_block = Block::new(
             0,
@@ -947,7 +967,7 @@ impl NumiBlockchain {
             Ok::<(), BlockchainError>(())
         })?;
 
-        log::info!("🌱 Genesis block created: {}", hex::encode(&self.genesis_hash));
+        log::info!("🌱 Genesis block created: {}", hex::encode(self.genesis_hash));
         Ok(())
     }
 
@@ -971,7 +991,12 @@ impl NumiBlockchain {
             // Validate in current blockchain context (balance, nonce, etc.)
             if let Err(e) = self.validate_transaction_in_context(transaction).await {
                 return Err(BlockchainError::InvalidBlock(
-                    format!("Transaction {} invalid: {}", i, e)));
+                    format!("Transaction {i} invalid: {e}")));
+            }
+            // Verify transaction signature
+            if !transaction.verify_signature()? {
+                return Err(BlockchainError::InvalidBlock(
+                    format!("Transaction {i} has invalid signature")));
             }
         }
         
@@ -1014,8 +1039,9 @@ impl NumiBlockchain {
     
     /// Validate transaction in current blockchain context
     async fn validate_transaction_in_context(&self, transaction: &Transaction) -> Result<()> {
-        // Get current account state
-        let account_state = self.accounts.get(&transaction.from)
+        // Get current account state (using derived address)
+        let address = self.derive_address(&transaction.from);
+        let account_state = self.accounts.get(&address)
             .map(|state| state.clone())
             .unwrap_or_else(|| AccountState {
                 balance: 0,
@@ -1058,15 +1084,15 @@ impl NumiBlockchain {
     async fn apply_transaction(&self, transaction: &Transaction) -> Result<()> {
         let sender_key = transaction.from.clone();
         
-        // Derive address from public key (first 64 bytes of hash)
+        // Derive address from public key
         let address = self.derive_address(&sender_key);
         
         log::debug!("🔍 Applying transaction with sender key: {} (length: {}) -> address: {}", 
                    hex::encode(&sender_key[..sender_key.len().min(32)]), sender_key.len(), 
-                   hex::encode(&address));
+                   address);
         
         // Get or create sender account using address
-        let mut sender_state = self.accounts.get(&address)
+        let mut sender_state = self.accounts.get(address.as_bytes())
             .map(|state| state.clone())
             .unwrap_or_default();
         
@@ -1082,22 +1108,14 @@ impl NumiBlockchain {
                 let recipient_address = self.derive_address(to);
                 
                 // Add to recipient
-                let mut recipient_state = self.accounts.get(&recipient_address)
+                let mut recipient_state = self.accounts.get(recipient_address.as_bytes())
                     .map(|state| state.clone())
-                    .unwrap_or_else(|| AccountState {
-                        balance: 0,
-                        nonce: 0,
-                        transaction_count: 0,
-                        total_received: 0,
-                        total_sent: 0,
-                        created_at: Utc::now(),
-                        last_activity: Utc::now(),
-                    });
+                    .unwrap_or_default();
                 
                 recipient_state.balance += amount;
                 recipient_state.total_received += amount;
                 
-                self.accounts.insert(recipient_address, recipient_state);
+                self.accounts.insert(recipient_address.as_bytes().to_vec(), recipient_state);
             }
             
             TransactionType::MiningReward { amount, .. } => {
@@ -1120,7 +1138,7 @@ impl NumiBlockchain {
             }
         }
         
-        self.accounts.insert(address, sender_state);
+        self.accounts.insert(address.as_bytes().to_vec(), sender_state);
         log::info!("✅ Transaction applied successfully");
         Ok(())
     }
@@ -1179,7 +1197,7 @@ impl NumiBlockchain {
             let new_height = best_block_meta.height;
             
             log::info!("🔄 Updating chain state: height {} -> {}, best_hash: {}", 
-                      old_height, new_height, hex::encode(&new_best_hash));
+                      old_height, new_height, hex::encode(new_best_hash));
             
             state.best_block_hash = new_best_hash;
             state.total_blocks = best_block_meta.height + 1;
@@ -1192,7 +1210,7 @@ impl NumiBlockchain {
             log::info!("🔄 update_chain_state_after_reorg returning Ok(())...");
             Ok(())
         } else {
-            log::error!("❌ Failed to find block metadata for best hash: {}", hex::encode(&new_best_hash));
+            log::error!("❌ Failed to find block metadata for best hash: {}", hex::encode(new_best_hash));
             Err(BlockchainError::BlockNotFound("Block metadata not found".to_string()))
         }
     }
@@ -1228,8 +1246,8 @@ impl NumiBlockchain {
         if target_value.is_zero() {
             return u128::MAX; // Easiest possible work
         }
-        let work = (&max / (&target_value + &one)).to_u128().unwrap_or(u128::MAX);
-        work
+        
+        (&max / (&target_value + &one)).to_u128().unwrap_or(u128::MAX)
     }
     
     /// Calculate next difficulty adjustment
@@ -1317,7 +1335,7 @@ impl NumiBlockchain {
                     return false;
                 }
             } else {
-                log::error!("❌ Block {} not found in block index", block_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+                log::error!("❌ Block {} not found in block index", block_hash.iter().map(|b| format!("{b:02x}")).collect::<String>());
                 return false;
             }
         }
@@ -1366,7 +1384,7 @@ impl NumiBlockchain {
     pub fn get_current_height(&self) -> u64 {
         let total_blocks = self.state.read().total_blocks;
         let height = total_blocks.saturating_sub(1);
-        log::debug!("📏 get_current_height: total_blocks={}, height={}", total_blocks, height);
+        log::debug!("📏 get_current_height: total_blocks={total_blocks}, height={height}");
         height
     }
     
@@ -1410,32 +1428,52 @@ impl NumiBlockchain {
     }
     
     /// Derive address from public key (32 bytes of hash)
-    fn derive_address(&self, public_key: &[u8]) -> Vec<u8> {
-        use blake3::Hasher;
-        let mut hasher = Hasher::new();
-        hasher.update(public_key);
-        let hash = hasher.finalize();
-        hash.as_bytes().to_vec()
+    fn derive_address(&self, public_key: &[u8]) -> String {
+        let h1 = blake3_hash(public_key);
+        let mut h2 = Ripemd160::new();
+        h2.update(h1);
+        let h3 = h2.finalize();
+
+        let mut address_bytes = vec![0u8; 21];
+        address_bytes[0] = 0x00; // Version byte
+        address_bytes[1..].copy_from_slice(&h3);
+
+        let checksum = &blake3_hash(&blake3_hash(&address_bytes))[..4];
+        
+        let mut full_address = vec![0u8; 25];
+        full_address[..21].copy_from_slice(&address_bytes);
+        full_address[21..].copy_from_slice(checksum);
+
+        bs58::encode(full_address).into_string()
+    }
+
+    /// Validate a NumiCoin address
+    pub fn is_valid_address(address: &str) -> bool {
+        if let Ok(decoded) = bs58::decode(address).into_vec() {
+            if decoded.len() != 25 {
+                return false;
+            }
+            let checksum = &decoded[21..];
+            let data = &decoded[..21];
+            let hash = &blake3_hash(&blake3_hash(data))[..4];
+            checksum == hash
+        } else {
+            false
+        }
     }
     
     /// Get account balance
-    pub fn get_balance(&self, public_key: &[u8]) -> u64 {
-        // Determine if this is a public key or an address
-        let address = if public_key.len() == 32 {
-            // This is already an address (32 bytes)
-            public_key.to_vec()
-        } else {
-            // This is a public key, derive the address
-            self.derive_address(public_key)
-        };
+    pub fn get_balance(&self, address: &str) -> u64 {
+        if !Self::is_valid_address(address) {
+            return 0;
+        }
         
-        let balance = self.accounts.get(&address)
+        let balance = self.accounts.get(address.as_bytes())
             .map(|state| state.balance)
             .unwrap_or(0);
         
-        log::debug!("🔍 Balance lookup for {} -> address {}: {} NUMI", 
-                   hex::encode(&public_key[..public_key.len().min(16)]), 
-                   hex::encode(&address),
+        log::debug!("🔍 Balance lookup for address {}: {} NUMI", 
+                   address,
                    balance as f64 / 100.0);
         
         balance
@@ -1493,7 +1531,7 @@ impl NumiBlockchain {
         }
         
         if orphan_count > 0 {
-            log::info!("🧹 Cleaned up {} old orphan blocks", orphan_count);
+            log::info!("🧹 Cleaned up {orphan_count} old orphan blocks");
         }
     }
 
@@ -1525,7 +1563,7 @@ impl NumiBlockchain {
         // Verify proof of work for non-genesis blocks
         if !block.is_genesis() {
             if let Err(e) = self.verify_proof_of_work_enhanced(block) {
-                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(&block_hash), e);
+                log::warn!("❌ Block {} failed PoW verification: {}", hex::encode(block_hash), e);
                 return Err(e);
             }
         }
@@ -1582,7 +1620,7 @@ impl NumiBlockchain {
             // Validate transaction structure
             if let Err(e) = transaction.validate_structure() {
                 return Err(BlockchainError::InvalidBlock(
-                    format!("Transaction {} invalid: {}", i, e)));
+                    format!("Transaction {i} invalid: {e}")));
             }
             
             // Check for duplicate transactions in block
@@ -1636,7 +1674,7 @@ impl NumiBlockchain {
         
         // Additional checks for difficulty consistency
         let _current_state = self.state.read();
-        let expected_difficulty = self.calculate_next_difficulty(block.header.height);
+        let expected_difficulty = self.calculate_next_difficulty(block.header.height - 1);
         
         // Allow some tolerance for difficulty transitions
         if block.header.difficulty > expected_difficulty + 5 || 
@@ -1715,13 +1753,15 @@ impl NumiBlockchain {
             .len();
         
         // Add to orphan pool
-        let previous_hash = hex::encode(&block.header.previous_hash);
+        let previous_hash = hex::encode(block.header.previous_hash);
         let orphan = OrphanBlock {
             block,
             arrival_time: Utc::now(),
             processing_attempts: 0,
             peer_id: peer_id.clone(),
             size_bytes: block_size,
+            processing_time_total: 0,
+            rate_limit_violations: 0,
         };
         
         self.orphan_pool.insert(block_hash, orphan);
@@ -1730,12 +1770,12 @@ impl NumiBlockchain {
         if let Some(ref peer) = peer_id {
             self.orphan_by_peer
                 .entry(peer.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(block_hash);
         }
         
         log::info!("👻 Block {} added to orphan pool (parent: {}, peer: {:?})",
-                  hex::encode(&block_hash),
+                  hex::encode(block_hash),
                   previous_hash,
                   peer_id);
         
@@ -1792,11 +1832,11 @@ impl NumiBlockchain {
             // This is the new best chain - perform reorganization with security checks
             log::info!("🔄 New best chain found, performing reorganization");
             let result = self.reorganize_to_block_secure(block_hash).await;
-            log::info!("✅ Reorganization completed with result: {:?}", result);
-            return result;
+            log::info!("✅ Reorganization completed with result: {result:?}");
+            result
         } else {
-            log::debug!("📦 Block {} added to side chain", hex::encode(&block_hash));
-            return Ok(false);
+            log::debug!("📦 Block {} added to side chain", hex::encode(block_hash));
+            Ok(false)
         }
     }
     
@@ -1870,7 +1910,7 @@ impl NumiBlockchain {
                 checkpoints.drain(0..len - MAX_CHECKPOINTS);
             }
             
-            log::info!("📍 Security checkpoint created at height {}", current_height);
+            log::info!("📍 Security checkpoint created at height {current_height}");
         }
         
         Ok(())
@@ -1918,7 +1958,7 @@ impl NumiBlockchain {
         let current_best_hash = self.state.read().best_block_hash;
         
         log::info!("🔄 Starting secure reorganization: current_best={}, new_best={}", 
-                  hex::encode(&current_best_hash), hex::encode(&new_best_hash));
+                  hex::encode(current_best_hash), hex::encode(new_best_hash));
         
         // Find the fork point between current and new chain
         let mut fork_info = self.find_fork_point(current_best_hash, new_best_hash)?;
@@ -2052,7 +2092,7 @@ impl NumiBlockchain {
         let current_height = self.get_current_height();
         let finality_height = current_height.saturating_sub(FINALITY_DEPTH);
         
-        log::info!("📏 Finalization: current_height={}, finality_height={}", current_height, finality_height);
+        log::info!("📏 Finalization: current_height={current_height}, finality_height={finality_height}");
         
         // Mark blocks as finalized if they're deep enough
         let mut finalized_count = 0;
@@ -2064,14 +2104,14 @@ impl NumiBlockchain {
             }
         }
         
-        log::info!("✅ Finalized {} blocks", finalized_count);
+        log::info!("✅ Finalized {finalized_count} blocks");
         
         // Update chain state with finalization info
         if let Some(finalized_hash) = self.main_chain.read().get(finality_height as usize).copied() {
             let mut state = self.state.write();
             state.finalized_block_hash = finalized_hash;
             state.finalized_block_height = finality_height;
-            log::info!("📊 Updated chain state finalization: finalized_block_hash={}", hex::encode(&finalized_hash));
+            log::info!("📊 Updated chain state finalization: finalized_block_hash={}", hex::encode(finalized_hash));
         }
         
         log::info!("✅ Finalization status update completed");
@@ -2098,7 +2138,7 @@ impl NumiBlockchain {
                     // Check if parent now exists
                     if self.blocks.contains_key(&parent_hash) || orphan.block.is_genesis() {
                         log::info!("🎯 Processing orphan block {} (parent now available)",
-                                  hex::encode(&orphan_hash));
+                                  hex::encode(orphan_hash));
                         
                         // Remove from peer tracking
                         if let Some(ref peer_id) = orphan.peer_id {
@@ -2114,7 +2154,7 @@ impl NumiBlockchain {
                                 processed_any = true;
                             }
                             Err(e) => {
-                                log::warn!("❌ Orphan block processing failed: {}", e);
+                                log::warn!("❌ Orphan block processing failed: {e}");
                                 // Increment processing attempts
                                 orphan.processing_attempts += 1;
                                 if orphan.processing_attempts < 3 {
@@ -2309,7 +2349,7 @@ impl NumiBlockchain {
                     }
                 }
             } else {
-                log::warn!("⚠️ Block hash {} not found in blocks map", hex::encode(&block_hash));
+                log::warn!("⚠️ Block hash {} not found in blocks map", hex::encode(block_hash));
             }
         }
         
@@ -2345,7 +2385,7 @@ impl NumiBlockchain {
                 
                 // Process all transactions in this block
                 for (tx_index, transaction) in block.transactions.iter().enumerate() {
-                    log::debug!("  Processing transaction {} in block {}", tx_index, height);
+                    log::debug!("  Processing transaction {tx_index} in block {height}");
                     
                     // Apply transaction to rebuild account state
                     self.apply_transaction(transaction).await?;
@@ -2364,11 +2404,22 @@ impl NumiBlockchain {
         log::info!("💰 Total supply from blockchain: {} NUMI", total_supply as f64 / 100.0);
         log::info!("📊 Total accounts in memory: {}", self.accounts.len());
         
+        // After rebuilding from blocks, apply pending transactions from mempool
+        // to ensure a fully consistent state.
+        log::info!("📋 Applying pending transactions from mempool to finalize state...");
+        for entry in self.mempool.get_all_transactions() {
+            match self.apply_transaction(&entry).await {
+                Ok(_) => log::debug!("Applied mempool transaction {}", entry.get_hash_hex()),
+                Err(e) => log::warn!("Could not apply mempool transaction {}: {}", entry.get_hash_hex(), e),
+            }
+        }
+        log::info!("✅ Mempool transactions applied.");
+
         // Debug: List all accounts
         for entry in self.accounts.iter() {
             let (pubkey, account) = entry.pair();
             log::info!("  Account {} ({}...): {} NUMI", 
-                      hex::encode(&pubkey), 
+                      hex::encode(pubkey), 
                       hex::encode(&pubkey[..pubkey.len().min(8)]),
                       account.balance as f64 / 100.0);
         }

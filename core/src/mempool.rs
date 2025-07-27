@@ -359,6 +359,14 @@ impl TransactionMempool {
         self.refresh_priorities();
     }
 
+    /// Get all transactions currently in the mempool
+    pub fn get_all_transactions(&self) -> Vec<Transaction> {
+        self.transactions
+            .iter()
+            .map(|entry| entry.value().transaction.clone())
+            .collect()
+    }
+
     // Private helper methods
     
     /// Calculates a dynamic minimum fee rate based on current mempool utilisation.
@@ -493,13 +501,14 @@ impl TransactionMempool {
     }
 
     fn calculate_fee_rate(&self, transaction: &Transaction, size_bytes: usize) -> u64 {
-        // Use the transaction's actual fee to calculate rate
+        // Use the transaction's actual fee to calculate rate (rounded up per byte)
         if size_bytes == 0 {
             return 0;
         }
-        
-        // Fee rate is transaction fee divided by size in bytes
-        transaction.fee / size_bytes as u64
+        let fee = transaction.fee;
+        let size = size_bytes as u64;
+        // Ceiling division ensures positive fee yields at least rate 1 when fee >= size
+        fee.div_ceil(size)
     }
 
     fn has_space_for_transaction(&self, tx_size: usize, fee_rate: u64) -> bool {

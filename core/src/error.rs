@@ -34,6 +34,8 @@ pub enum BlockchainError {
 
     #[error("Block not found: {0}")]
     BlockNotFound(String),
+    #[error("Peer not found")]
+    PeerNotFound,
 
     #[error("Mining error: {0}")]
     MiningError(String),
@@ -49,6 +51,22 @@ pub enum BlockchainError {
 
     #[error("Task join error: {0}")]
     TaskJoinError(String),
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum MiningServiceError {
+    #[error("Miner wallet not found: {0}")]
+    WalletNotFound(String),
+    #[error("Miner initialization failed: {0}")]
+    MinerInitialization(String),
+    #[error("Mining error: {0}")]
+    MiningError(String),
+}
+
+impl From<MiningServiceError> for BlockchainError {
+    fn from(e: MiningServiceError) -> Self {
+        BlockchainError::MiningError(e.to_string())
+    }
 }
 
 // The `thiserror::Error` derive automatically implements `std::error::Error` and

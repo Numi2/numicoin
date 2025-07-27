@@ -13,12 +13,12 @@ pub const MAX_TRANSACTION_SIZE: usize = 1024 * 1024; // 1MB
 pub const MIN_TRANSACTION_FEE: u64 = 1; // 1 NANO
 
 /// Maximum transaction fee (prevent accidents)
-pub const MAX_TRANSACTION_FEE: u64 = 100000; // 1000 NUMI
+pub const MAX_TRANSACTION_FEE: u64 = 100; // 100 NANO (0.1 NUMI)
 
-/// Fee per byte for standard transactions
-pub const STANDARD_FEE_PER_BYTE: u64 = 1; // 1 NANO per byte
+/// Fee per byte for standard transactions (dramatically reduced for people's blockchain)
+pub const STANDARD_FEE_PER_BYTE: u64 = 1; // 1 NANO per 10000 bytes (effectively 0.0001 NANO per byte)
 
-/// Base fee for all transactions
+/// Base fee for all transactions (reduced for accessibility)
 pub const BASE_TRANSACTION_FEE: u64 = 1; // 1 NANO
 
 /// Maximum transaction validity period in seconds
@@ -75,19 +75,20 @@ impl TransactionFee {
         }
 
         let base_fee = BASE_TRANSACTION_FEE;
-        let size_fee = (size_bytes as u64) * STANDARD_FEE_PER_BYTE;
+        // Calculate size fee: 1 NANO per 10000 bytes (0.0001 NANO per byte)
+        let size_fee = (size_bytes as u64 + 9999) / 10000; // Round up to nearest 10000 bytes
         // Using integer arithmetic avoids consensus differences across CPU
         // architectures.  The multiplier is hundred-percent increments where
         // 0 → no priority fee, 1 → +100 %, 2 → +200 %, …
-        let priority_fee = (base_fee + size_fee) * priority_multiplier as u64;
-        let total = base_fee + size_fee + priority_fee;
+        let priority_fee = (base_fee + size_fee).saturating_mul(priority_multiplier as u64);
+        let total = (base_fee + size_fee).saturating_add(priority_fee);
         
         if total < MIN_TRANSACTION_FEE {
             return Err(BlockchainError::InvalidTransaction("Fee too low".to_string()));
         }
         
         if total > MAX_TRANSACTION_FEE {
-            return Err(BlockchainError::InvalidTransaction("Fee too high".to_string()));
+            return Err(BlockchainError::InvalidTransaction(format!("Fee too high: {total}")));
         }
         
         Ok(Self {
@@ -112,7 +113,7 @@ impl TransactionFee {
         
         if paid_fee > MAX_TRANSACTION_FEE {
             return Err(BlockchainError::InvalidTransaction(
-                format!("Fee too high: {}", paid_fee)));
+                format!("Fee too high: {paid_fee}")));
         }
         
         Ok(())
@@ -231,7 +232,7 @@ impl Transaction {
         // Enforce maximum transaction size
         if size > MAX_TRANSACTION_SIZE {
             return Err(BlockchainError::InvalidTransaction(
-                format!("Transaction too large: {} bytes", size)));
+                format!("Transaction too large: {size} bytes")));
         }
        
         // Validate fee for normal transactions (skip mining rewards and gas-based types)
@@ -367,10 +368,10 @@ impl Transaction {
         }
         
         // Verify sufficient balance for transaction amount
-        let amount = self.get_amount();
-        if amount > current_balance {
+        let required_balance = self.get_required_balance();
+        if required_balance > current_balance {
             return Err(BlockchainError::InsufficientBalance(
-                format!("Required: {}, Available: {}", amount, current_balance)
+                format!("Required: {required_balance}, Available: {current_balance}")
             ));
         }
         
@@ -485,12 +486,17 @@ mod tests {
     
     #[test]
     fn test_transaction_fee_calculation() {
-        // Test minimum fee calculation
+        // Test minimum fee calculation for 500 bytes
         let fee_info = TransactionFee::minimum_for_size(500).unwrap();
         assert_eq!(fee_info.base_fee, BASE_TRANSACTION_FEE);
-        assert_eq!(fee_info.size_fee, 500 * STANDARD_FEE_PER_BYTE);
+        // 500 bytes should cost 1 NANO (1 NANO per 10000 bytes, rounded up)
+        assert_eq!(fee_info.size_fee, 1);
         assert_eq!(fee_info.priority_fee, 0);
         assert_eq!(fee_info.total, fee_info.base_fee + fee_info.size_fee);
+        
+        // Test larger transaction (1500 bytes)
+        let large_fee = TransactionFee::minimum_for_size(1500).unwrap();
+        assert_eq!(large_fee.size_fee, 1); // 1500 bytes = 1 NANO (rounded up from 0.15)
         
         // Test priority fee calculation
         let priority_fee = TransactionFee::calculate(500, 1).unwrap();
@@ -589,14 +595,15 @@ mod tests {
         
         tx.sign(&keypair).unwrap();
         
-        // Should validate with sufficient balance
-        assert!(tx.validate(1000, 0).is_ok());
+        // Should validate with sufficient balance (including fees)
+        let required_balance = tx.get_required_balance();
+        assert!(tx.validate(required_balance, 0).is_ok());
         
         // Should fail with insufficient balance
         assert!(tx.validate(50, 0).is_err());
         
         // Should fail with wrong nonce
-        assert!(tx.validate(1000, 2).is_err());
+        assert!(tx.validate(required_balance, 2).is_err());
     }
     
     #[test]

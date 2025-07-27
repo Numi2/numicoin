@@ -63,7 +63,13 @@ impl Block {
         Ok(crate::crypto::blake3_hash_hex(&self.calculate_hash()?))
     }
     
-    pub fn sign(&mut self, keypair: &crate::crypto::Dilithium3Keypair) -> Result<()> {
+    pub fn sign(&mut self, keypair: &crate::crypto::Dilithium3Keypair, coinbase_tx: Option<&mut Transaction>) -> Result<()> {
+        if let Some(tx) = coinbase_tx {
+            tx.sign(keypair)?;
+            self.transactions.insert(0, tx.clone());
+            self.header.merkle_root = Self::calculate_merkle_root(&self.transactions);
+        }
+
         let message = self.serialize_header_for_hashing()?;
         self.header.block_signature = Some(keypair.sign(&message)?);
         Ok(())
@@ -300,7 +306,7 @@ mod tests {
             keypair.public_key.clone(),
         );
         
-        block.sign(&keypair).unwrap();
+        block.sign(&keypair, None).unwrap();
         assert!(block.verify_signature().unwrap());
         let _ = block.calculate_hash().unwrap();
     }
@@ -317,7 +323,7 @@ mod tests {
         );
         
         // Sign the genesis block before validation
-        block.sign(&keypair).unwrap();
+        block.sign(&keypair, None).unwrap();
         
         assert!(block.is_genesis());
         assert!(block.validate(None).is_ok());

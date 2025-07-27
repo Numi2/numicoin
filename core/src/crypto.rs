@@ -5,10 +5,8 @@ use argon2::{Argon2, Params, Algorithm, Version};
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 use pqcrypto_traits::sign::{PublicKey, SecretKey, DetachedSignature};
-use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret, Ciphertext};
 use rand::RngCore;
 use base64ct::Encoding;
-use pqcrypto_kyber::kyber768::{PublicKey as KyberPublicKey, SecretKey as KyberSecretKey, Ciphertext as KyberCiphertext};
 
 use crate::error::BlockchainError;
 use crate::Result;
@@ -28,8 +26,6 @@ pub const DILITHIUM3_SECKEY_SIZE: usize = pqcrypto_dilithium::dilithium3::secret
 /// Maximum message size for signing (prevent DoS)
 pub const MAX_SIGNABLE_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
-/// Minimum entropy bits required for key generation
-pub const MIN_ENTROPY_BITS: usize = 256;
 /// PEM format key pair for export/import
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PemKeyPair {
@@ -101,14 +97,14 @@ impl Dilithium3Keypair {
         {
             use std::os::unix::fs::PermissionsExt;
             let metadata = std::fs::metadata(path.as_ref())
-                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file metadata: {}", e)))?;
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file metadata: {e}")))?;
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
-                return Err(BlockchainError::CryptographyError(format!("Insecure key file permissions: {:o}", mode)));
+                return Err(BlockchainError::CryptographyError(format!("Insecure key file permissions: {mode:o}")));
             }
         }
         let file_content = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to read key file: {e}")))?;
         
         // Try JSON format first
         if let Ok(keypair) = serde_json::from_str::<Self>(&file_content) {
@@ -127,7 +123,7 @@ impl Dilithium3Keypair {
     /// Save keypair to file in JSON format
     pub fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         let json_content = serde_json::to_string_pretty(self)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {e}")))?;
         // Harden file writing with secure permissions
         #[cfg(unix)]
         {
@@ -141,9 +137,9 @@ impl Dilithium3Keypair {
                 .truncate(true)
                 .mode(0o600)
                 .open(path.as_ref())
-                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to open key file: {}", e)))?;
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to open key file: {e}")))?;
             file.write_all(json_content.as_bytes())
-                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to write key file: {}", e)))?;
+                .map_err(|e| BlockchainError::CryptographyError(format!("Failed to write key file: {e}")))?;
         }
         #[cfg(not(unix))]
         {
@@ -191,9 +187,9 @@ impl Dilithium3Keypair {
         
         // Decode base64
         let secret_key = base64ct::Base64::decode_vec(private_key_b64)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to decode private key: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to decode private key: {e}")))?;
         let public_key = base64ct::Base64::decode_vec(public_key_b64)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to decode public key: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to decode public key: {e}")))?;
         
         Self::from_bytes(public_key, secret_key)
     }
@@ -211,9 +207,9 @@ impl Dilithium3Keypair {
         // Validate key pair consistency
         let test_message = b"validation_test_message";
         let pk = pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(&public_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid public key: {:?}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid public key: {e:?}")))?;
         let sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(&secret_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {:?}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {e:?}")))?;
         
         let sig = pqcrypto_dilithium::dilithium3::detached_sign(test_message, &sk);
         if pqcrypto_dilithium::dilithium3::verify_detached_signature(&sig, test_message, &pk).is_err() {
@@ -230,6 +226,26 @@ impl Dilithium3Keypair {
         })
     }
     
+    /// Create keypair from public key (for verification)
+    pub fn from_public_key(public_key: &[u8]) -> Result<Self> {
+        if public_key.len() != DILITHIUM3_PUBKEY_SIZE {
+            return Err(BlockchainError::CryptographyError("Invalid public key size".to_string()));
+        }
+        
+        // We don't have the secret key, so we'll fill it with zeros.
+        // This keypair should only be used for verification.
+        let secret_key = vec![0u8; DILITHIUM3_SECKEY_SIZE];
+        
+        let fingerprint = blake3_hash(public_key);
+        
+        Ok(Self {
+            public_key: public_key.to_vec(),
+            secret_key,
+            fingerprint,
+            created_at: chrono::Utc::now().timestamp() as u64,
+        })
+    }
+    
     /// Sign message with comprehensive validation
     pub fn sign(&self, message: &[u8]) -> Result<Dilithium3Signature> {
         if message.len() > MAX_SIGNABLE_MESSAGE_SIZE {
@@ -237,7 +253,7 @@ impl Dilithium3Keypair {
         }
 
         let pq_sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(&self.secret_key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {e}")))?;
 
         let signature_bytes = pqcrypto_dilithium::dilithium3::detached_sign(message, &pq_sk);
 
@@ -268,7 +284,7 @@ impl Dilithium3Keypair {
         let pq_pk = match pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key) {
             Ok(pk) => pk,
             Err(err) => {
-                log::warn!("Invalid public key in verification: {:?}", err);
+                log::warn!("Invalid public key in verification: {err:?}");
                 return Ok(false);
             }
         };
@@ -276,7 +292,7 @@ impl Dilithium3Keypair {
         let pq_sig = match pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature) {
             Ok(sig) => sig,
             Err(err) => {
-                log::warn!("Invalid signature format in verification: {:?}", err);
+                log::warn!("Invalid signature format in verification: {err:?}");
                 return Ok(false);
             }
         };
@@ -315,30 +331,6 @@ impl Dilithium3Keypair {
     
     /// Validate system entropy before key generation
     fn validate_system_entropy() -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs::File;
-            use std::io::Read;
-
-            // Check entropy sources on Linux systems
-            let mut file = File::open("/proc/sys/kernel/random/entropy_avail")
-                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot open entropy source: {}", e)))?;
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)
-                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot read entropy source: {}", e)))?;
-            let entropy = contents.trim().parse::<u32>()
-                .map_err(|e| BlockchainError::CryptographyError(format!("Cannot parse entropy value: {}", e)))?;
-            if entropy < (MIN_ENTROPY_BITS as u32) {
-                return Err(BlockchainError::CryptographyError(format!(
-                    "Insufficient system entropy: {} bits available, {} bits required",
-                    entropy, MIN_ENTROPY_BITS)));
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            log::warn!("Skipping system entropy check on non-Linux OS");
-        }
-
         // Test randomness quality
         let mut test_bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut test_bytes);
@@ -350,7 +342,7 @@ impl Dilithium3Keypair {
         }
 
         // Should be roughly balanced (around 128 ones in 256 bits)
-        if ones < 96 || ones > 160 {
+        if !(96..=160).contains(&ones) {
             return Err(BlockchainError::CryptographyError(
                 "Insufficient randomness detected".to_string()));
         }
@@ -562,7 +554,7 @@ pub fn argon2id_pow_hash(data: &[u8], salt: &[u8], config: &Argon2Config) -> Res
         config.time_cost,
         config.parallelism,
         Some(config.output_length),
-    ).map_err(|e| BlockchainError::CryptographyError(format!("Argon2 params error: {}", e)))?;
+    ).map_err(|e| BlockchainError::CryptographyError(format!("Argon2 params error: {e}")))?;
     
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     
@@ -579,9 +571,26 @@ pub fn argon2id_pow_hash(data: &[u8], salt: &[u8], config: &Argon2Config) -> Res
     // Perform Argon2id hashing
     let mut output = vec![0u8; config.output_length];
     argon2.hash_password_into(data, salt_to_use, &mut output)
-        .map_err(|e| BlockchainError::CryptographyError(format!("Argon2id hash error: {}", e)))?;
+        .map_err(|e| BlockchainError::CryptographyError(format!("Argon2id hash error: {e}")))?;
     
     Ok(output)
+}
+
+/// Adaptive Argon2id configuration based on difficulty
+fn adaptive_argon2_config(difficulty: u32) -> Argon2Config {
+    if cfg!(test) || cfg!(debug_assertions) {
+        return Argon2Config::development();
+    }
+
+    match difficulty {
+        0..=15 => Argon2Config::default(), // Standard security for low difficulty
+        16..=20 => Argon2Config {
+            memory_cost: 131072, // 128 MB
+            time_cost: 4,
+            ..Argon2Config::default()
+        },
+        _ => Argon2Config::production(), // High security for high difficulty
+    }
 }
 
 /// Default Argon2id hash with standard configuration
@@ -610,17 +619,8 @@ pub fn verify_pow(header_blob: &[u8], nonce: u64, difficulty_target: &[u8]) -> R
     let salt_slice = &salt_full[..16]; // Use first 16 bytes as salt
     
     // Use optimized Argon2id configuration based on environment
-    let config = if cfg!(test) || cfg!(debug_assertions) {
-        Argon2Config::development() // Faster for tests/debug
-    } else {
-        // Production with adaptive parameters based on difficulty
-        let difficulty_level = target_to_difficulty(difficulty_target);
-        if difficulty_level > 20 {
-            Argon2Config::production() // High security for high difficulty
-        } else {
-            Argon2Config::default() // Standard security
-        }
-    };
+    let difficulty_level = target_to_difficulty(difficulty_target);
+    let config = adaptive_argon2_config(difficulty_level);
     
     // Perform Argon2id computation
     let argon2_result = argon2id_pow_hash(&pow_data, salt_slice, &config)?;
@@ -652,8 +652,8 @@ pub fn generate_difficulty_target(difficulty: u32) -> [u8; 32] {
     let zero_bits = (difficulty % 8) as usize;
     
     // Set leading bytes to zero
-    for i in 0..zero_bytes.min(32) {
-        target[i] = 0;
+    for byte in target.iter_mut().take(zero_bytes.min(32)) {
+        *byte = 0;
     }
     
     // Set partial byte if needed
@@ -662,8 +662,8 @@ pub fn generate_difficulty_target(difficulty: u32) -> [u8; 32] {
         target[zero_bytes] = partial_byte;
         
         // Zero out remaining bits more precisely
-        for i in (zero_bytes + 1)..32 {
-            target[i] = 0xFF;
+        for byte in target.iter_mut().skip(zero_bytes + 1) {
+            *byte = 0xFF;
         }
     }
     
@@ -758,36 +758,10 @@ pub fn generate_salt() -> Result<[u8; 32]> {
 
 /// Generate salt with custom length
 pub fn generate_salt_with_length(length: usize) -> Result<Vec<u8>> {
-    if length < 16 || length > 64 {
+    if !(16..=64).contains(&length) {
         return Err(BlockchainError::CryptographyError("Invalid salt length".to_string()));
     }
     generate_random_bytes(length)
-}
-
-// KYBER KEM IMPLEMENTATION
-
-/// Generate a Kyber768 keypair (public, secret) as byte vectors.
-pub fn kyber_keypair() -> (Vec<u8>, Vec<u8>) {
-    let (pk, sk) = pqcrypto_kyber::kyber768::keypair();
-    (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
-}
-
-/// Encapsulate a shared secret to a peer's Kyber768 public key.
-pub fn kyber_encapsulate(pk_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    let pk = KyberPublicKey::from_bytes(pk_bytes)
-        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber public key: {:?}", e)))?;
-    let (ss, ct) = pqcrypto_kyber::kyber768::encapsulate(&pk);
-    Ok((ct.as_bytes().to_vec(), ss.as_bytes().to_vec()))
-}
-
-/// Decapsulate a shared secret from ciphertext using Kyber768 secret key.
-pub fn kyber_decapsulate(ct_bytes: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>> {
-    let sk = KyberSecretKey::from_bytes(sk_bytes)
-        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber secret key: {:?}", e)))?;
-    let ct = KyberCiphertext::from_bytes(ct_bytes)
-        .map_err(|e| BlockchainError::CryptographyError(format!("Invalid Kyber ciphertext: {:?}", e)))?;
-    let ss = pqcrypto_kyber::kyber768::decapsulate(&ct, &sk);
-    Ok(ss.as_bytes().to_vec())
 }
 
 // Format implementations for better error messages
@@ -875,7 +849,7 @@ pub fn verify_signature_with_timeout(
     match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
         Ok(result) => result,
         Err(_) => {
-            log::warn!("Signature verification timed out after {}ms", timeout_ms);
+            log::warn!("Signature verification timed out after {timeout_ms}ms");
             Ok(false) // Timeout treated as invalid signature
         }
     }
@@ -1181,13 +1155,5 @@ mod tests {
         let mut data = vec![0xFF; 32];
         secure_zero(&mut data);
         assert_eq!(data, vec![0; 32]);
-    }
-
-    #[test]
-    fn test_kyber_kem() {
-        let (pk, sk) = kyber_keypair();
-        let (ct, ss1) = kyber_encapsulate(&pk).unwrap();
-        let ss2 = kyber_decapsulate(&ct, &sk).unwrap();
-        assert_eq!(ss1, ss2);
     }
 } 

@@ -253,7 +253,7 @@ impl SecureKeyStore {
         
         // Read encrypted data
         let encrypted_data = fs::read(&self.storage_path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to read key store: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to read key store: {e}")))?;
         
         if encrypted_data.len() < 64 {
             return Err(BlockchainError::StorageError(
@@ -279,14 +279,14 @@ impl SecureKeyStore {
         let seed = blake3_hash(password.as_bytes());
         let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
         
-        let derived_password = format!("keystore_{}", hex::encode(&temp_hash));
+        let derived_password = format!("keystore_{}", hex::encode(temp_hash));
         
         // Derive key from password
         let key = self.derive_key_from_password(&derived_password, salt)?;
         
         // Decrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
         
         let nonce_slice = Nonce::from_slice(nonce);
         let decrypted_data = cipher.decrypt(nonce_slice, encrypted_content)
@@ -294,7 +294,7 @@ impl SecureKeyStore {
         
         // Deserialize key store data
         let store_data: StorageFormat = bincode::deserialize(&decrypted_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to deserialize key store: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to deserialize key store: {e}")))?;
         
         // Load data
         self.keys = store_data.keys;
@@ -339,7 +339,7 @@ impl SecureKeyStore {
         
         // Serialize data
         let serialized_data = bincode::serialize(&store_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to serialize key store: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to serialize key store: {e}")))?;
         
         // Generate encryption parameters
         let salt = generate_random_bytes(32)?;
@@ -348,16 +348,16 @@ impl SecureKeyStore {
         // For persistence, we need to use a consistent encryption method
         // Since we don't have the original password here, we'll use a derived key from the password hash
         // This is a simplified approach - in production, you'd want to store the password securely
-        let derived_password = format!("keystore_{}", hex::encode(&password_hash));
+        let derived_password = format!("keystore_{}", hex::encode(password_hash));
         let key = self.derive_key_from_password(&derived_password, &salt)?;
         
         // Encrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
         
         let nonce_slice = Nonce::from_slice(&nonce);
         let encrypted_data = cipher.encrypt(nonce_slice, serialized_data.as_ref())
-            .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {e}")))?;
         
         // Combine components: encryption_salt(32) + nonce(12) + password_salt(kdf_config.salt_length) + encrypted_data
         let mut file_data = Vec::new();
@@ -369,10 +369,10 @@ impl SecureKeyStore {
         // Write to temporary file first, then move (atomic operation)
         let temp_path = self.storage_path.with_extension("tmp");
         fs::write(&temp_path, &file_data)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to write temp file: {e}")))?;
         
         fs::rename(&temp_path, &self.storage_path)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to move temp file: {}", e)))?;
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to move temp file: {e}")))?;
         
         log::debug!("💾 Key store saved to disk with {} keys", self.keys.len());
         Ok(())
@@ -384,7 +384,7 @@ impl SecureKeyStore {
         
         // Serialize keypair
         let keypair_data = bincode::serialize(keypair)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to serialize keypair: {e}")))?;
         
         // Generate encryption parameters
         // Use `?` to unwrap the `Result<Vec<u8>, BlockchainError>` returned by
@@ -398,11 +398,11 @@ impl SecureKeyStore {
         
         // Encrypt keypair data
         let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
         
         let nonce_slice = Nonce::from_slice(&nonce);
         let encrypted_data = cipher.encrypt(nonce_slice, keypair_data.as_ref())
-            .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {e}")))?;
         
         // Split encrypted data and auth tag (last 16 bytes)
         if encrypted_data.len() < 16 {
@@ -433,7 +433,7 @@ impl SecureKeyStore {
             self.save_to_disk()?;
         }
         
-        log::info!("🔑 Keypair '{}' stored securely", id);
+        log::info!("🔑 Keypair '{id}' stored securely");
         Ok(())
     }
     
@@ -444,11 +444,11 @@ impl SecureKeyStore {
         // First, get the salt and check expiration without mutable borrow
         let salt = {
             let entry = self.keys.get(id)
-                .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+                .ok_or_else(|| BlockchainError::StorageError(format!("Key '{id}' not found")))?;
             
             // Check if key has expired
             if entry.is_expired() {
-                return Err(BlockchainError::CryptographyError(format!("Key '{}' has expired", id)));
+                return Err(BlockchainError::CryptographyError(format!("Key '{id}' has expired")));
             }
             
             entry.salt.clone()
@@ -461,7 +461,7 @@ impl SecureKeyStore {
         
         // Get the entry data for decryption
         let entry = self.keys.get(id)
-            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{id}' not found")))?;
         
         // Derive key from password
         let key = self.derive_key_from_password(password, &salt)?;
@@ -472,7 +472,7 @@ impl SecureKeyStore {
         
         // Decrypt keypair data
         let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
         
         let nonce = Nonce::from_slice(&entry.nonce);
         let decrypted_data = cipher.decrypt(nonce, full_encrypted_data.as_ref())
@@ -480,13 +480,13 @@ impl SecureKeyStore {
         
         // Deserialize keypair
         let keypair: Dilithium3Keypair = bincode::deserialize(&decrypted_data)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to deserialize keypair: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Failed to deserialize keypair: {e}")))?;
         
         if self.auto_save {
             self.save_to_disk()?;
         }
         
-        log::debug!("🔓 Keypair '{}' retrieved successfully", id);
+        log::debug!("🔓 Keypair '{id}' retrieved successfully");
         Ok(keypair)
     }
     
@@ -500,20 +500,20 @@ impl SecureKeyStore {
         self.verify_password(password)?;
         
         self.keys.remove(id)
-            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{id}' not found")))?;
         
         if self.auto_save {
             self.save_to_disk()?;
         }
         
-        log::info!("🗑️ Key '{}' removed from secure storage", id);
+        log::info!("🗑️ Key '{id}' removed from secure storage");
         Ok(())
     }
     
     /// Set key expiration time
     pub fn set_key_expiry(&mut self, id: &str, expiry: SystemTime) -> Result<()> {
         let entry = self.keys.get_mut(id)
-            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{}' not found", id)))?;
+            .ok_or_else(|| BlockchainError::StorageError(format!("Key '{id}' not found")))?;
         
         entry.expires_at = expiry.duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -536,7 +536,7 @@ impl SecureKeyStore {
         let count = expired_keys.len();
         for id in expired_keys {
             self.keys.remove(&id);
-            log::debug!("🧹 Removed expired key: {}", id);
+            log::debug!("🧹 Removed expired key: {id}");
         }
         
         if count > 0 && self.auto_save {
@@ -632,11 +632,11 @@ impl SecureKeyStore {
             self.kdf_config.block_size,
             self.kdf_config.parallelization,
             self.kdf_config.key_length,
-        ).map_err(|e| BlockchainError::CryptographyError(format!("Invalid Scrypt parameters: {}", e)))?;
+        ).map_err(|e| BlockchainError::CryptographyError(format!("Invalid Scrypt parameters: {e}")))?;
         
         let mut key = vec![0u8; self.kdf_config.key_length];
         scrypt(password.as_bytes(), salt, &params, &mut key)
-            .map_err(|e| BlockchainError::CryptographyError(format!("Key derivation failed: {}", e)))?;
+            .map_err(|e| BlockchainError::CryptographyError(format!("Key derivation failed: {e}")))?;
         
         Ok(key)
     }
@@ -651,7 +651,7 @@ impl SecureKeyStore {
         let test_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
         
         // Note: This is simplified - proper implementation would use constant-time comparison
-        if test_hash != stored_hash {
+        if !crate::crypto::constant_time_eq(&test_hash, &stored_hash) {
             return Err(BlockchainError::CryptographyError("Invalid password".to_string()));
         }
         
@@ -750,7 +750,7 @@ mod tests {
         // Add multiple keys
         for i in 0..5 {
             let keypair = Dilithium3Keypair::new().unwrap();
-            store.store_keypair(&format!("key_{}", i), &keypair, "test_password").unwrap();
+            store.store_keypair(&format!("key_{i}"), &keypair, "test_password").unwrap();
         }
         
         // Expire some keys

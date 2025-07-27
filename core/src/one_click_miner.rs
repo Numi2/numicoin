@@ -49,8 +49,8 @@ async fn main() -> Result<()> {
     };
     
     // Display wallet info
-    let wallet_address = hex::encode(&numi_core::crypto::blake3_hash(&wallet.public_key));
-    println!("💰 Your Wallet Address: {}", wallet_address);
+    let wallet_address = hex::encode(numi_core::crypto::blake3_hash(&wallet.public_key));
+    println!("💰 Your Wallet Address: {wallet_address}");
     println!("📁 Wallet File: {}", wallet_path.display());
     println!("📂 Data Directory: {}", data_dir.display());
     println!();
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     println!("🔧 Initializing blockchain...");
     let storage = Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
     
-    let blockchain = match NumiBlockchain::load_from_storage_with_config(&*storage, Some(config.consensus.clone())).await {
+    let blockchain = match NumiBlockchain::load_from_storage_with_config(&storage, Some(config.consensus.clone())).await {
         Ok(chain) => {
             println!("📦 Loaded existing blockchain (height: {})", chain.get_current_height());
             chain
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         Err(_) => {
             println!("🆕 Creating new blockchain...");
             let chain = NumiBlockchain::new_with_config(Some(config.consensus.clone()), Some(wallet.clone()))?;
-            chain.save_to_storage(&*storage)?;
+            chain.save_to_storage(&storage)?;
             println!("✅ Blockchain initialized with genesis block");
             chain
         }
@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
         config.mining.clone(),
         data_dir,
         Duration::from_secs(10), // Fast 10-second blocks for better user experience
+        "miner-wallet.json".into(),
     );
     
     // Start mining in background
@@ -125,8 +126,8 @@ async fn main() -> Result<()> {
                 println!("\n🛑 Stopping miner...");
                 
                 // Save blockchain state
-                if let Err(e) = blockchain.read().save_to_storage(&*storage) {
-                    println!("⚠️  Warning: Failed to save blockchain state: {}", e);
+                if let Err(e) = blockchain.read().save_to_storage(&storage) {
+                    println!("⚠️  Warning: Failed to save blockchain state: {e}");
                 }
                 
                 println!("💾 Blockchain state saved");
@@ -155,8 +156,8 @@ async fn main() -> Result<()> {
                 );
                 
                 // Save periodically
-                if let Err(e) = blockchain.read().save_to_storage(&*storage) {
-                    println!("⚠️  Warning: Failed to save blockchain state: {}", e);
+                if let Err(e) = blockchain.read().save_to_storage(&storage) {
+                    println!("⚠️  Warning: Failed to save blockchain state: {e}");
                 }
             }
         }

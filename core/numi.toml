@@ -16,15 +16,15 @@ rate_limit_per_peer = 1000
 
 [mining]
 enabled = true
-wallet_path = "./miner-wallet.json"
+wallet_path = "numi.json"
 thread_count = 8
 nonce_chunk_size = 5000
 stats_update_interval_secs = 5
 enable_cpu_affinity = false
 thermal_throttle_temp = 70.0
 power_limit_watts = 50.0
-target_block_time_secs = 1
-difficulty_adjustment_interval = 600
+target_block_time_secs = 10
+difficulty_adjustment_interval = 20
 
 [mining.argon2_config]
 memory_cost = 65536
@@ -78,7 +78,7 @@ retention_days = 30
 sync_mode = "Fast"
 
 [consensus]
-difficulty_adjustment_interval = 600
+difficulty_adjustment_interval = 20
 max_block_size = 524288
 max_transactions_per_block = 100
 min_transaction_fee = 1
@@ -91,9 +91,9 @@ initial_mining_reward = 1000
 
 # Transaction fee structure (aligned with transaction.rs constants)
 # - Base fee: 1 NANO per transaction
-# - Size fee: 1 NANO per byte  
+# - Size fee: 1 NANO per 1000 bytes (0.001 NANO per byte)
 # - Min fee: 1 NANO total
-# - Max fee: 100000 NANO (1000 NUMI)
+# - Max fee: 100 NANO (0.1 NUMI)
 
 [consensus.target_block_time]
 secs = 1

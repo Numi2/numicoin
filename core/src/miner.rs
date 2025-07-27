@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+use std::path::PathBuf;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -11,9 +12,6 @@ use crate::crypto::{generate_difficulty_target, verify_pow, Dilithium3Keypair, A
 use crate::error::BlockchainError;
 use crate::{Result};
 
-#[cfg(not(target_os = "linux"))]
-use core_affinity;
-#[cfg(not(target_os = "linux"))]
 use sysinfo::{System, SystemExt, ComponentExt};
 
 // Features must be checked:
@@ -51,6 +49,8 @@ pub struct MiningConfig {
     pub nonce_chunk_size: u64,
     /// Statistics update interval in seconds
     pub stats_update_interval: u64,
+    /// Path to the miner's wallet file
+    pub wallet_path: String,
     /// Argon2id configuration for PoW
     pub argon2_config: Argon2Config,
     /// Enable CPU affinity optimization
@@ -67,6 +67,7 @@ impl From<crate::config::MiningConfig> for MiningConfig {
             thread_count: cfg.thread_count,
             nonce_chunk_size: cfg.nonce_chunk_size,
             stats_update_interval: cfg.stats_update_interval_secs,
+            wallet_path: cfg.wallet_path,
             argon2_config: cfg.argon2_config,
             enable_cpu_affinity: cfg.enable_cpu_affinity,
             thermal_throttle_temp: cfg.thermal_throttle_temp,
@@ -81,6 +82,7 @@ impl Default for MiningConfig {
             thread_count: num_cpus::get(),
             nonce_chunk_size: 10_000,
             stats_update_interval: 5,
+            wallet_path: "miner-wallet.json".to_string(),
             argon2_config: Argon2Config::default(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 85.0,
@@ -96,6 +98,7 @@ impl MiningConfig {
             thread_count: num_cpus::get(),
             nonce_chunk_size: 50_000,
             stats_update_interval: 2,
+            wallet_path: "miner-wallet.json".to_string(),
             argon2_config: Argon2Config::production(),
             enable_cpu_affinity: true,
             thermal_throttle_temp: 90.0,
@@ -109,6 +112,7 @@ impl MiningConfig {
             thread_count: (num_cpus::get() / 2).max(1),
             nonce_chunk_size: 1_000,
             stats_update_interval: 10,
+            wallet_path: "miner-wallet.json".to_string(),
             argon2_config: Argon2Config::development(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 70.0,
@@ -204,7 +208,7 @@ impl Miner {
             return Err(BlockchainError::MiningError("Mining already in progress".to_string()));
         }
         
-        log::info!("🔨 Starting multi-threaded mining for block {} (difficulty: {})", height, difficulty);
+        log::info!("🔨 Starting multi-threaded mining for block {height} (difficulty: {difficulty})");
         
         // Prepare mining parameters
         let difficulty_target = generate_difficulty_target(difficulty);
@@ -234,7 +238,7 @@ impl Miner {
                 );
                 // Sign the reward transaction with the miner's keypair
                 if let Err(e) = reward_tx.sign(&self.keypair) {
-                    log::error!("Failed to sign mining reward transaction: {}", e);
+                    log::error!("Failed to sign mining reward transaction: {e}");
                 }
 
                 // Insert reward transaction as the very first transaction in the block
@@ -260,7 +264,7 @@ impl Miner {
             self.config.thread_count
         };
         
-        log::info!("🚀 Using {} threads for mining", thread_count);
+        log::info!("🚀 Using {thread_count} threads for mining");
         
         // Create mining result channels
         let (result_tx, result_rx) = std::sync::mpsc::channel();
@@ -296,7 +300,7 @@ impl Miner {
                     );
                 }));
                 if let Err(err) = result {
-                    log::error!("Mining thread {} panicked: {:?}", thread_id, err);
+                    log::error!("Mining thread {thread_id} panicked: {err:?}");
                 }
             });
             self.thread_handles.push(handle);
@@ -321,7 +325,9 @@ impl Miner {
                 
                 // Sign the mined block
                 block.header.nonce = mining_result.nonce;
-                block.sign(&self.keypair)?;
+                
+                let mut coinbase_tx = block.transactions.remove(0);
+                block.sign(&self.keypair, Some(&mut coinbase_tx))?;
                 
                 Ok(Some(MiningResult {
                     block,
@@ -362,7 +368,7 @@ impl Miner {
         config: MiningConfig,
         result_tx: std::sync::mpsc::Sender<MiningResult>,
     ) {
-        log::debug!("🔨 Mining thread {} started", thread_id);
+        log::debug!("🔨 Mining thread {thread_id} started");
         
         let mut local_hashes = 0u64;
         let mut total_hashes = 0u64; // track total hashes since start
@@ -400,7 +406,7 @@ impl Miner {
                 let header_blob = match block.serialize_header_for_hashing() {
                     Ok(blob) => blob,
                     Err(e) => {
-                        log::error!("Failed to serialize header in thread {}: {}", thread_id, e);
+                        log::error!("Failed to serialize header in thread {thread_id}: {e}");
                         continue;
                     }
                 };
@@ -432,7 +438,7 @@ impl Miner {
                         // Continue mining
                     }
                     Err(e) => {
-                        log::error!("PoW verification error in thread {}: {}", thread_id, e);
+                        log::error!("PoW verification error in thread {thread_id}: {e}");
                         continue;
                     }
                 }
@@ -448,7 +454,7 @@ impl Miner {
                 // Health check - ensure thread is making progress
                 if last_health_check.elapsed().as_secs() >= 30 {
                     if local_hashes == 0 {
-                        log::warn!("⚠️ Mining thread {} appears stalled (no hashes in 30s)", thread_id);
+                        log::warn!("⚠️ Mining thread {thread_id} appears stalled (no hashes in 30s)");
                     }
                     last_health_check = Instant::now();
                 }
@@ -457,8 +463,7 @@ impl Miner {
                 if config.thermal_throttle_temp > 0.0 {
                     if let Some(temp) = Self::get_cpu_temperature() {
                         if temp > config.thermal_throttle_temp {
-                            log::warn!("🌡️ CPU temperature {}°C exceeds limit, throttling thread {}", 
-                                     temp, thread_id);
+                            log::warn!("🌡️ CPU temperature {temp}°C exceeds limit, throttling thread {thread_id}");
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                     }
@@ -468,7 +473,7 @@ impl Miner {
             }
         }
         
-        log::debug!("🔨 Mining thread {} finished (hashes: {})", thread_id, local_hashes);
+        log::debug!("🔨 Mining thread {thread_id} finished (hashes: {local_hashes})");
     }
     
     /// Update thread-specific mining statistics
@@ -645,25 +650,49 @@ impl Miner {
             log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     fn set_cpu_affinity(thread_id: usize) {
-        let cores = core_affinity::get_core_ids().unwrap_or_default();
-        if !cores.is_empty() {
-            let core_id = cores[thread_id % cores.len()];
-            core_affinity::set_for_current(core_id);
-            log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
+        let core_ids = thread_affinity::get_core_ids().unwrap_or_default();
+        if !core_ids.is_empty() {
+            let core_id = core_ids[thread_id % core_ids.len()];
+            if thread_affinity::set_thread_affinity([core_id]).is_ok() {
+                log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id);
+            }
         }
+    }
+    #[cfg(target_os = "macos")]
+    fn set_cpu_affinity(thread_id: usize) {
+        // macOS implementation using thread_affinity crate might require additional setup or might not be fully supported.
+        // This is a best-effort implementation.
+        let core_ids = thread_affinity::get_core_ids().unwrap_or_default();
+        if !core_ids.is_empty() {
+            let core_id = core_ids[thread_id % core_ids.len()];
+            if thread_affinity::set_thread_affinity([core_id]).is_ok() {
+                log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id);
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    fn set_cpu_affinity(_thread_id: usize) {
+        // CPU affinity is not supported on this platform
     }
     
     /// Get current CPU temperature (requires system monitoring)
     fn get_cpu_temperature() -> Option<f32> {
         let mut sys = System::new_all();
         sys.refresh_components();
+        
         let temps: Vec<f32> = sys.components()
             .iter()
             .filter(|c| c.label().to_lowercase().contains("cpu"))
             .map(|c| c.temperature())
             .collect();
+
+        if temps.is_empty() {
+            log::warn!("🌡️ No CPU temperature sensors found. Thermal throttling is disabled.");
+            return None;
+        }
+
         temps.into_iter()
              .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }

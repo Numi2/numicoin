@@ -11,6 +11,7 @@ pub mod rpc;
 pub mod mempool;
 pub mod secure_storage;
 pub mod config;
+pub mod peer_db;
 
 pub use block::{Block, BlockHeader};
 pub use transaction::{Transaction, TransactionType};
@@ -22,5 +23,6 @@ pub use mempool::TransactionMempool;
 pub use secure_storage::SecureKeyStore;
 pub use config::{Config, NetworkConfig, MiningConfig, RpcConfig, SecurityConfig};
 pub use mining_service::MiningService;
+pub use peer_db::PeerDB;
 
 pub type Result<T> = std::result::Result<T, BlockchainError>; 

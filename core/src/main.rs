@@ -13,12 +13,11 @@ use numi_core::{
     Result,
 };
 use std::path::PathBuf;
-use tokio;
 use fs2::FileExt;
-use hex;
-use bincode;
 use tokio::net::TcpListener;
 use serde::{Serialize, Deserialize};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StatusInfo {
@@ -45,10 +44,7 @@ struct StatusNetworkInfo {
 
 // Helper function to check if a port is available
 async fn is_port_available(port: u16) -> bool {
-    match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    (TcpListener::bind(format!("0.0.0.0:{port}")).await).is_ok()
 }
 
 #[derive(Parser)]
@@ -286,7 +282,7 @@ async fn main() -> Result<()> {
     
     // Validate configuration
     if let Err(e) = config.validate() {
-        eprintln!("❌ Configuration validation failed: {}", e);
+        eprintln!("❌ Configuration validation failed: {e}");
         std::process::exit(1);
     }
 
@@ -296,7 +292,7 @@ async fn main() -> Result<()> {
     let _data_dir_lock = match acquire_data_dir_lock(&config.storage.data_directory) {
         Ok(lock) => lock,
         Err(e) => {
-            eprintln!("❌ Failed to acquire data directory lock: {}", e);
+            eprintln!("❌ Failed to acquire data directory lock: {e}");
             std::process::exit(1);
         }
     };
@@ -375,7 +371,7 @@ async fn load_or_create_config(cli: &Cli) -> Result<Config> {
         match Config::load_from_file(&cli.config) {
             Ok(config) => Ok(config),
             Err(e) => {
-                log::error!("❌ Failed to load configuration: {}", e);
+                log::error!("❌ Failed to load configuration: {e}");
                 log::info!("🔧 Creating default configuration...");
                 create_default_config(&cli.environment)
             }
@@ -386,7 +382,7 @@ async fn load_or_create_config(cli: &Cli) -> Result<Config> {
         
         // Save the default configuration
         if let Err(e) = config.save_to_file(&cli.config) {
-            log::warn!("⚠️ Failed to save default configuration: {}", e);
+            log::warn!("⚠️ Failed to save default configuration: {e}");
         } else {
             log::info!("💾 Default configuration saved to {:?}", cli.config);
         }
@@ -453,7 +449,7 @@ async fn start_full_node(config: Config) -> Result<()> {
     log::info!("✅ Storage initialized at {:?}", config.storage.data_directory);
 
     // Load existing chain or create new one
-    let initial_chain = match NumiBlockchain::load_from_storage_with_config(&*storage, Some(config.consensus.clone())).await {
+    let initial_chain = match NumiBlockchain::load_from_storage_with_config(&storage, Some(config.consensus.clone())).await {
         Ok(chain) => chain,
         Err(_) => {
             log::warn!("🆕 No existing chain found – creating new genesis");
@@ -493,10 +489,10 @@ async fn start_full_node(config: Config) -> Result<()> {
     use tokio::time::{self, Duration};
 
     // ----------------------- Networking ---------------------------
-    let mut network = NetworkManager::new()?;
+    let mut network = NetworkManager::new(blockchain.clone())?;
     let network_addr = format!("/ip4/{}/tcp/{}", config.network.listen_address, config.network.listen_port);
     network.start(&network_addr).await?;
-    log::info!("✅ Network started on {}", network_addr);
+    log::info!("✅ Network started on {network_addr}");
 
     // Spawn the async event-loop so it doesn't block our main task
     let network_handle = network.create_handle();
@@ -533,34 +529,38 @@ async fn start_full_node(config: Config) -> Result<()> {
                              port_to_use, port_to_use + 1, attempt, max_attempts);
                     port_to_use += 1;
                 } else {
-                    log::error!("❌ Could not find available port after {} attempts", max_attempts);
+                    log::error!("❌ Could not find available port after {max_attempts} attempts");
                     return;
                 }
             }
             
             // Start the server on the available port
             if let Err(e) = rpc_server.start(port_to_use).await {
-                log::error!("❌ RPC server failed to start on port {}: {}", port_to_use, e);
+                log::error!("❌ RPC server failed to start on port {port_to_use}: {e}");
             } else {
-                log::info!("✅ RPC server started successfully on port {}", port_to_use);
+                log::info!("✅ RPC server started successfully on port {port_to_use}");
             }
         });
         
         log::info!(
-            "🚀 RPC API server spawned in background on {}:{}",
-            bind_addr,
-            port
+            "🚀 RPC API server spawned in background on {bind_addr}:{port}"
         );
     }
 
     // ----------------------- Mining Service -----------------------
     if config.mining.enabled {
+        let mut wallet_path = config.mining.wallet_path.clone();
+        if !wallet_path.is_absolute() {
+            wallet_path = config.storage.data_directory.join(&wallet_path);
+        }
+
         let mining_service = MiningService::new(
             blockchain.clone(),
             network_handle.clone(),
             config.mining.clone(),
             config.storage.data_directory.clone(),
             config.consensus.target_block_time,
+            wallet_path,
         );
         
         tokio::spawn(async move {
@@ -579,8 +579,8 @@ async fn start_full_node(config: Config) -> Result<()> {
                 log::info!("🛑 Ctrl+C received – beginning graceful shutdown");
 
                 // Flush blockchain state
-                if let Err(e) = blockchain.read().save_to_storage(&*storage) {
-                    log::error!("❌ Failed to persist chain state: {}", e);
+                if let Err(e) = blockchain.read().save_to_storage(&storage) {
+                    log::error!("❌ Failed to persist chain state: {e}");
                 }
 
                 // Background miner tasks will be dropped on shutdown
@@ -644,7 +644,7 @@ async fn mine_block_command(config: Config, threads: Option<usize>, _timeout: u6
             log::info!("🎉 Block mined successfully!");
             log::info!("📊 Block height: {}", result.block.header.height);
             log::info!("🔢 Nonce: {}", result.nonce);
-            log::info!("⏱️ Mining time: {:?}", mining_time);
+            log::info!("⏱️ Mining time: {mining_time:?}");
             log::info!("⚡ Hash rate: {} H/s", result.hash_rate);
             
             // Add block to blockchain
@@ -658,11 +658,38 @@ async fn mine_block_command(config: Config, threads: Option<usize>, _timeout: u6
             log::info!("⏹️ Mining stopped");
         }
         Err(e) => {
-            log::error!("❌ Mining failed: {}", e);
+            log::error!("❌ Mining failed: {e}");
         }
     }
     
     Ok(())
+}
+
+async fn parse_recipient_address(to: &str) -> Result<Vec<u8>> {
+    if to.len() == 64 {
+        // Input is hashed address hex (32 bytes)
+        hex::decode(to)
+            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid address hex: {e}")))
+    } else if to.len() == 128 {
+        // Input is public key hex (64 bytes) - derive address from it
+        let pk_bytes = hex::decode(to)
+            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid public key hex: {e}")))?;
+        if pk_bytes.len() != 64 {
+            return Err(BlockchainError::InvalidTransaction(
+                "Invalid public key length: expected 64 bytes".to_string(),
+            ));
+        }
+        Ok(numi_core::crypto::blake3_hash(&pk_bytes).to_vec())
+    } else if PathBuf::from(to).exists() {
+        // Input is wallet JSON file: load keypair and derive address from public key
+        let file_content = std::fs::read_to_string(to)
+            .map_err(|e| BlockchainError::IoError(format!("Failed to read wallet file: {e}")))?;
+        let keypair: Dilithium3Keypair = serde_json::from_str(&file_content)
+            .map_err(|e| BlockchainError::SerializationError(format!("Invalid wallet file: {e}")))?;
+        Ok(numi_core::crypto::blake3_hash(&keypair.public_key).to_vec())
+    } else {
+        Err(BlockchainError::InvalidTransaction("Invalid recipient address: expected 64-char hashed address, 128-char public key, or wallet file path".to_string()))
+    }
 }
 
 async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: String, amount: u64, fee: Option<u64>, memo: Option<String>) -> Result<()> {
@@ -676,32 +703,7 @@ async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: 
     let sender_keypair = Dilithium3Keypair::load_from_file(&from_key_path)?;
     
     // Parse recipient address - handle different formats like balance command
-    let recipient_address = if to.len() == 64 {
-        // Input is hashed address hex (32 bytes)
-        hex::decode(&to)
-            .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid address hex: {}", e)))?
-    } else if to.len() == 128 {
-        // Input is public key hex (64 bytes) - derive address from it
-        let pk_bytes = hex::decode(&to)
-            .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid public key hex: {}", e)))?;
-        if pk_bytes.len() != 64 {
-            return Err(numi_core::BlockchainError::InvalidTransaction(
-                "Invalid public key length: expected 64 bytes".to_string()
-            ));
-        }
-        numi_core::crypto::blake3_hash(&pk_bytes).to_vec()
-    } else if PathBuf::from(&to).exists() {
-        // Input is wallet JSON file: load keypair and derive address from public key
-        let file_content = std::fs::read_to_string(&to)
-            .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Failed to read wallet file: {}", e)))?;
-        let keypair: Dilithium3Keypair = serde_json::from_str(&file_content)
-            .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid wallet file: {}", e)))?;
-        numi_core::crypto::blake3_hash(&keypair.public_key).to_vec()
-    } else {
-        return Err(numi_core::BlockchainError::InvalidTransaction(format!(
-            "Invalid recipient address: expected 64-char hashed address, 128-char public key, or wallet file path"
-        )));
-    };
+    let recipient_address = parse_recipient_address(&to).await?;
     
     // Validate recipient address length
     if recipient_address.len() != 32 {
@@ -764,7 +766,7 @@ async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: 
     log::info!("✅ Transaction submitted successfully!");
     log::info!("🆔 Transaction ID: {}", transaction.get_hash_hex());
     log::info!("📤 From: {}", hex::encode(&sender_keypair.public_key));
-    log::info!("📥 To: {}", to);
+    log::info!("📥 To: {to}");
     log::info!("💰 Amount: {} NUMI", amount as f64 / 100.0);
     log::info!("💸 Fee: {} NUMI", transaction.fee as f64 / 100.0);  
     
@@ -775,7 +777,7 @@ async fn sign_transaction_command(key_path: PathBuf, to: String, amount: u64, no
     // Load keypair and build transaction
     let keypair = Dilithium3Keypair::load_from_file(&key_path)?;
     let recipient = hex::decode(&to)
-        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid recipient hex: {}", e)))?;
+        .map_err(|e| numi_core::BlockchainError::InvalidTransaction(format!("Invalid recipient hex: {e}")))?;
     let mut tx = Transaction::new(
         keypair.public_key.clone(),
         TransactionType::Transfer { to: recipient, amount, memo: None },
@@ -784,7 +786,7 @@ async fn sign_transaction_command(key_path: PathBuf, to: String, amount: u64, no
     // Sign and serialize signature
     tx.sign(&keypair)?;
     let sig = tx.signature.as_ref().ok_or_else(|| numi_core::BlockchainError::CryptographyError("Missing signature".to_string()))?;
-    let sig_bytes = bincode::serialize(sig).map_err(|e| numi_core::BlockchainError::CryptographyError(format!("Serialize error: {}", e)))?;
+    let sig_bytes = bincode::serialize(sig).map_err(|e| numi_core::BlockchainError::CryptographyError(format!("Serialize error: {e}")))?;
     println!("{}", hex::encode(sig_bytes));
     Ok(())
 }
@@ -840,12 +842,12 @@ async fn show_status_command(config: Config, detailed: bool, format: OutputForma
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&status_info)
                 .map_err(|e| numi_core::BlockchainError::SerializationError(e.to_string()))?;
-            println!("{}", json);
+            println!("{json}");
         }
         OutputFormat::Yaml => {
             let yaml = serde_yaml::to_string(&status_info)
                 .map_err(|e| numi_core::BlockchainError::SerializationError(e.to_string()))?;
-            println!("{}", yaml);
+            println!("{yaml}");
         }
         OutputFormat::Human => {
             println!("Blockchain Status");
@@ -858,7 +860,7 @@ async fn show_status_command(config: Config, detailed: bool, format: OutputForma
             println!("Active miners: {}", status_info.active_miners);
             
             if let Some(hash) = &status_info.latest_block_hash {
-                println!("Latest block hash: {}", hash);
+                println!("Latest block hash: {hash}");
                 println!("Latest block transactions: {}", status_info.latest_block_transactions);
             } else {
                 println!("No blocks found");
@@ -899,12 +901,12 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
         OutputFormat::Human => {
             println!("📊 Account List");
             println!("===============");
-            println!("📈 Total accounts: {}", total_accounts);
-            println!("");
+            println!("📈 Total accounts: {total_accounts}");
+            println!();
             
             for (address, account) in &accounts {
                 let address_str = if full {
-                    hex::encode(&address)
+                    hex::encode(address)
                 } else {
                     hex::encode(&address[..address.len().min(16)])
                 };
@@ -916,7 +918,7 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
                 println!("   Balance: {} NUMI", account.balance as f64 / 100.0);
                 println!("   Nonce: {}", account.nonce);
                 println!("   Transactions: {}", account.transaction_count);
-                println!("");
+                println!();
             }
             
             if !full {
@@ -930,7 +932,7 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
             
             for (address, account) in &accounts {
                 let address_str = if full {
-                    hex::encode(&address)
+                    hex::encode(address)
                 } else {
                     hex::encode(&address[..address.len().min(16)])
                 };
@@ -960,7 +962,7 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
             
             for (address, account) in &accounts {
                 let address_str = if full {
-                    hex::encode(&address)
+                    hex::encode(address)
                 } else {
                     hex::encode(&address[..address.len().min(16)])
                 };
@@ -995,38 +997,13 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
     let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
     // Validate and parse input address
-    let addr_bytes = if address.len() == 64 {
-        // Input is hashed address hex
-        hex::decode(&address)
-            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid address hex: {}", e)))?
-    } else if address.len() == 128 {
-        // Input is public key hex
-        let pk_bytes = hex::decode(&address)
-            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid public key hex: {}", e)))?;
-        if pk_bytes.len() != 64 {
-            return Err(BlockchainError::InvalidTransaction(
-                "Invalid public key length: expected 64 bytes".to_string()
-            ));
-        }
-        numi_core::crypto::blake3_hash(&pk_bytes).to_vec()
-    } else if PathBuf::from(&address).exists() {
-        // Input is wallet JSON file: load keypair and extract public key
-        let file_content = std::fs::read_to_string(&address)
-            .map_err(|e| BlockchainError::InvalidTransaction(format!("Failed to read wallet file: {}", e)))?;
-        let keypair: Dilithium3Keypair = serde_json::from_str(&file_content)
-            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid wallet file: {}", e)))?;
-        numi_core::crypto::blake3_hash(&keypair.public_key).to_vec()
-    } else {
-        return Err(BlockchainError::InvalidTransaction(format!(
-            "Invalid address input: expected 64-char hashed address, 128-char public key, or wallet file path"
-        )));
-    };
+    let addr_bytes = parse_recipient_address(&address).await?;
     let addr_hex = hex::encode(&addr_bytes);
  
     // Get balance
     let balance = blockchain.get_balance(&addr_bytes);
  
-    log::info!("📍 Address: {}", addr_hex);
+    log::info!("📍 Address: {addr_hex}");
     log::info!("💰 Balance: {} NUMI", balance as f64 / 100.0);
     
     // If balance is 0, provide helpful guidance
@@ -1059,7 +1036,7 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
         
         // Iterate through recent blocks to find transactions
         let current_height = blockchain.get_current_height();
-        let start_height = if current_height >= 10 { current_height - 10 } else { 0 };
+        let start_height = current_height.saturating_sub(10);
         
         for height in (start_height..=current_height).rev() {
             if let Some(block) = blockchain.get_block_by_height(height) {
@@ -1109,7 +1086,7 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
         if transaction_count == 0 {
             log::info!("📝 No transactions found for this address");
         } else if transaction_count > max_history {
-            log::info!("📋 Showing {} most recent transactions ({} total)", max_history, transaction_count);
+            log::info!("📋 Showing {max_history} most recent transactions ({transaction_count} total)");
         }
     }
     
@@ -1131,19 +1108,19 @@ async fn init_blockchain_command(config: Config, _force: bool, _genesis_config_p
     let wallet_path = config.storage.data_directory.join("miner-wallet.json");
     let miner_keypair = match Dilithium3Keypair::load_from_file(&wallet_path) {
         Ok(kp) => {
-            log::info!("🔑 Loaded existing miner wallet from {:?}", wallet_path);
+            log::info!("🔑 Loaded existing miner wallet from {wallet_path:?}");
             kp
         }
         Err(_) => {
             let kp = Dilithium3Keypair::new()?;
             kp.save_to_file(&wallet_path)?;
-            log::info!("🔑 Generated new miner wallet at {:?}", wallet_path);
+            log::info!("🔑 Generated new miner wallet at {wallet_path:?}");
             kp
         }
     };
     // Initialize blockchain with specified miner keypair and consensus config
     let blockchain = NumiBlockchain::new_with_config(Some(config.consensus.clone()), Some(miner_keypair))?;
-    log::info!("✅ Blockchain initialized with miner wallet {:?}", wallet_path);
+    log::info!("✅ Blockchain initialized with miner wallet {wallet_path:?}");
     
     // Save initial state and blocks
     blockchain.save_to_storage(&storage)?;
@@ -1166,15 +1143,16 @@ async fn start_rpc_server_command(config: Config) -> Result<()> {
     // Initialize storage and blockchain
     let storage = BlockchainStorage::new(&config.storage.data_directory)?;
     let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
+    let blockchain = Arc::new(RwLock::new(blockchain));
 
     // Initialize network and miner
-    let network_manager = NetworkManager::new()?;
+    let network_manager = NetworkManager::new(blockchain.clone())?;
     let miner = Miner::new()?;
     
     // Create and start RPC server with components
     let rpc_server = RpcServer::with_config_and_components(
         blockchain, 
-        storage, 
+        Arc::new(storage), 
         RateLimitConfig::default(),
         AuthConfig::default(),
         network_manager, 
@@ -1196,16 +1174,16 @@ async fn generate_key_command(output: PathBuf, format: String) -> Result<()> {
             format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----", pem.private_key, pem.public_key)
         }
         "json" => {
-            let json = serde_json::to_string(&keypair)?;
-            json
+            
+            serde_json::to_string(&keypair)?
         }
         _ => {
-            return Err(numi_core::BlockchainError::InvalidArgument(format!("Unsupported key format: {}", format)).into());
+            return Err(numi_core::BlockchainError::InvalidArgument(format!("Unsupported key format: {format}")));
         }
     };
     
     std::fs::write(&output, file_content)?;
-    log::info!("✅ Key pair generated and saved to {:?}", output);
+    log::info!("✅ Key pair generated and saved to {output:?}");
     
     Ok(())
 }
@@ -1217,16 +1195,16 @@ async fn create_config_command(output: PathBuf, env: Environment) -> Result<()> 
     
     let config_content = match config.save_to_file(&output) {
         Ok(_) => {
-            log::info!("✅ Configuration file created at {:?}", output);
-            toml::to_string_pretty(&config).unwrap_or_else(|_| format!("{:#?}", config))
+            log::info!("✅ Configuration file created at {output:?}");
+            toml::to_string_pretty(&config).unwrap_or_else(|_| format!("{config:#?}"))
         }
         Err(e) => {
-            log::error!("❌ Failed to save configuration: {}", e);
+            log::error!("❌ Failed to save configuration: {e}");
             return Err(BlockchainError::IoError(e.to_string()));
         }
     };
     
-    log::info!("📄 Configuration content:\n{}", config_content);
+    log::info!("📄 Configuration content:\n{config_content}");
     
     Ok(())
 }
@@ -1240,7 +1218,7 @@ async fn backup_command(config: Config, output: PathBuf, compress: bool) -> Resu
     // Do the initial backup synchronously (quick metadata copy)
     storage.backup_to_directory(&output)?;
  
-    log::info!("✅ Backup completed successfully to {:?}", output);
+    log::info!("✅ Backup completed successfully to {output:?}");
  
     if compress {
         let compressed_path = output.with_extension("tar.gz");
@@ -1260,7 +1238,7 @@ async fn backup_command(config: Config, output: PathBuf, compress: bool) -> Resu
             Ok(())
         }).await??;
 
-        log::info!("🗜️ Backup compressed to {:?}", compressed_path);
+        log::info!("🗜️ Backup compressed to {compressed_path:?}");
     }
  
     Ok(())
@@ -1290,7 +1268,7 @@ async fn restore_command(config: Config, input: PathBuf, verify: bool) -> Result
         };
 
         if !restore_path.exists() {
-            return Err(BlockchainError::InvalidArgument(format!("Backup path not found: {:?}", restore_path)));
+            return Err(BlockchainError::InvalidArgument(format!("Backup path not found: {restore_path:?}")));
         }
 
         // --------------- Optional verification -------------
@@ -1300,7 +1278,7 @@ async fn restore_command(config: Config, input: PathBuf, verify: bool) -> Result
             for file in essential_files {
                 let file_path = restore_path.join(file);
                 if !file_path.exists() {
-                    return Err(BlockchainError::InvalidBackup(format!("Essential file missing: {}", file)));
+                    return Err(BlockchainError::InvalidBackup(format!("Essential file missing: {file}")));
                 }
             }
             log::info!("✅ Backup integrity verified");
@@ -1339,7 +1317,7 @@ async fn restore_command(config: Config, input: PathBuf, verify: bool) -> Result
         }
 
         log::info!("✅ Restore completed successfully");
-        log::info!("📝 Previous data backed up to {:?}", backup_current);
+        log::info!("📝 Previous data backed up to {backup_current:?}");
 
         // Clean up temporary extraction dir
         if is_compressed {

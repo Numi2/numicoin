@@ -120,7 +120,7 @@ impl RateLimitEntry {
     }
     
     fn is_blocked(&self) -> bool {
-        self.blocked_until.map_or(false, |blocked_until| Instant::now() < blocked_until)
+        self.blocked_until.is_some_and(|blocked_until| Instant::now() < blocked_until)
     }
     
     fn can_make_request(&mut self, config: &RateLimitConfig) -> bool {
@@ -321,6 +321,7 @@ impl RpcServer {
         storage: BlockchainStorage,
         rate_limit_config: RateLimitConfig,
         auth_config: AuthConfig,
+        rpc_config: RpcConfig,
         network_manager: NetworkManager,
         miner: Miner,
     ) -> Result<Self> {
@@ -343,7 +344,7 @@ impl RpcServer {
             rate_limiter: Arc::new(DashMap::new()),
             rate_limit_config,
             _auth_config: auth_config,
-            rpc_config: RpcConfig::default(), // TODO: Should be passed as parameter
+            rpc_config,
             stats: Arc::new(RwLock::new(stats)),
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
@@ -383,7 +384,7 @@ impl RpcServer {
             start_time: Instant::now(),
             blocked_ips: Arc::new(DashMap::new()),
             network_manager: Some(network_manager),
-            miner: miner,
+            miner,
         })
     }
     
@@ -423,7 +424,7 @@ impl RpcServer {
                 .build()
         };
 
-        log::info!("Starting RPC server on port {} with security features enabled", port);
+        log::info!("Starting RPC server on port {port} with security features enabled");
         
         warp::serve(routes.with(cors))
             .run(([0, 0, 0, 0], port))
@@ -664,7 +665,7 @@ async fn decode_hex_field(
         Err(_) => {
             rpc_server.increment_stat("failed_requests").await;
             Err(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Invalid {} hex format", field_name)
+                format!("Invalid {field_name} hex format")
             )))
         }
     }
@@ -696,7 +697,7 @@ async fn handle_status(
             state.total_blocks,
             state.total_supply,
             state.current_difficulty,
-            state.best_block_hash.clone(),
+            state.best_block_hash,
             state.cumulative_difficulty,
             blockchain.get_pending_transaction_count(),
             mempool_stats.total_size_bytes,
@@ -716,7 +717,7 @@ async fn handle_status(
         mempool_size_bytes,
         network_peers,
         is_syncing,
-        chain_work: format!("{}", cumulative_difficulty),
+        chain_work: format!("{cumulative_difficulty}"),
     };
     
     rpc_server.increment_stat("successful_requests").await;
@@ -816,18 +817,18 @@ async fn handle_block(
                 };
                 
                 TransactionSummary {
-                    id: hex::encode(&tx.id),
+                    id: hex::encode(tx.id),
                     from: hex::encode(&tx.from),
                     tx_type,
                     amount: amount as f64 / 1_000_000_000.0,
-                    fee: calculate_transaction_fee(tx) as f64 / 1_000_000_000.0,
+                    fee: calculate_transaction_fee(tx) / 1_000_000_000.0,
                 }
             }).collect();
 
             let response = BlockResponse {
                 height: block.header.height,
-                hash: hex::encode(&block.calculate_hash().unwrap_or([0u8; 32])),
-                previous_hash: hex::encode(&block.header.previous_hash),
+                hash: hex::encode(block.calculate_hash().unwrap_or([0u8; 32])),
+                previous_hash: hex::encode(block.header.previous_hash),
                 timestamp: block.header.timestamp,
                 transactions: transaction_summaries,
                 transaction_count: block.transactions.len(),
@@ -888,7 +889,7 @@ async fn handle_transaction(
         )));
     }
 
-    let tx_id = hex::encode(&transaction.id);
+    let tx_id = hex::encode(transaction.id);
     let mempool_handle = {
         let blockchain_read = rpc_server.blockchain.read();
         blockchain_read.mempool_handle()
@@ -899,7 +900,7 @@ async fn handle_transaction(
         Err(e) => {
             rpc_server.increment_stat("failed_requests").await;
             return Ok(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Transaction processing error: {}", e)
+                format!("Transaction processing error: {e}")
             )));
         }
     };
@@ -915,19 +916,19 @@ async fn handle_transaction(
     let status = match &mempool_result {
         ValidationResult::Valid => "accepted".to_string(),
         ValidationResult::InvalidSignature => "rejected: invalid signature".to_string(),
-        ValidationResult::InvalidNonce { expected, got } => format!("rejected: invalid nonce (expected {}, got {})", expected, got),
-        ValidationResult::InsufficientBalance { required, available } => format!("rejected: insufficient balance (required {}, available {})", required, available),
+        ValidationResult::InvalidNonce { expected, got } => format!("rejected: invalid nonce (expected {expected}, got {got})"),
+        ValidationResult::InsufficientBalance { required, available } => format!("rejected: insufficient balance (required {required}, available {available})"),
         ValidationResult::DuplicateTransaction => "rejected: duplicate transaction".to_string(),
         ValidationResult::TransactionTooLarge => "rejected: transaction too large".to_string(),
-        ValidationResult::FeeTooLow { minimum, got } => format!("rejected: fee too low (minimum {}, got {})", minimum, got),
-        ValidationResult::AccountSpamming { rate_limit } => format!("rejected: account spamming (rate limit: {})", rate_limit),
+        ValidationResult::FeeTooLow { minimum, got } => format!("rejected: fee too low (minimum {minimum}, got {got})"),
+        ValidationResult::AccountSpamming { rate_limit } => format!("rejected: account spamming (rate limit: {rate_limit})"),
         ValidationResult::TransactionExpired => "rejected: transaction expired".to_string(),
     };
 
     let response = TransactionResponse {
         id: tx_id,
         status,
-        validation_result: format!("{:?}", mempool_result),
+        validation_result: format!("{mempool_result:?}"),
     };
 
     rpc_server.increment_stat("successful_requests").await;
@@ -1023,7 +1024,7 @@ async fn handle_mine(
                     "Block mined but failed to add to blockchain".to_string() 
                 },
                 block_height: mining_result.block.header.height,
-                block_hash: hex::encode(&mining_result.block.calculate_hash().unwrap_or([0u8; 32])),
+                block_hash: hex::encode(mining_result.block.calculate_hash().unwrap_or([0u8; 32])),
                 mining_time_ms: mining_time.as_millis() as u64,
                 hash_rate: mining_result.hash_rate,
             };
@@ -1040,7 +1041,7 @@ async fn handle_mine(
         Err(e) => {
             rpc_server.increment_stat("failed_requests").await;
             Ok(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Mining failed: {}", e)
+                format!("Mining failed: {e}")
             )))
         }
     }
@@ -1111,10 +1112,10 @@ async fn handle_rejection(err: Rejection) -> std::result::Result<impl Reply, std
         (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large".to_string())
     } else if err.find::<warp::reject::InvalidHeader>().is_some() {
         (StatusCode::BAD_REQUEST, "Invalid headers".to_string())  
-    } else if err.find::<warp::body::BodyDeserializeError>().is_some() {
-        (StatusCode::BAD_REQUEST, "Invalid request body".to_string())
+    } else if let Some(e) = err.find::<warp::body::BodyDeserializeError>() {
+        (StatusCode::BAD_REQUEST, format!("Invalid request body: {e}"))
     } else {
-        log::error!("Unhandled rejection: {:?}", err);
+        log::error!("Unhandled rejection: {err:?}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
     };
     

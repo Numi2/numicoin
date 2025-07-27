@@ -331,7 +331,7 @@ impl BlockchainStorage {
         if let Some(receiver) = receiver_account {
             // For transfer transactions, update receiver account
             if let crate::transaction::TransactionType::Transfer { to, .. } = &transaction.transaction_type {
-                tx.save_account(&to, receiver)?;
+                tx.save_account(to, receiver)?;
             }
         }
         
@@ -712,7 +712,7 @@ impl BlockchainStorage {
         let backup_path = backup_dir.as_ref();
         
         if !backup_path.exists() {
-            return Err(BlockchainError::StorageError(format!("Backup directory not found: {:?}", backup_path)));
+            return Err(BlockchainError::StorageError(format!("Backup directory not found: {backup_path:?}")));
         }
         
         // Load and validate backup metadata
@@ -766,7 +766,7 @@ impl BlockchainStorage {
         // Test that all required trees exist
         for tree_name in ["blocks", "transactions", "accounts", "chain_state", "checkpoints", "metadata"] {
             test_backup_db.open_tree(tree_name)
-                .map_err(|e| BlockchainError::StorageError(format!("Backup missing tree {}: {e}", tree_name)))?;
+                .map_err(|e| BlockchainError::StorageError(format!("Backup missing tree {tree_name}: {e}")))?;
         }
         
         // Close test database
@@ -796,7 +796,7 @@ impl BlockchainStorage {
         
         log::info!("Database restored successfully from backup created at {}", 
                   backup_metadata.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
-        log::info!("Previous database backed up to {:?}", current_backup_path);
+        log::info!("Previous database backed up to {current_backup_path:?}");
         
         Ok(())
     }
@@ -1166,18 +1166,18 @@ mod tests {
         }
         
         // Test block iterator with limit
-        let mut block_iter = storage.iter_blocks(None, Some(5)).unwrap();
+        let block_iter = storage.iter_blocks(None, Some(5)).unwrap();
         let mut count = 0;
-        while let Some(block_result) = block_iter.next() {
+        for block_result in block_iter {
             assert!(block_result.is_ok());
             count += 1;
         }
         assert_eq!(count, 5);
         
         // Test block iterator with start height
-        let mut block_iter = storage.iter_blocks(Some(5), Some(3)).unwrap();
+        let block_iter = storage.iter_blocks(Some(5), Some(3)).unwrap();
         let mut count = 0;
-        while let Some(block_result) = block_iter.next() {
+        for block_result in block_iter {
             let block = block_result.unwrap();
             assert!(block.header.height >= 5);
             count += 1;

@@ -17,7 +17,7 @@ fi
 
 RECIPIENT="$1"
 AMOUNT="$2"
-AMOUNT_SMALLEST_UNITS=$((AMOUNT * 1000000000))
+AMOUNT_SMALLEST_UNITS=$((AMOUNT * 100))  # Convert to smallest units (1 NUMI = 100 nano)
 
 echo "🔑 Ensuring faucet key has secret..."
 if ! jq -e '.secret_key' "$FAUCET_KEY" >/dev/null 2>&1; then

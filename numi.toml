@@ -62,7 +62,7 @@ enable_firewall = false
 trusted_proxies = []
 
 [storage]
-data_directory = "./dev-data"
+data_directory = "./core-data"
 backup_directory = "./dev-backups"
 max_database_size_mb = 1024
 cache_size_mb = 128
@@ -77,13 +77,13 @@ sync_mode = "Fast"
 difficulty_adjustment_interval = 20
 max_block_size = 524288
 max_transactions_per_block = 100
-min_transaction_fee = 1000
+min_transaction_fee = 1
 max_reorg_depth = 10
 checkpoint_interval = 50
 finality_depth = 100
-genesis_supply = 100000000000000000
+genesis_supply = 1000
 mining_reward_halving_interval = 1000000
-initial_mining_reward = 10000000000
+initial_mining_reward = 1000
 
 [consensus.target_block_time]
 secs = 10

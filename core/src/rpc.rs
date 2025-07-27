@@ -584,6 +584,8 @@ impl RpcServer {
             .and(auth_admin.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_stats);
+            
+
         
         // Auth route for getting a JWT
         let login_route = warp::path("login")
@@ -792,7 +794,7 @@ async fn handle_status(
     
     let response = StatusResponse {
         total_blocks,
-        total_supply: total_supply as f64 / 1_000_000_000.0,
+                    total_supply: total_supply as f64 / 100.0,
         current_difficulty,
         best_block_hash: hex::encode(best_block_hash),
         mempool_transactions,
@@ -1221,6 +1223,7 @@ async fn handle_login(
         Err(warp::reject::custom(Unauthorized))
     }
 }
+
 
 
 /// Global error handler for rejections

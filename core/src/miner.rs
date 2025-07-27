@@ -160,7 +160,11 @@ impl Miner {
     /// Create new miner with custom configuration
     pub fn with_config(config: MiningConfig) -> Result<Self> {
         let keypair = Dilithium3Keypair::new()?;
-        
+        Self::with_config_and_keypair(config, keypair)
+    }
+    
+    /// Create new miner with custom configuration and specific keypair
+    pub fn with_config_and_keypair(config: MiningConfig, keypair: Dilithium3Keypair) -> Result<Self> {
         let stats = MiningStats {
             hash_rate: 0,
             total_hashes: 0,
@@ -619,7 +623,8 @@ impl Miner {
     /// Calculate block subsidy based on Bitcoin-like halving schedule
     fn calculate_block_reward(height: u64) -> u64 {
         const HALVING_INTERVAL: u64 = 210_000;
-        const INITIAL_REWARD: u64 = 50_000_000_000; // 50 NUMI ( * 10^9 )
+        // 10 NUMI = 1000 NANO (1 NUMI = 100 NANO)
+        const INITIAL_REWARD: u64 = 1000; // 10 NUMI in NANO units
 
         let halvings = height / HALVING_INTERVAL;
         if halvings >= 64 {

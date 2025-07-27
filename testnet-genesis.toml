@@ -5,12 +5,12 @@
 # Genesis block configuration
 height = 0
 difficulty = 1
-timestamp = "2024-01-01T00:00:00Z"
+timestamp = "2025-07-04T13:33:37Z"
 
 # Testnet-specific parameters
 network_name = "numi-testnet"
 network_version = "1.0.0"
-chain_id = "testnet-2024"
+chain_id = "testnet-2025"
 
 [genesis.accounts]
 # Pre-funded test accounts for development and testing

@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NumiCoin - One-Click Mining</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .hero {
+            text-align: center;
+            color: white;
+            margin-bottom: 3rem;
+        }
+
+        .hero h1 {
+            font-size: 3.5rem;
+            margin-bottom: 1rem;
+            font-weight: 700;
+        }
+
+        .hero p {
+            font-size: 1.3rem;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+
+        .downloads {
+            background: white;
+            border-radius: 20px;
+            padding: 3rem;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            margin-bottom: 3rem;
+        }
+
+        .downloads h2 {
+            text-align: center;
+            margin-bottom: 2rem;
+            color: #333;
+            font-size: 2rem;
+        }
+
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .download-card {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 2rem;
+            text-align: center;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .download-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+            border-color: #667eea;
+        }
+
+        .download-card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: #333;
+        }
+
+        .download-card .icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+
+        .download-btn {
+            display: inline-block;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            padding: 1rem 2rem;
+            text-decoration: none;
+            border-radius: 50px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            margin-top: 1rem;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin: 3rem 0;
+        }
+
+        .feature {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 2rem;
+            color: white;
+        }
+
+        .feature h3 {
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+        }
+
+        .stats {
+            text-align: center;
+            color: white;
+            margin: 3rem 0;
+        }
+
+        .stats h3 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .security-note {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 10px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        .security-note h4 {
+            color: #856404;
+            margin-bottom: 0.5rem;
+        }
+
+        .security-note p {
+            color: #856404;
+            margin: 0;
+        }
+
+        .footer {
+            text-align: center;
+            color: rgba(255,255,255,0.8);
+            margin-top: 3rem;
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.5rem; }
+            .hero p { font-size: 1.1rem; }
+            .downloads { padding: 2rem; }
+            .container { padding: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="hero">
+            <h1>⛏️ NumiCoin Mining</h1>
+            <p>Start mining cryptocurrency in 30 seconds. No setup, no configuration required.</p>
+        </div>
+
+        <div class="downloads">
+            <h2>🚀 Download One-Click Miner</h2>
+            
+            <div class="download-grid">
+                <div class="download-card">
+                    <div class="icon">🪟</div>
+                    <h3>Windows</h3>
+                    <p>Windows 10/11<br>Intel & AMD CPUs</p>
+                    <a href="/downloads/NumiCoin-Miner-Windows.exe" class="download-btn" 
+                       onclick="trackDownload('Windows')">
+                        Download .exe
+                    </a>
+                </div>
+
+                <div class="download-card">
+                    <div class="icon">🐧</div>
+                    <h3>Linux</h3>
+                    <p>Ubuntu, Debian, CentOS<br>x86_64 architecture</p>
+                    <a href="/downloads/NumiCoin-Miner-Linux" class="download-btn"
+                       onclick="trackDownload('Linux')">
+                        Download
+                    </a>
+                </div>
+
+                <div class="download-card">
+                    <div class="icon">🍎</div>
+                    <h3>macOS Intel</h3>
+                    <p>macOS 10.15+<br>Intel Macs</p>
+                    <a href="/downloads/NumiCoin-Miner-macOS-Intel" class="download-btn"
+                       onclick="trackDownload('macOS-Intel')">
+                        Download
+                    </a>
+                </div>
+
+                <div class="download-card">
+                    <div class="icon">💻</div>
+                    <h3>macOS ARM</h3>
+                    <p>macOS 11.0+<br>Apple M1/M2/M3</p>
+                    <a href="/downloads/NumiCoin-Miner-macOS-ARM" class="download-btn"
+                       onclick="trackDownload('macOS-ARM')">
+                        Download
+                    </a>
+                </div>
+            </div>
+
+            <div class="security-note">
+                <h4>🔒 Security Notice</h4>
+                <p>If your antivirus blocks the download, click "Allow" or "More info → Run anyway". 
+                   Our miners are safe but may trigger false positives due to mining algorithms.</p>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>🔑 Auto Wallet Creation</h3>
+                <p>Your personal wallet is created automatically. Keep the wallet file safe - it contains your private keys!</p>
+            </div>
+
+            <div class="feature">
+                <h3>⚡ Instant Mining</h3>
+                <p>Start earning immediately. Uses all your CPU cores for maximum mining efficiency.</p>
+            </div>
+
+            <div class="feature">
+                <h3>🌐 P2P Network</h3>
+                <p>Connects to other miners worldwide. Your blocks are shared with the global network.</p>
+            </div>
+
+            <div class="feature">
+                <h3>💾 Auto Save</h3>
+                <p>Everything is saved automatically. Your progress and earnings are never lost.</p>
+            </div>
+
+            <div class="feature">
+                <h3>📊 Real-time Stats</h3>
+                <p>Watch your balance grow in real-time. See mining progress, difficulty, and peer count.</p>
+            </div>
+
+            <div class="feature">
+                <h3>🔒 Quantum Safe</h3>
+                <p>Uses post-quantum cryptography (Dilithium3) to protect against future quantum computers.</p>
+            </div>
+        </div>
+
+        <div class="stats">
+            <h3>How It Works</h3>
+            <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); border-radius: 15px; padding: 2rem; margin-top: 2rem;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 2rem; text-align: center;">
+                    <div>
+                        <div style="font-size: 2rem; margin-bottom: 0.5rem;">1️⃣</div>
+                        <strong>Download</strong><br>
+                        Get the miner for your OS
+                    </div>
+                    <div>
+                        <div style="font-size: 2rem; margin-bottom: 0.5rem;">2️⃣</div>
+                        <strong>Double-Click</strong><br>
+                        Run the executable
+                    </div>
+                    <div>
+                        <div style="font-size: 2rem; margin-bottom: 0.5rem;">3️⃣</div>
+                        <strong>Start Mining</strong><br>
+                        Earn NumiCoin automatically
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Total file size: ~6MB | No installation required | Works offline</p>
+            <p style="margin-top: 1rem;">
+                <a href="https://github.com/your-username/numicoin" style="color: rgba(255,255,255,0.8);">View Source Code</a> |
+                <a href="https://github.com/your-username/numicoin/issues" style="color: rgba(255,255,255,0.8);">Report Issues</a> |
+                <a href="/checksums.txt" style="color: rgba(255,255,255,0.8);">Verify Downloads</a>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        function trackDownload(platform) {
+            // Track download analytics (optional)
+            console.log('Download started for platform:', platform);
+            
+            // You can add analytics tracking here
+            // gtag('event', 'download', { 'platform': platform });
+        }
+
+        // Display real-time stats if available
+        async function updateStats() {
+            try {
+                // Replace with your actual API endpoint
+                // const response = await fetch('/api/stats');
+                // const stats = await response.json();
+                // Update UI with stats
+            } catch (error) {
+                console.log('Stats not available');
+            }
+        }
+
+        // Update stats every 30 seconds
+        setInterval(updateStats, 30000);
+        updateStats();
+    </script>
+</body>
+</html> 

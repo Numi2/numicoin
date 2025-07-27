@@ -3,6 +3,19 @@ name = "numi-core"
 version = "0.1.0"
 edition = "2021"
 
+# Multiple binaries
+[[bin]]
+name = "numi-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "numi-one-click"
+path = "src/one_click_miner.rs"
+
+[[bin]]
+name = "numi-one-click-networked"
+path = "src/one_click_miner_networked.rs"
+
 [dependencies]
 
 pqcrypto-dilithium = { version = "0.5", optional = true } # Temporary quantum-safe crypto
@@ -75,6 +88,7 @@ num-traits = "0.2"
 core_affinity = "0.6"
 sysinfo = "0.26"
 jsonwebtoken = "8"
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 criterion = "0.5"

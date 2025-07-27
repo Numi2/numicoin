@@ -431,7 +431,7 @@ For development and testing:
 ./core/target/release/numi-core generate-key --output new_validator_key.json
 
 # Submit a staking transaction
-./core/target/release/numi-core stake --from-key new_validator_key.json --amount 100000
+./core/target/release/numi-core stake --from-key new_validator_key.json --amount 10000
 
 # Check validator status
 ./core/target/release/numi-core validator-status --address <validator_address>

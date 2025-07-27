@@ -265,7 +265,27 @@ pub struct NumiBlockchain {
 impl NumiBlockchain {
     /// Create new blockchain with genesis block and enhanced security
     pub fn new() -> Result<Self> {
-        let miner_keypair = Dilithium3Keypair::new()?;
+        Self::new_with_keypair(None)
+    }
+
+    /// Create new blockchain with optional keypair
+    pub fn new_with_keypair(keypair: Option<Dilithium3Keypair>) -> Result<Self> {
+        let miner_keypair = if let Some(kp) = keypair {
+            kp
+        } else {
+            // Try to load from default wallet file first, fall back to new keypair
+            let default_wallet_path = "miner-wallet.json";
+            match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
+                Ok(kp) => {
+                    log::info!("🔑 Loaded existing miner wallet from {}", default_wallet_path);
+                    kp
+                }
+                Err(_) => {
+                    log::info!("🔑 Creating new miner keypair (no existing wallet found at {})", default_wallet_path);
+                    crate::crypto::Dilithium3Keypair::new()?
+                }
+            }
+        };
         
         let blockchain = Self {
             blocks: Arc::new(DashMap::new()),
@@ -322,7 +342,19 @@ impl NumiBlockchain {
     
     /// Load blockchain from storage with validation
     pub async fn load_from_storage(storage: &crate::storage::BlockchainStorage) -> Result<Self> {
-        let miner_keypair = Dilithium3Keypair::new()?;
+        // Try to load from default wallet file first, fall back to new keypair
+        let default_wallet_path = "miner-wallet.json";
+        let miner_keypair = match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
+            Ok(kp) => {
+                log::info!("🔑 Loaded existing miner wallet from {}", default_wallet_path);
+                kp
+            }
+            Err(_) => {
+                log::info!("🔑 Creating new miner keypair (no existing wallet found at {})", default_wallet_path);
+                crate::crypto::Dilithium3Keypair::new()?
+            }
+        };
+        
         let mempool = Arc::new(TransactionMempool::new());
         
         let mut blockchain = Self {
@@ -372,11 +404,8 @@ impl NumiBlockchain {
             }
         }
         
-        // Load account states
-        let accounts = storage.iter_accounts(None, None)?.collect::<Result<Vec<_>>>()?;
-        for (pubkey, account_state) in accounts {
-            blockchain.accounts.insert(pubkey, account_state);
-        }
+        // Don't load account states from storage - they should be derived from the blockchain
+        // Account states will be rebuilt by replaying all transactions
         
         // Load checkpoints
         if let Some(saved_checkpoints) = storage.load_checkpoints()? {
@@ -385,9 +414,20 @@ impl NumiBlockchain {
             }
         }
         
-        // Load chain state
-        if let Some(saved_state) = storage.load_chain_state()? {
+        // Rebuild account states from the blockchain by replaying all transactions
+        blockchain.rebuild_account_states().await?;
+        
+        // Recalculate total supply from all blocks to ensure accuracy
+        let recalculated_total_supply = blockchain.recalculate_total_supply().await?;
+        
+        // Load chain state but override total_supply with recalculated value
+        if let Some(mut saved_state) = storage.load_chain_state()? {
+            saved_state.total_supply = recalculated_total_supply;
             *blockchain.state.write() = saved_state;
+        } else {
+            // If no saved state, update the default state with recalculated total supply
+            let mut state = blockchain.state.write();
+            state.total_supply = recalculated_total_supply;
         }
         
         // Validate the loaded blockchain
@@ -395,7 +435,9 @@ impl NumiBlockchain {
             return Err(BlockchainError::InvalidBlock("Loaded blockchain failed validation".to_string()));
         }
         
-        log::info!("✅ Blockchain loaded from storage with {} blocks", blockchain.get_current_height());
+        log::info!("✅ Blockchain loaded from storage with {} blocks and {} NUMI total supply", 
+                  blockchain.get_current_height(), 
+                  recalculated_total_supply as f64 / 100.0);
         Ok(blockchain)
     }
 
@@ -856,13 +898,17 @@ impl NumiBlockchain {
     
     /// Create genesis block
     fn create_genesis_block(&mut self) -> Result<()> {
+        log::info!("🔑 Creating genesis block with miner public key: {} (length: {})", 
+                  hex::encode(&self.miner_keypair.public_key), 
+                  self.miner_keypair.public_key.len());
+        
         let genesis_transactions = vec![
-            // Genesis supply allocation
+            // Genesis block mining reward (same as other blocks)
             Transaction::new(
                 self.miner_keypair.public_key.clone(),
                 TransactionType::MiningReward {
                     block_height: 0,
-                    amount: 100_000_000_000_000_000, // 100M NUMI * 10^9 (total supply)
+                    amount: 1000, // 10 NUMI = 1000 NANO
                     pool_address: None,
                 },
                 0,
@@ -881,9 +927,16 @@ impl NumiBlockchain {
         genesis_block.sign(&self.miner_keypair)?;
         self.genesis_hash = genesis_block.calculate_hash()?;
         
-        // Process genesis block
-        futures::executor::block_on(self.process_block_internal(genesis_block, false))?;
-        
+        // Process genesis block (add to index, but transaction not applied automatically)
+        futures::executor::block_on(self.process_block_internal(genesis_block.clone(), false))?;
+        // Manually connect genesis block to main chain to apply genesis reward
+        let genesis_block_for_connect = genesis_block.clone();
+        futures::executor::block_on(async {
+            self.connect_block_to_main_chain(&genesis_block_for_connect).await?;
+            self.update_chain_state_after_reorg(self.genesis_hash).await?;
+            Ok::<(), BlockchainError>(())
+        })?;
+
         log::info!("🌱 Genesis block created: {}", hex::encode(&self.genesis_hash));
         Ok(())
     }
@@ -995,8 +1048,15 @@ impl NumiBlockchain {
     async fn apply_transaction(&self, transaction: &Transaction) -> Result<()> {
         let sender_key = transaction.from.clone();
         
-        // Get or create sender account
-        let mut sender_state = self.accounts.get(&sender_key)
+        // Derive address from public key (first 64 bytes of hash)
+        let address = self.derive_address(&sender_key);
+        
+        log::debug!("🔍 Applying transaction with sender key: {} (length: {}) -> address: {}", 
+                   hex::encode(&sender_key[..sender_key.len().min(32)]), sender_key.len(), 
+                   hex::encode(&address));
+        
+        // Get or create sender account using address
+        let mut sender_state = self.accounts.get(&address)
             .map(|state| state.clone())
             .unwrap_or_default();
         
@@ -1008,8 +1068,11 @@ impl NumiBlockchain {
                 sender_state.transaction_count += 1;
                 sender_state.total_sent += amount;
                 
+                // Derive recipient address
+                let recipient_address = self.derive_address(to);
+                
                 // Add to recipient
-                let mut recipient_state = self.accounts.get(to)
+                let mut recipient_state = self.accounts.get(&recipient_address)
                     .map(|state| state.clone())
                     .unwrap_or_else(|| AccountState {
                         balance: 0,
@@ -1024,16 +1087,20 @@ impl NumiBlockchain {
                 recipient_state.balance += amount;
                 recipient_state.total_received += amount;
                 
-                self.accounts.insert(to.clone(), recipient_state);
+                self.accounts.insert(recipient_address, recipient_state);
             }
             
             TransactionType::MiningReward { amount, .. } => {
+                log::info!("💰 Applying mining reward: {} NUMI to {}", 
+                          *amount as f64 / 100.0, 
+                          hex::encode(&sender_key[..sender_key.len().min(16)]));
                 sender_state.balance += amount;
                 sender_state.total_received += amount;
                 
                 // Update total supply
                 let mut state = self.state.write();
                 state.total_supply += amount;
+                log::info!("💰 Updated total supply to: {} NUMI", state.total_supply as f64 / 100.0);
             }
             
 
@@ -1043,7 +1110,8 @@ impl NumiBlockchain {
             }
         }
         
-        self.accounts.insert(sender_key, sender_state);
+        self.accounts.insert(address, sender_state);
+        log::info!("✅ Transaction applied successfully");
         Ok(())
     }
     
@@ -1281,10 +1349,8 @@ impl NumiBlockchain {
             storage.save_block(&entry.block)?;
         }
         
-        // Save all accounts
-        for entry in self.accounts.iter() {
-            storage.save_account(entry.key(), &entry.value())?;
-        }
+        // Don't save account states - they should be derived from the blockchain
+        // Account states will be rebuilt by replaying all transactions when loading
         
         // Save checkpoints
         storage.save_checkpoints(&self.checkpoints.read().clone())?;
@@ -1358,11 +1424,36 @@ impl NumiBlockchain {
             .ok_or_else(|| BlockchainError::BlockNotFound("Account not found".to_string()))
     }
     
+    /// Derive address from public key (32 bytes of hash)
+    fn derive_address(&self, public_key: &[u8]) -> Vec<u8> {
+        use blake3::Hasher;
+        let mut hasher = Hasher::new();
+        hasher.update(public_key);
+        let hash = hasher.finalize();
+        hash.as_bytes().to_vec()
+    }
+    
     /// Get account balance
     pub fn get_balance(&self, public_key: &[u8]) -> u64 {
-        self.accounts.get(public_key)
+        // Determine if this is a public key or an address
+        let address = if public_key.len() == 32 {
+            // This is already an address (32 bytes)
+            public_key.to_vec()
+        } else {
+            // This is a public key, derive the address
+            self.derive_address(public_key)
+        };
+        
+        let balance = self.accounts.get(&address)
             .map(|state| state.balance)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        
+        log::debug!("🔍 Balance lookup for {} -> address {}: {} NUMI", 
+                   hex::encode(&public_key[..public_key.len().min(16)]), 
+                   hex::encode(&address),
+                   balance as f64 / 100.0);
+        
+        balance
     }
     
     /// Get mining reward for given height
@@ -1375,8 +1466,8 @@ impl NumiBlockchain {
             return 0; // No more rewards after 64 halvings
         }
         
-        // Initial reward: 50 NUMI
-        let initial_reward = 50_000_000_000u64; // 50 * 10^9
+        // Initial reward: 10 NUMI = 1000 NANO
+        let initial_reward = 1000u64; // 10 NUMI in NANO units
         initial_reward >> halvings // Divide by 2^halvings
     }
     
@@ -2214,5 +2305,96 @@ impl NumiBlockchain {
     /// Get a clone of the transaction mempool handle for use without holding locks
     pub fn mempool_handle(&self) -> Arc<TransactionMempool> {
         Arc::clone(&self.mempool)
+    }
+
+    /// Recalculate total supply from all blocks in the main chain
+    async fn recalculate_total_supply(&self) -> Result<u64> {
+        let mut total_supply = 0u64;
+        let main_chain = self.main_chain.read();
+        
+        log::info!("🔍 Recalculating total supply from {} blocks in main chain", main_chain.len());
+        
+        for (i, &block_hash) in main_chain.iter().enumerate() {
+            if let Some(block_meta) = self.blocks.get(&block_hash) {
+                log::info!("🔍 Block {} (height {}): {} transactions", i, block_meta.height, block_meta.block.transactions.len());
+                for (j, transaction) in block_meta.block.transactions.iter().enumerate() {
+                    if let TransactionType::MiningReward { amount, .. } = &transaction.transaction_type {
+                        log::info!("💰 Found mining reward in block {} transaction {}: {} NUMI", i, j, *amount as f64 / 100.0);
+                        total_supply += amount;
+                    }
+                }
+            } else {
+                log::warn!("⚠️ Block hash {} not found in blocks map", hex::encode(&block_hash));
+            }
+        }
+        
+        log::info!("💰 Recalculated total supply: {} NUMI", total_supply as f64 / 100.0);
+        Ok(total_supply)
+    }
+
+    /// Public function to manually recalculate and update total supply (for debugging)
+    pub async fn recalculate_and_update_total_supply(&self) -> Result<u64> {
+        let recalculated_supply = self.recalculate_total_supply().await?;
+        let mut state = self.state.write();
+        state.total_supply = recalculated_supply;
+        log::info!("✅ Updated total supply to: {} NUMI", recalculated_supply as f64 / 100.0);
+        Ok(recalculated_supply)
+    }
+    
+    /// Rebuild account states by replaying all transactions from the blockchain
+    pub async fn rebuild_account_states(&self) -> Result<()> {
+        log::info!("🔄 Rebuilding account states from blockchain...");
+        
+        // Clear existing account states
+        self.accounts.clear();
+        
+        // Get all blocks in height order
+        let main_chain = self.main_chain.read();
+        let mut total_supply = 0u64;
+        
+        for (height, block_hash) in main_chain.iter().enumerate() {
+            if let Some(block_meta) = self.blocks.get(block_hash) {
+                let block = &block_meta.block;
+                log::debug!("🔍 Processing block {} (height {}) with {} transactions", 
+                           hex::encode(&block_hash[..8]), height, block.transactions.len());
+                
+                // Process all transactions in this block
+                for (tx_index, transaction) in block.transactions.iter().enumerate() {
+                    log::debug!("  Processing transaction {} in block {}", tx_index, height);
+                    
+                    // Apply transaction to rebuild account state
+                    self.apply_transaction(transaction).await?;
+                    
+                    // Track total supply for mining rewards
+                    if let TransactionType::MiningReward { amount, .. } = &transaction.transaction_type {
+                        total_supply += amount;
+                        log::debug!("💰 Mining reward in block {}: {} NUMI (total: {} NUMI)", 
+                                   height, *amount as f64 / 100.0, total_supply as f64 / 100.0);
+                    }
+                }
+            }
+        }
+        
+        log::info!("✅ Account states rebuilt from {} blocks", main_chain.len());
+        log::info!("💰 Total supply from blockchain: {} NUMI", total_supply as f64 / 100.0);
+        log::info!("📊 Total accounts in memory: {}", self.accounts.len());
+        
+        // Debug: List all accounts
+        for entry in self.accounts.iter() {
+            let (pubkey, account) = entry.pair();
+            log::info!("  Account {} ({}...): {} NUMI", 
+                      hex::encode(&pubkey), 
+                      hex::encode(&pubkey[..pubkey.len().min(8)]),
+                      account.balance as f64 / 100.0);
+        }
+        
+        Ok(())
+    }
+
+    /// Get all accounts with their balances (for CLI display)
+    pub fn get_all_accounts(&self) -> Vec<(Vec<u8>, AccountState)> {
+        self.accounts.iter()
+            .map(|item| (item.key().clone(), item.value().clone()))
+            .collect()
     }
 } 

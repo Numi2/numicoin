@@ -248,6 +248,7 @@ pub struct MiningConfig {
     pub argon2_config: Argon2Config,
     pub target_block_time_secs: u64,
     pub difficulty_adjustment_interval: u64,
+    pub wallet_path: PathBuf,
 }
 
 impl Default for MiningConfig {
@@ -265,6 +266,7 @@ impl Default for MiningConfig {
             argon2_config: Argon2Config::default(),
             target_block_time_secs: 30,
             difficulty_adjustment_interval: 144,
+            wallet_path: PathBuf::from("miner-wallet.json"),
         }
     }
 }
@@ -694,9 +696,9 @@ impl Default for ConsensusConfig {
             max_reorg_depth: 144,
             checkpoint_interval: 1000,
             finality_depth: 2016,
-            genesis_supply: 100_000_000_000_000_000, // 100M NUMI
+            genesis_supply: 50_000_000_000, // 50 NUMI (same as other blocks)
             mining_reward_halving_interval: 1_000_000,
-            initial_mining_reward: 10_000_000_000, // 10 NUMI
+            initial_mining_reward: 50_000_000_000, // 50 NUMI
         }
     }
 }
@@ -733,9 +735,9 @@ impl ConsensusConfig {
             max_reorg_depth: 20,
             checkpoint_interval: 100,
             finality_depth: 200,
-            genesis_supply: 100_000_000_000_000_000, // 100M NUMI for testnet
+            genesis_supply: 50_000_000_000, // 50 NUMI (same as other blocks)
             mining_reward_halving_interval: 1_000_000, // 1M blocks halving for testnet
-            initial_mining_reward: 10_000_000_000, // 10 NUMI initial reward
+            initial_mining_reward: 50_000_000_000, // 50 NUMI initial reward
             ..Default::default()
         }
     }

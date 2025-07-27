@@ -134,7 +134,7 @@ fi
 
 RECIPIENT=$1
 AMOUNT=$2
-AMOUNT_SMALLEST_UNITS=$((AMOUNT * 1000000000))  # Convert to smallest units
+AMOUNT_SMALLEST_UNITS=$((AMOUNT * 100))  # Convert to smallest units (1 NUMI = 100 nano)
 
 echo "🚰 Sending $AMOUNT NUMI to $RECIPIENT..."
 

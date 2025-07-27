@@ -10,16 +10,16 @@ pub type TransactionId = [u8; 32];
 pub const MAX_TRANSACTION_SIZE: usize = 1024 * 1024; // 1MB
 
 /// Minimum transaction fee in smallest units (prevent spam)
-pub const MIN_TRANSACTION_FEE: u64 = 1_000; // 0.000001 NUMI
+pub const MIN_TRANSACTION_FEE: u64 = 1; // 1 NANO
 
 /// Maximum transaction fee (prevent accidents)
-pub const MAX_TRANSACTION_FEE: u64 = 1_000_000_000_000; // 1000 NUMI
+pub const MAX_TRANSACTION_FEE: u64 = 100000; // 1000 NUMI
 
 /// Fee per byte for standard transactions
-pub const STANDARD_FEE_PER_BYTE: u64 = 100; // 0.0000001 NUMI per byte
+pub const STANDARD_FEE_PER_BYTE: u64 = 1; // 1 NANO per byte
 
 /// Base fee for all transactions
-pub const BASE_TRANSACTION_FEE: u64 = 10_000; // 0.00001 NUMI
+pub const BASE_TRANSACTION_FEE: u64 = 1; // 1 NANO
 
 /// Maximum transaction validity period in seconds
 pub const MAX_TRANSACTION_VALIDITY: u64 = 3600; // 1 hour

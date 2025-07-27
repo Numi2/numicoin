@@ -16,6 +16,7 @@ rate_limit_per_peer = 1000
 
 [mining]
 enabled = true
+wallet_path = "./miner-wallet.json"
 thread_count = 8
 nonce_chunk_size = 5000
 stats_update_interval_secs = 5
@@ -84,9 +85,9 @@ min_transaction_fee = 1
 max_reorg_depth = 10
 checkpoint_interval = 20
 finality_depth = 50
-genesis_supply = 100000000000000000
+genesis_supply = 1000
 mining_reward_halving_interval = 1000000
-initial_mining_reward = 10000000000
+initial_mining_reward = 1000
 
 [consensus.target_block_time]
 secs = 1

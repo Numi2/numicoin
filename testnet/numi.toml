@@ -87,13 +87,13 @@ sync_mode = "Normal"
 difficulty_adjustment_interval = 30
 max_block_size = 1048576
 max_transactions_per_block = 500
-min_transaction_fee = 500
+min_transaction_fee = 1
 max_reorg_depth = 20
 checkpoint_interval = 100
 finality_depth = 200
-genesis_supply = 100000000000000000
+genesis_supply = 100000
 mining_reward_halving_interval = 1000000
-initial_mining_reward = 10000000000
+initial_mining_reward = 1000
 
 [consensus.target_block_time]
 secs = 15

@@ -1,0 +1,174 @@
+name: Build and Release NumiCoin One-Click Miner
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.0.0
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            name: NumiCoin-Miner-Windows.exe
+            
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: NumiCoin-Miner-Linux
+            
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: NumiCoin-Miner-macOS-Intel
+            
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: NumiCoin-Miner-macOS-ARM
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Install cross-compilation tools
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-mingw-w64-x86-64
+        cargo install cross --git https://github.com/cross-rs/cross
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build binary
+      working-directory: core
+      run: |
+        if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          cross build --release --target ${{ matrix.target }} --bin numi-one-click
+        else
+          cargo build --release --target ${{ matrix.target }} --bin numi-one-click
+        fi
+
+    - name: Prepare artifact
+      working-directory: core
+      run: |
+        mkdir -p ../artifacts
+        if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+          cp target/${{ matrix.target }}/release/numi-one-click.exe ../artifacts/${{ matrix.name }}
+        else
+          cp target/${{ matrix.target }}/release/numi-one-click ../artifacts/${{ matrix.name }}
+          chmod +x ../artifacts/${{ matrix.name }}
+        fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.name }}
+        path: artifacts/${{ matrix.name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: releases
+
+    - name: Organize release files
+      run: |
+        mkdir -p dist
+        find releases -name "NumiCoin-Miner-*" -exec cp {} dist/ \;
+        ls -la dist/
+
+    - name: Generate checksums
+      run: |
+        cd dist
+        sha256sum * > checksums.txt
+        echo "Checksums generated:"
+        cat checksums.txt
+
+    - name: Create release notes
+      run: |
+        cat > RELEASE_NOTES.md << EOF
+        # NumiCoin One-Click Miner Release
+        
+        ## 🚀 Quick Start
+        
+        1. **Download** the file for your operating system:
+           - **Windows**: \`NumiCoin-Miner-Windows.exe\`
+           - **Linux**: \`NumiCoin-Miner-Linux\`
+           - **macOS Intel**: \`NumiCoin-Miner-macOS-Intel\`
+           - **macOS ARM (M1/M2)**: \`NumiCoin-Miner-macOS-ARM\`
+        
+        2. **Run** - Just double-click and start mining immediately!
+        
+        ## ✅ What This Does
+        
+        - Creates your personal wallet automatically
+        - Starts mining NumiCoin with your CPU
+        - Shows real-time progress and earnings
+        - Saves everything safely to disk
+        
+        ## 🔒 Security
+        
+        - Verify downloads using \`checksums.txt\`
+        - Keep your wallet file (\`my-wallet.json\`) safe!
+        - Your private keys never leave your computer
+        
+        ## 💡 System Requirements
+        
+        - Modern CPU (more cores = faster mining)
+        - ~100MB free disk space
+        - No installation required!
+        
+        ## 🆘 Need Help?
+        
+        - Open an [issue](https://github.com/${{ github.repository }}/issues) if you have problems
+        - Check the included README.txt for more details
+        
+        **Build Date**: $(date)  
+        **Commit**: ${{ github.sha }}
+        EOF
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/*
+        body_path: RELEASE_NOTES.md
+        name: "NumiCoin One-Click Miner ${{ github.ref_name }}"
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload to release assets
+      run: |
+        echo "✅ Release created successfully!"
+        echo "📥 Users can now download from:"
+        echo "https://github.com/${{ github.repository }}/releases/latest" 

@@ -63,11 +63,18 @@ temp/
 *.tmp
 *.temp
 
+# Large backup files
+*.tar.gz
+*.tar
+*.zip
+*.7z
+
 # Blockchain data
 chain_data/
 blockchain.db
 keys/
 wallets/
+*wallet*.json
 
 # Testing
 coverage/

@@ -1,7 +1,7 @@
 # Denomination Change: 1 NUMI = 100 nano
 
 ## Overview
-The NumiCoin denomination has been changed from **1 NUMI = 1,000,000,000 nano** to **1 NUMI = 100 nano**.
+The NumiCoin denomination has been   **1 NUMI = 100 nano**.
 
 ## Changes Made
 

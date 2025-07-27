@@ -184,6 +184,8 @@ pub struct SecureKeyStore {
     keys: HashMap<String, EncryptedKeyEntry>,
     /// Master password hash for verification
     password_hash: Option<Hash>,
+    /// Salt used for master password derivation
+    password_salt: Vec<u8>,
     /// Key derivation configuration
     kdf_config: KeyDerivationConfig,
     /// Auto-save changes to disk
@@ -210,6 +212,7 @@ impl SecureKeyStore {
             storage_path: storage_path.as_ref().to_path_buf(),
             keys: HashMap::new(),
             password_hash: None,
+            password_salt: Vec::new(),
             kdf_config,
             auto_save: true,
             backup_interval: Duration::from_secs(24 * 3600), // 24 hours
@@ -224,12 +227,13 @@ impl SecureKeyStore {
                 "Key store already initialized".to_string()));
         }
         
-        // Create password hash for verification using fixed salt based on configuration
-        let salt = vec![0u8; self.kdf_config.salt_length];
+        // Generate random salt for master password
+        let password_salt = generate_random_bytes(self.kdf_config.salt_length)?;
         // Derive a fixed-length seed from the password
         let seed = blake3_hash(password.as_bytes());
-        let password_hash = derive_key(&seed, &String::from_utf8_lossy(&salt), b"keystore-auth")?;
+        let password_hash = derive_key(&seed, &String::from_utf8_lossy(&password_salt), b"keystore-auth")?;
         self.password_hash = Some(password_hash);
+        self.password_salt = password_salt;
         
         log::info!("🔐 Secure key store initialized");
         
@@ -256,17 +260,25 @@ impl SecureKeyStore {
                 "Invalid key store file format".to_string()));
         }
         
-        // Extract components
-        let salt = &encrypted_data[0..32];
-        let nonce = &encrypted_data[32..44];
-        let encrypted_content = &encrypted_data[44..];
+        // Extract components: encryption_salt (32) | nonce (12) | password_salt (kdf_config.salt_length) | ciphertext
+        let enc_salt_end = 32;
+        let nonce_end = enc_salt_end + 12;
+        let psalt_end = nonce_end + self.kdf_config.salt_length;
+
+        if encrypted_data.len() < psalt_end + 16 { // must have at least tag bytes
+            return Err(BlockchainError::StorageError("Invalid key store file format".to_string()));
+        }
+        let salt = &encrypted_data[0..enc_salt_end];
+        let nonce = &encrypted_data[enc_salt_end..nonce_end];
+        let file_password_salt = &encrypted_data[nonce_end..psalt_end];
+        let encrypted_content = &encrypted_data[psalt_end..];
+        // Temporarily set self.password_salt for key derivation
+        self.password_salt = file_password_salt.to_vec();
         
-        // First, we need to initialize the store to get the password hash
-        // For loading, derive the same password hash using configured salt length
-        let temp_salt = vec![0u8; self.kdf_config.salt_length];
-        // Derive a fixed-length seed from the password
+        // Derive the temporary hash using password salt read from file header
         let seed = blake3_hash(password.as_bytes());
-        let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&temp_salt), b"keystore-auth")?;
+        let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
+        
         let derived_password = format!("keystore_{}", hex::encode(&temp_hash));
         
         // Derive key from password
@@ -287,7 +299,24 @@ impl SecureKeyStore {
         // Load data
         self.keys = store_data.keys;
         self.password_hash = Some(store_data.password_hash);
+        // use value read earlier; but if store_data has salt field populated (new version) ensure consistency
+        if !store_data.password_salt.is_empty() {
+            self.password_salt = store_data.password_salt;
+        }
         self.kdf_config = store_data.kdf_config;
+        
+        // Migrate legacy keystores without salt
+        if self.password_salt.is_empty() {
+            let new_salt = generate_random_bytes(self.kdf_config.salt_length)?;
+            let seed = blake3_hash(password.as_bytes());
+            let new_hash = derive_key(&seed, &String::from_utf8_lossy(&new_salt), b"keystore-auth")?;
+            self.password_hash = Some(new_hash);
+            self.password_salt = new_salt.clone();
+            log::warn!("🔄 Migrated keystore to use random master password salt");
+            if self.auto_save {
+                self.save_to_disk()?;
+            }
+        }
         
         log::info!("🔓 Secure key store loaded with {} keys", self.keys.len());
         Ok(())
@@ -300,9 +329,10 @@ impl SecureKeyStore {
         
         // Create storage data
         let store_data = StorageFormat {
-            version: 1,
+            version: 2,
             keys: self.keys.clone(),
             password_hash,
+            password_salt: self.password_salt.clone(),
             kdf_config: self.kdf_config.clone(),
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         };
@@ -329,10 +359,11 @@ impl SecureKeyStore {
         let encrypted_data = cipher.encrypt(nonce_slice, serialized_data.as_ref())
             .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {}", e)))?;
         
-        // Combine components: salt(32) + nonce(12) + encrypted_data
+        // Combine components: encryption_salt(32) + nonce(12) + password_salt(kdf_config.salt_length) + encrypted_data
         let mut file_data = Vec::new();
         file_data.extend_from_slice(&salt);
         file_data.extend_from_slice(&nonce);
+        file_data.extend_from_slice(&self.password_salt);
         file_data.extend_from_slice(&encrypted_data);
         
         // Write to temporary file first, then move (atomic operation)
@@ -555,6 +586,7 @@ impl SecureKeyStore {
             storage_path: backup_path.as_ref().to_path_buf(),
             keys: self.keys.clone(),
             password_hash: self.password_hash,
+            password_salt: self.password_salt.clone(),
             kdf_config: self.kdf_config.clone(),
             auto_save: false,
             backup_interval: self.backup_interval,
@@ -614,12 +646,9 @@ impl SecureKeyStore {
         let stored_hash = self.password_hash
             .ok_or_else(|| BlockchainError::CryptographyError("Key store not initialized".to_string()))?;
         
-        // For password verification, we need to use the same salt that was used during initialization
-        // Use the same fixed salt (all zeros) used during initialization for verification
-        let verification_salt = vec![0u8; self.kdf_config.salt_length];
-        // Derive a fixed-length seed from the password
+        // Derive a fixed-length seed from the password using stored salt
         let seed = blake3_hash(password.as_bytes());
-        let test_hash = derive_key(&seed, &String::from_utf8_lossy(&verification_salt), b"keystore-auth")?;
+        let test_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
         
         // Note: This is simplified - proper implementation would use constant-time comparison
         if test_hash != stored_hash {
@@ -636,6 +665,8 @@ struct StorageFormat {
     version: u32,
     keys: HashMap<String, EncryptedKeyEntry>,
     password_hash: Hash,
+    #[serde(default)]
+    password_salt: Vec<u8>,
     kdf_config: KeyDerivationConfig,
     created_at: u64,
 }

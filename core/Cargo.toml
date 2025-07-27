@@ -55,6 +55,8 @@ fs2 = "0.4" # File locking utility
 env_logger = "0.10"
 clap = { version = "4.0", features = ["derive"] }
 num_cpus = "1.16" # CPU core detection for mining
+bs58 = "0.4" # Base58 encoding/decoding
+ripemd = "0.1" # RIPEMD160 hashing
 
 # Async runtime
 async-trait = "0.1"
@@ -105,7 +107,3 @@ temporary-pqcrypto = ["pqcrypto-dilithium"]
 
 # Enable when real liboqs is available (disables temporary pqcrypto)
 real-liboqs = ["oqs"]
-
-ripemd = "0.1"
-bs58 = "0.4"
-thread_affinity = "3.1.0"

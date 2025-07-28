@@ -640,6 +640,11 @@ impl Miner {
         &self.config
     }
     
+    /// Get the miner's public key for balance checking and identification
+    pub fn get_public_key(&self) -> Vec<u8> {
+        self.keypair.public_key_bytes().to_vec()
+    }
+
     #[cfg(test)]
     pub fn get_keypair(&self) -> &Dilithium3Keypair {
         &self.keypair

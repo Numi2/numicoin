@@ -1,0 +1,213 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running `target/release/numi-core start --mine --threads 1`
+[2025-07-28T20:06:05Z INFO  numi_core] Starting NumiCoin node...
+[2025-07-28T20:06:05Z INFO  numi_core::miner] 🔑 Loaded existing miner wallet from "./core-data/miner-wallet.json"
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔑 Creating genesis block with miner public key: 1de74fd46f08f6a41604b8957418883784900c1ce078232d728e096f235d99171101cc2c0aa8ac8b473608f168493899e08faf38c35a8843f0774c1f6a16f5c7f7d9faf0460df60f9e638090ff702d351a5a251493d5f48181ebc9802b91e4d5e237dc59bfd095184c5e6058dff0036082d217428a8114b93518b25e6509ccf52fe20c3546beafdaf40ace053630146bb5291e54cc6115c5dc8667044dca97821144550d695e57fd172c0f0756d93266be48301c4cb0eb9b249f684f2de43d95e5e2407929372a03c1947269aa846e5f29ada5a767bb24c1974d01c3e144b3154ab828231338c840b87da0446fcc27bc429a7ca5d62c28bf9c83ac4d6f05809b5271d4dab5e3c7c5fe29dc0cd34128c678e7d2cb017c3c68ecaca12aadc224fec7122a6238c06af32de31ffade89bca614c0d3e1382ee40960be3be916d3b3193aa596c621baf3112d909092cfa6cd49f3a3909ea410bd144989a16c02c913cfac750732cc5f8d14627e0f306ea81245e6326fe9c53733527a20c485cb77fc8d19005c95736e667240c94d6312260831f42076ef2f7aa5024791efcc10c3954a0851f46113a67827a79401ba6b7515a132af92e614fe2dabdfde2383343ae7bf975ac2247584f05e72afdddfef8b058ea2d40647cf8ca5f9b849e12e9f66fa9b7779cf768e4bc99db65145bba5a60867d5c24f17db56c6944ead2c16ab26925c383e2ac55ffa012b02cd79a929fdac090f88f333c3c47734602ac39c8604228e2f39db1e35aeed0a4b8dae4657f903e532a68215dd4348b569acf5b74112cebec18ebb8385c7e8c79511b32526dd7956f9296fbef30bcaf58cf854c04c33fd111be1907c2c3b8f4e55f501220f2e63301a269db8a4970a079bba74985cc7b03a2338d4d9ddc2c9e373e76732ab5eb5e52f8228032656bfb673a65f4c91be04b02411b3e80ca26a99d29b4176ee19850d1b011c9237478c1b707c4007d697f73cfce42b042782b6c7b10fc78711843ea70df8c8a11b73413d1887a1f0b3cd5a476d27649fc80b364047aaed4652ad154de2808103300a394e994d1ecc43951e4e53b020a45b6b26c2afd91f2b991c77becd31bdb39c8a65ae6502f8341336fa669f779aab18efb7c7a12f4fb6151ec076ee9c25ad2a5c4fa76bdd91c05c92cabf1961a8d22dc99afd979fb923c96b43926423965af3759827fd8f3824ddb4c378d718d296d9ffeab2b54088a944a5535bd7494a439a0d7eb7cdf71550a17f5ecc21a45341b4ee6fa06ce0ee4f44637b601d9a5deb546188e85f532bf47fa0d0bc3f9c54e4c80c66305cb89780cf8246b2ab055231227b91c32889a1412dee4226b935fd6cdad8ee8a8ea2a248e781cad32b35e1211b10c67cd07d703eedc67cd9928acc0da67235503ecba96e31ba6c898a49a00972dc93af171f591996baf1f7396c584a87f7087633fbffb6d6463b9c464e8152c15a8ab4d408a18d7b7adeb56d0fcd6072e8490efe8b7778d07d9fffb1e53878e96cf5bff9632ad2794cca0dd6885cd16138a25d706e8941441a3e7a497eb8d1b45c30395e03572b56c668716909f2a6d1f897969ad943a7d08fdf761fa6f64054a38e6405b8de36248e2be32efdeaa939de311e5e188f4ff2691529a5de253e83e2dbcd3dd02f01111f5a2817080b2e6ff82dd121b994cf8f58c8989ed8f3a2c998da5917cce0b3fa86111a8a6cd53a11e44dfb5ca28bd871d59c1e967c588ef527c4b2d757a16e2be27d87080d2420dc0a155b5bc00ab81c327528707ba9d1f0784646cac871e0bdc164ab232b8aae68ed99ba1cfb73b32d1889e247eb66dd222778c6b93499b0cc898e13f8cdcf16b8547de527141cdffc879e1980a6eb1e811c82c71e2c8822b764bf731da95dd01acf1aaa3da84acdccbd2df08a1446a5776ae9987a94b632043b297593dd92348bdbc06f3dd70fba313365bd18f1da4fc3b1cffbbd483ae5994188c15fd4717599149065cfa3dffc693fe33f9bffcecd9e5822cb8cf009737d89e428c4a8c5e5a36d578dca0f8ddb9ef4983adc1f685cecf2e4139129ad662ed517872c5ee83fbebd120350a228e051b91fe717d59951bfe1e23576f997e38a186ee6a482db9153041be27b9eedb8ae59560b76c4811f193c4751cd6dc885145a7455782da30c6bdfa603bc7485803d81b71e6303c25deaa74e51dddd36593f96625bbf75c9e7008e340ef2dd7442fb9c7076d53770a94c4275b217060845eb0997085be24b7a17d4a466e5caa9316e083f6dd6a24f2d2b2d96a952b95ea0a03eee073159902f24b1ddd00912010e7083e73c093355d8fe4451cccfb8c6bffad6ad5cb94fc2bc3613f79e98f1c848d104ae605fa7d7662b8bb06efabf7cbe081d750f390710d157d7c86ecca67fb43f2c0d49652c103ef3e62b0614e37f61f3ad8cfb762f929ffe67ae8b813603bac42123537317b8ab4380c25d63d9c2e3b50a49a933d632816d46d7e2c5eab2842ab3188582e4c635a0f1918d1294de3c2f70a2a04383798cc01114b502d01053595e05cf99deee92e875cda5c84cb57632fd9688c181ae309be3af702a932d2da920a19f3853564436d3e65e354a78e6d3c17b2c7e5975aa0726dd2070fd9170bff6eca1c96cc305ff8e718f2252578a70a7af1ec80e4513fdaaee4a4c7985e163b16a83e42d6fc875982173065e1329035869545e4ac9c0a1caf01d96849a5c184c3974db27f4e8303ced8ad84b3ecbae048c17 (length: 1952)
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔄 Updating chain state: height 0 -> 0, best_hash: 236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 1 blocks in main chain
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Chain state updated: total_blocks=1, difficulty=1, cumulative_difficulty=1, total_supply=10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔄 update_chain_state_after_reorg returning Ok(())...
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Applying mining reward: 10 NUMI to 1de74fd46f08f6a41604b89574188837
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Transaction applied successfully
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Connected block 236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867 to main chain at height 0
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔄 Updating chain state: height 0 -> 0, best_hash: 236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 1 blocks in main chain
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Chain state updated: total_blocks=1, difficulty=1, cumulative_difficulty=1, total_supply=10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔄 update_chain_state_after_reorg returning Ok(())...
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🌱 Genesis block created: 236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔄 Rebuilding account states from blockchain...
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Applying mining reward: 10 NUMI to 1de74fd46f08f6a41604b89574188837
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Transaction applied successfully
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Account states rebuilt from 1 blocks
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Total supply from blockchain: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 📊 Total accounts in memory: 1
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 📋 Applying pending transactions from mempool to finalize state...
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Mempool transactions applied.
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain]   Account 1de74fd46f08f6a41604b8957418883784900c1ce078232d728e096f235d99171101cc2c0aa8ac8b473608f168493899e08faf38c35a8843f0774c1f6a16f5c7f7d9faf0460df60f9e638090ff702d351a5a251493d5f48181ebc9802b91e4d5e237dc59bfd095184c5e6058dff0036082d217428a8114b93518b25e6509ccf52fe20c3546beafdaf40ace053630146bb5291e54cc6115c5dc8667044dca97821144550d695e57fd172c0f0756d93266be48301c4cb0eb9b249f684f2de43d95e5e2407929372a03c1947269aa846e5f29ada5a767bb24c1974d01c3e144b3154ab828231338c840b87da0446fcc27bc429a7ca5d62c28bf9c83ac4d6f05809b5271d4dab5e3c7c5fe29dc0cd34128c678e7d2cb017c3c68ecaca12aadc224fec7122a6238c06af32de31ffade89bca614c0d3e1382ee40960be3be916d3b3193aa596c621baf3112d909092cfa6cd49f3a3909ea410bd144989a16c02c913cfac750732cc5f8d14627e0f306ea81245e6326fe9c53733527a20c485cb77fc8d19005c95736e667240c94d6312260831f42076ef2f7aa5024791efcc10c3954a0851f46113a67827a79401ba6b7515a132af92e614fe2dabdfde2383343ae7bf975ac2247584f05e72afdddfef8b058ea2d40647cf8ca5f9b849e12e9f66fa9b7779cf768e4bc99db65145bba5a60867d5c24f17db56c6944ead2c16ab26925c383e2ac55ffa012b02cd79a929fdac090f88f333c3c47734602ac39c8604228e2f39db1e35aeed0a4b8dae4657f903e532a68215dd4348b569acf5b74112cebec18ebb8385c7e8c79511b32526dd7956f9296fbef30bcaf58cf854c04c33fd111be1907c2c3b8f4e55f501220f2e63301a269db8a4970a079bba74985cc7b03a2338d4d9ddc2c9e373e76732ab5eb5e52f8228032656bfb673a65f4c91be04b02411b3e80ca26a99d29b4176ee19850d1b011c9237478c1b707c4007d697f73cfce42b042782b6c7b10fc78711843ea70df8c8a11b73413d1887a1f0b3cd5a476d27649fc80b364047aaed4652ad154de2808103300a394e994d1ecc43951e4e53b020a45b6b26c2afd91f2b991c77becd31bdb39c8a65ae6502f8341336fa669f779aab18efb7c7a12f4fb6151ec076ee9c25ad2a5c4fa76bdd91c05c92cabf1961a8d22dc99afd979fb923c96b43926423965af3759827fd8f3824ddb4c378d718d296d9ffeab2b54088a944a5535bd7494a439a0d7eb7cdf71550a17f5ecc21a45341b4ee6fa06ce0ee4f44637b601d9a5deb546188e85f532bf47fa0d0bc3f9c54e4c80c66305cb89780cf8246b2ab055231227b91c32889a1412dee4226b935fd6cdad8ee8a8ea2a248e781cad32b35e1211b10c67cd07d703eedc67cd9928acc0da67235503ecba96e31ba6c898a49a00972dc93af171f591996baf1f7396c584a87f7087633fbffb6d6463b9c464e8152c15a8ab4d408a18d7b7adeb56d0fcd6072e8490efe8b7778d07d9fffb1e53878e96cf5bff9632ad2794cca0dd6885cd16138a25d706e8941441a3e7a497eb8d1b45c30395e03572b56c668716909f2a6d1f897969ad943a7d08fdf761fa6f64054a38e6405b8de36248e2be32efdeaa939de311e5e188f4ff2691529a5de253e83e2dbcd3dd02f01111f5a2817080b2e6ff82dd121b994cf8f58c8989ed8f3a2c998da5917cce0b3fa86111a8a6cd53a11e44dfb5ca28bd871d59c1e967c588ef527c4b2d757a16e2be27d87080d2420dc0a155b5bc00ab81c327528707ba9d1f0784646cac871e0bdc164ab232b8aae68ed99ba1cfb73b32d1889e247eb66dd222778c6b93499b0cc898e13f8cdcf16b8547de527141cdffc879e1980a6eb1e811c82c71e2c8822b764bf731da95dd01acf1aaa3da84acdccbd2df08a1446a5776ae9987a94b632043b297593dd92348bdbc06f3dd70fba313365bd18f1da4fc3b1cffbbd483ae5994188c15fd4717599149065cfa3dffc693fe33f9bffcecd9e5822cb8cf009737d89e428c4a8c5e5a36d578dca0f8ddb9ef4983adc1f685cecf2e4139129ad662ed517872c5ee83fbebd120350a228e051b91fe717d59951bfe1e23576f997e38a186ee6a482db9153041be27b9eedb8ae59560b76c4811f193c4751cd6dc885145a7455782da30c6bdfa603bc7485803d81b71e6303c25deaa74e51dddd36593f96625bbf75c9e7008e340ef2dd7442fb9c7076d53770a94c4275b217060845eb0997085be24b7a17d4a466e5caa9316e083f6dd6a24f2d2b2d96a952b95ea0a03eee073159902f24b1ddd00912010e7083e73c093355d8fe4451cccfb8c6bffad6ad5cb94fc2bc3613f79e98f1c848d104ae605fa7d7662b8bb06efabf7cbe081d750f390710d157d7c86ecca67fb43f2c0d49652c103ef3e62b0614e37f61f3ad8cfb762f929ffe67ae8b813603bac42123537317b8ab4380c25d63d9c2e3b50a49a933d632816d46d7e2c5eab2842ab3188582e4c635a0f1918d1294de3c2f70a2a04383798cc01114b502d01053595e05cf99deee92e875cda5c84cb57632fd9688c181ae309be3af702a932d2da920a19f3853564436d3e65e354a78e6d3c17b2c7e5975aa0726dd2070fd9170bff6eca1c96cc305ff8e718f2252578a70a7af1ec80e4513fdaaee4a4c7985e163b16a83e42d6fc875982173065e1329035869545e4ac9c0a1caf01d96849a5c184c3974db27f4e8303ced8ad84b3ecbae048c17 (1de74fd46f08f6a4...): 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 1 blocks in main chain
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 10 NUMI
+[2025-07-28T20:06:05Z INFO  numi_core::blockchain] ✅ Blockchain loaded from storage with 0 blocks and 10 NUMI total supply
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🔑 Local peer ID: 12D3KooWFtUGNa42PJBpvwV9VTd7d2mfEcfjiiGt1G2isfPq3Nhf
+[2025-07-28T20:06:05Z INFO  libp2p_swarm] local_peer_id=12D3KooWFtUGNa42PJBpvwV9VTd7d2mfEcfjiiGt1G2isfPq3Nhf
+[2025-07-28T20:06:05Z WARN  numi_core::miner] 🔑 Loaded existing miner wallet from "./core-data/miner-wallet.json"
+[2025-07-28T20:06:05Z INFO  numi_core] Mining enabled with 1 threads
+[2025-07-28T20:06:05Z INFO  numi_core] Node started successfully
+[2025-07-28T20:06:05Z INFO  numi_core] RPC server: http://localhost:8082
+[2025-07-28T20:06:05Z INFO  numi_core] Network: 0.0.0.0
+[2025-07-28T20:06:05Z INFO  numi_core] Data directory: ./core-data
+[2025-07-28T20:06:05Z INFO  numi_core::mining_service] 🚀 Starting mining service loop...
+[2025-07-28T20:06:05Z INFO  numi_core::rpc] Starting RPC server on port 8082 with security features enabled
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🌐 Network listening on: /ip4/0.0.0.0/tcp/8333
+[2025-07-28T20:06:05Z INFO  warp::server] Server::run; addr=0.0.0.0:8082
+[2025-07-28T20:06:05Z INFO  warp::server] listening on http://0.0.0.0:8082
+[2025-07-28T20:06:05Z INFO  numi_core::network] 📞 Dialing bootstrap node: /ip4/127.0.0.1/tcp/8333
+[2025-07-28T20:06:05Z INFO  libp2p_mdns::behaviour::iface] creating instance on iface address address=192.168.1.101
+[2025-07-28T20:06:05Z INFO  libp2p_mdns::behaviour::iface] creating instance on iface address address=100.123.5.101
+[2025-07-28T20:06:05Z INFO  libp2p_mdns::behaviour::iface] creating instance on iface address address=192.168.2.1
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🌐 New listen address: /ip4/127.0.0.1/tcp/8333
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🌐 New listen address: /ip4/192.168.1.101/tcp/8333
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🌐 New listen address: /ip4/100.123.5.101/tcp/8333
+[2025-07-28T20:06:05Z INFO  numi_core::network] 🌐 New listen address: /ip4/192.168.2.1/tcp/8333
+[2025-07-28T20:06:05Z INFO  numi_core::mempool] 📦 Selected 0 transactions for block (total size: 0 bytes)
+[2025-07-28T20:06:05Z INFO  numi_core::mining_service] 🔍 Mining cycle: height=0, difficulty=8, pending_txs=0
+[2025-07-28T20:06:05Z INFO  numi_core::miner] 🔧 Mining configuration updated
+[2025-07-28T20:06:05Z INFO  numi_core::miner] 🔨 Starting multi-threaded mining for block 1 (difficulty: 8)
+[2025-07-28T20:06:05Z INFO  numi_core::miner] 🚀 Using 1 threads for mining
+[2025-07-28T20:06:10Z INFO  numi_core::miner] 📊 Mining stats: 0 H/s, 0 total hashes, 1 threads
+[2025-07-28T20:06:15Z INFO  numi_core::miner] 📊 Mining stats: 13 H/s, 69 total hashes, 1 threads
+[2025-07-28T20:06:18Z INFO  numi_core::miner] 🎉 Block mined successfully by thread 0 in 13 seconds!
+[2025-07-28T20:06:20Z INFO  numi_core::miner] 📊 Mining stats: 13 H/s, 139 total hashes, 0 threads
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] ⛏️ Mined block 1 with hash eb2ae201ad77aa610a04fb416e51ebfd95b17d4d141c27a716573fc8e57e103e
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] 🔧 Adding block to blockchain...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 New best chain found, performing reorganization
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 Starting secure reorganization: current_best=236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867, new_best=eb2ae201ad77aa610a04fb416e51ebfd95b17d4d141c27a716573fc8e57e103e
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 📍 Fork info: old_chain=0, new_chain=0, blocks_to_disconnect=0, blocks_to_connect=0
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 Reorganizing chain: disconnecting 0 blocks, connecting 0 blocks (difficulty change: 0)
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔗 Disconnecting old chain blocks...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔗 Connecting new chain blocks...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 📝 Updating main chain vector...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🏷️ Updating main chain flags...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔒 Updating finalization status...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔒 Starting finalization status update...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 📏 Finalization: current_height=0, finality_height=0
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Finalized 1 blocks
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 📊 Updated chain state finalization: finalized_block_hash=236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Finalization status update completed
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 📊 Updating chain state...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 Updating chain state: height 0 -> 1, best_hash: eb2ae201ad77aa610a04fb416e51ebfd95b17d4d141c27a716573fc8e57e103e
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 2 blocks in main chain
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔍 Block 1 (height 1): 1 transactions
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 💰 Found mining reward in block 1 transaction 0: 10 NUMI
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 20 NUMI
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Chain state updated: total_blocks=2, difficulty=8, cumulative_difficulty=256, total_supply=20 NUMI
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 update_chain_state_after_reorg returning Ok(())...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Secure chain reorganization completed successfully
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] 🔄 Reorganization returning Ok(true)...
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Reorganization completed with result: Ok(true)
+[2025-07-28T20:06:20Z INFO  numi_core::blockchain] ✅ Block processing completed, was_reorganization=true
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] ✅ Successfully added mined block 1 to blockchain
+💰 Miner Balance Updated:
+   Address: 13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn
+   Balance: 10 NUMI
+
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] 💰 Miner balance: 10 NUMI (13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn)
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] 📡 Broadcasting block to network...
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] 📊 Blockchain height updated: 0 -> 1
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] ✅ Block processing completed successfully
+[2025-07-28T20:06:20Z INFO  numi_core::mining_service] 🏁 Mining cycle completed, preparing for next cycle...
+[2025-07-28T20:06:22Z INFO  numi_core::mempool] 📦 Selected 0 transactions for block (total size: 0 bytes)
+[2025-07-28T20:06:22Z INFO  numi_core::mining_service] 🔍 Mining cycle: height=1, difficulty=8, pending_txs=0
+[2025-07-28T20:06:22Z INFO  numi_core::miner] 🔧 Mining configuration updated
+[2025-07-28T20:06:22Z INFO  numi_core::miner] 🔨 Starting multi-threaded mining for block 2 (difficulty: 8)
+[2025-07-28T20:06:22Z INFO  numi_core::miner] 🚀 Using 1 threads for mining
+[2025-07-28T20:06:25Z INFO  numi_core::miner] 🎉 Block mined successfully by thread 0 in 3 seconds!
+[2025-07-28T20:06:27Z INFO  numi_core::miner] 📊 Mining stats: 0 H/s, 0 total hashes, 0 threads
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] ⛏️ Mined block 2 with hash 5f7ba6337cb038bb212253d9556a3c5812b519b88a885df171ebda6d99bf9c50
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] 🔧 Adding block to blockchain...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 New best chain found, performing reorganization
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 Starting secure reorganization: current_best=eb2ae201ad77aa610a04fb416e51ebfd95b17d4d141c27a716573fc8e57e103e, new_best=5f7ba6337cb038bb212253d9556a3c5812b519b88a885df171ebda6d99bf9c50
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 📍 Fork info: old_chain=0, new_chain=0, blocks_to_disconnect=0, blocks_to_connect=0
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 Reorganizing chain: disconnecting 0 blocks, connecting 0 blocks (difficulty change: 0)
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔗 Disconnecting old chain blocks...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔗 Connecting new chain blocks...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 📝 Updating main chain vector...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🏷️ Updating main chain flags...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔒 Updating finalization status...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔒 Starting finalization status update...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 📏 Finalization: current_height=1, finality_height=0
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Finalized 1 blocks
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 📊 Updated chain state finalization: finalized_block_hash=236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Finalization status update completed
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 📊 Updating chain state...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 Updating chain state: height 1 -> 2, best_hash: 5f7ba6337cb038bb212253d9556a3c5812b519b88a885df171ebda6d99bf9c50
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 3 blocks in main chain
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔍 Block 1 (height 1): 1 transactions
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 💰 Found mining reward in block 1 transaction 0: 10 NUMI
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔍 Block 2 (height 2): 1 transactions
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 💰 Found mining reward in block 2 transaction 0: 10 NUMI
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 30 NUMI
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Chain state updated: total_blocks=3, difficulty=8, cumulative_difficulty=511, total_supply=30 NUMI
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 update_chain_state_after_reorg returning Ok(())...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Secure chain reorganization completed successfully
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] 🔄 Reorganization returning Ok(true)...
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Reorganization completed with result: Ok(true)
+[2025-07-28T20:06:27Z INFO  numi_core::blockchain] ✅ Block processing completed, was_reorganization=true
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] ✅ Successfully added mined block 2 to blockchain
+💰 Miner Balance Updated:
+   Address: 13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn
+   Balance: 10 NUMI
+
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] 💰 Miner balance: 10 NUMI (13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn)
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] 📡 Broadcasting block to network...
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] 📊 Blockchain height updated: 1 -> 2
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] ✅ Block processing completed successfully
+[2025-07-28T20:06:27Z INFO  numi_core::mining_service] 🏁 Mining cycle completed, preparing for next cycle...
+[2025-07-28T20:06:28Z INFO  numi_core::mempool] 📦 Selected 0 transactions for block (total size: 0 bytes)
+[2025-07-28T20:06:28Z INFO  numi_core::mining_service] 🔍 Mining cycle: height=2, difficulty=8, pending_txs=0
+[2025-07-28T20:06:28Z INFO  numi_core::miner] 🔧 Mining configuration updated
+[2025-07-28T20:06:28Z INFO  numi_core::miner] 🔨 Starting multi-threaded mining for block 3 (difficulty: 8)
+[2025-07-28T20:06:28Z INFO  numi_core::miner] 🚀 Using 1 threads for mining
+[2025-07-28T20:06:33Z INFO  numi_core::miner] 🎉 Block mined successfully by thread 0 in 4 seconds!
+[2025-07-28T20:06:33Z INFO  numi_core::miner] 📊 Mining stats: 0 H/s, 0 total hashes, 0 threads
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] ⛏️ Mined block 3 with hash 638ddd3f7da8915436dbaf505b216d1be41d03cff07326f4cff56675594cb587
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] 🔧 Adding block to blockchain...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 New best chain found, performing reorganization
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 Starting secure reorganization: current_best=5f7ba6337cb038bb212253d9556a3c5812b519b88a885df171ebda6d99bf9c50, new_best=638ddd3f7da8915436dbaf505b216d1be41d03cff07326f4cff56675594cb587
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 📍 Fork info: old_chain=0, new_chain=0, blocks_to_disconnect=0, blocks_to_connect=0
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 Reorganizing chain: disconnecting 0 blocks, connecting 0 blocks (difficulty change: 0)
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔗 Disconnecting old chain blocks...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔗 Connecting new chain blocks...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 📝 Updating main chain vector...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🏷️ Updating main chain flags...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔒 Updating finalization status...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔒 Starting finalization status update...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 📏 Finalization: current_height=2, finality_height=0
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Finalized 1 blocks
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 📊 Updated chain state finalization: finalized_block_hash=236155992e221fa0718390d0cc6617ef79b91703c142c5fed4ae9f8e4a1e7867
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Finalization status update completed
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 📊 Updating chain state...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 Updating chain state: height 2 -> 3, best_hash: 638ddd3f7da8915436dbaf505b216d1be41d03cff07326f4cff56675594cb587
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔍 Recalculating total supply from 4 blocks in main chain
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔍 Block 0 (height 0): 1 transactions
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 💰 Found mining reward in block 0 transaction 0: 10 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔍 Block 1 (height 1): 1 transactions
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 💰 Found mining reward in block 1 transaction 0: 10 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔍 Block 2 (height 2): 1 transactions
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 💰 Found mining reward in block 2 transaction 0: 10 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔍 Block 3 (height 3): 1 transactions
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 💰 Found mining reward in block 3 transaction 0: 10 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 💰 Recalculated total supply: 40 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Chain state updated: total_blocks=4, difficulty=8, cumulative_difficulty=766, total_supply=40 NUMI
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 update_chain_state_after_reorg returning Ok(())...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Secure chain reorganization completed successfully
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] 🔄 Reorganization returning Ok(true)...
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Reorganization completed with result: Ok(true)
+[2025-07-28T20:06:33Z INFO  numi_core::blockchain] ✅ Block processing completed, was_reorganization=true
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] ✅ Successfully added mined block 3 to blockchain
+💰 Miner Balance Updated:
+   Address: 13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn
+   Balance: 10 NUMI
+
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] 💰 Miner balance: 10 NUMI (13zmYXZPjWDJbVjFgqcstLc5UaSFgHwZxn)
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] 📡 Broadcasting block to network...
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] 📊 Blockchain height updated: 2 -> 3
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] ✅ Block processing completed successfully
+[2025-07-28T20:06:33Z INFO  numi_core::mining_service] 🏁 Mining cycle completed, preparing for next cycle...
+[2025-07-28T20:06:35Z INFO  numi_core::mempool] 📦 Selected 0 transactions for block (total size: 0 bytes)
+[2025-07-28T20:06:35Z INFO  numi_core::mining_service] 🔍 Mining cycle: height=3, difficulty=8, pending_txs=0
+[2025-07-28T20:06:35Z INFO  numi_core::miner] 🔧 Mining configuration updated
+[2025-07-28T20:06:35Z INFO  numi_core::miner] 🔨 Starting multi-threaded mining for block 4 (difficulty: 8)
+[2025-07-28T20:06:35Z INFO  numi_core::miner] 🚀 Using 1 threads for mining
+[2025-07-28T20:06:40Z INFO  numi_core::miner] 📊 Mining stats: 0 H/s, 0 total hashes, 1 threads

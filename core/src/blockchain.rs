@@ -1233,21 +1233,27 @@ impl NumiBlockchain {
     /// Update chain state after reorganization
     async fn update_chain_state_after_reorg(&self, new_best_hash: BlockHash) -> Result<()> {
         if let Some(best_block_meta) = self.blocks.get(&new_best_hash) {
-            let mut state = self.state.write();
-            
-            let old_height = state.total_blocks.saturating_sub(1);
+            let old_height = {
+                let state = self.state.read();
+                state.total_blocks.saturating_sub(1)
+            };
             let new_height = best_block_meta.height;
             
             log::info!("🔄 Updating chain state: height {} -> {}, best_hash: {}", 
                       old_height, new_height, hex::encode(new_best_hash));
             
+            // Recalculate total supply from the blockchain
+            let recalculated_total_supply = self.recalculate_total_supply().await?;
+            
+            let mut state = self.state.write();
             state.best_block_hash = new_best_hash;
             state.total_blocks = best_block_meta.height + 1;
             state.cumulative_difficulty = best_block_meta.cumulative_difficulty;
             state.last_block_time = best_block_meta.block.header.timestamp;
+            state.total_supply = recalculated_total_supply;
             
-            log::info!("✅ Chain state updated: total_blocks={}, difficulty={}, cumulative_difficulty={}", 
-                      state.total_blocks, best_block_meta.block.header.difficulty, state.cumulative_difficulty);
+            log::info!("✅ Chain state updated: total_blocks={}, difficulty={}, cumulative_difficulty={}, total_supply={} NUMI", 
+                      state.total_blocks, best_block_meta.block.header.difficulty, state.cumulative_difficulty, recalculated_total_supply as f64 / 100.0);
             
             log::info!("🔄 update_chain_state_after_reorg returning Ok(())...");
             Ok(())

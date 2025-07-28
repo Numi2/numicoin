@@ -77,6 +77,18 @@ enum Commands {
         #[arg(long)]
         wallet: PathBuf,
     },
+    
+    /// Debug commands for blockchain analysis
+    Debug {
+        #[command(subcommand)]
+        debug_cmd: DebugCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DebugCommands {
+    /// Recalculate and display total supply from blockchain
+    RecalculateSupply,
 }
 
 // Helper to build RPC base URL
@@ -123,6 +135,13 @@ async fn main() -> Result<()> {
         }
         Commands::Mine { wallet } => {
             mine_blocks(config, wallet).await?;
+        }
+        Commands::Debug { debug_cmd } => {
+            match debug_cmd {
+                DebugCommands::RecalculateSupply => {
+                    debug_recalculate_supply(config).await?;
+                }
+            }
         }
     }
     
@@ -212,6 +231,7 @@ async fn start_node(config: Config) -> Result<()> {
     if config.mining.enabled {
         let mining_service = MiningService::new(
             blockchain.clone(),
+            storage.clone(),
             network_handle,
             miner.clone(),
             config.mining.clone(),
@@ -437,6 +457,35 @@ async fn load_wallet(path: &PathBuf) -> Result<Dilithium3Keypair> {
             .to_vec(),
         private_key,
     )
+}
+
+async fn debug_recalculate_supply(config: Config) -> Result<()> {
+    println!("Loading blockchain and recalculating total supply...");
+    
+    // Initialize storage and load blockchain
+    let storage = Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
+    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
+    
+    // Get current state
+    let state = blockchain.get_chain_state();
+    println!("Current stored total supply: {} NUMI", state.total_supply as f64 / 100.0);
+    println!("Current chain height: {}", state.total_blocks);
+    
+    // Manually recalculate total supply
+    let recalculated_supply = blockchain.recalculate_and_update_total_supply().await?;
+    println!("Recalculated total supply: {} NUMI", recalculated_supply as f64 / 100.0);
+    
+    // Check if they match
+    if state.total_supply == recalculated_supply {
+        println!("✅ Total supply is correct!");
+    } else {
+        println!("❌ Total supply mismatch detected!");
+        println!("  Stored: {} NUMI", state.total_supply as f64 / 100.0);
+        println!("  Calculated: {} NUMI", recalculated_supply as f64 / 100.0);
+        println!("  Difference: {} NUMI", (recalculated_supply as i64 - state.total_supply as i64) as f64 / 100.0);
+    }
+    
+    Ok(())
 }
 
 

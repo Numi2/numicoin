@@ -4,6 +4,7 @@ use crate::{
     config::MiningConfig,
     network::NetworkManagerHandle,
     error::MiningServiceError,
+    storage::BlockchainStorage,
 };
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -11,6 +12,7 @@ use tokio::time::{self, Duration};
 
 pub struct MiningService {
     blockchain: Arc<RwLock<NumiBlockchain>>,
+    storage: Arc<BlockchainStorage>,
     network_handle: NetworkManagerHandle,
     /// Shared miner instance reused across all cycles (thread-safe)
     miner: Arc<RwLock<Miner>>, 
@@ -23,6 +25,7 @@ pub struct MiningService {
 impl MiningService {
     pub fn new(
         blockchain: Arc<RwLock<NumiBlockchain>>,
+        storage: Arc<BlockchainStorage>,
         network_handle: NetworkManagerHandle,
         miner: Arc<RwLock<Miner>>, // persistent miner
         config: MiningConfig,
@@ -30,6 +33,7 @@ impl MiningService {
     ) -> Self {
         Self {
             blockchain,
+            storage,
             network_handle,
             miner,
             config,
@@ -146,6 +150,17 @@ impl MiningService {
             Ok(true) => {
                 log::info!("✅ Successfully added mined block {} to blockchain", block.header.height);
                 
+                // Persist the blockchain to storage
+                log::info!("💾 Saving blockchain state to storage...");
+                if let Err(e) = self.blockchain.read().save_to_storage(&self.storage) {
+                    log::error!("❌ Failed to save blockchain to storage: {}", e);
+                } else {
+                    log::info!("✅ Blockchain state saved to storage successfully");
+                }
+                
+                // Show miner's updated balance after receiving the mining reward
+                self.display_miner_balance().await;
+                
                 // Broadcast the block to the network
                 log::info!("📡 Broadcasting block to network...");
                 let _ = self.network_handle.broadcast_block(block).await;
@@ -168,5 +183,33 @@ impl MiningService {
         }
         
         log::info!("🏁 Mining cycle completed, preparing for next cycle...");
+    }
+
+    /// Display the miner's current balance after successful mining
+    async fn display_miner_balance(&self) {
+        // Get the miner's public key
+        let miner_pubkey = {
+            let miner = self.miner.read();
+            miner.get_public_key()
+        };
+        
+        // Get balance and address from blockchain
+        let (balance, address) = {
+            let blockchain = self.blockchain.read();
+            let balance = blockchain.get_balance_by_pubkey(&miner_pubkey);
+            let address = blockchain.get_address_from_public_key(&miner_pubkey);
+            (balance, address)
+        };
+        
+        // Display the miner's balance in a nice format
+        println!("💰 Miner Balance Updated:");
+        println!("   Address: {}", address);
+        println!("   Balance: {} NUMI", balance as f64 / 100.0);
+        println!();
+        
+        // Also log it for consistency
+        log::info!("💰 Miner balance: {} NUMI ({})", 
+                  balance as f64 / 100.0, 
+                  address);
     }
 } 

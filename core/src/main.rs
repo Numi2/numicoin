@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use numi_core::{
     blockchain::NumiBlockchain,
     storage::BlockchainStorage,
-    miner::Miner,
+    miner::{Miner, MiningConfig},
     mining_service::MiningService,
     network::NetworkManager,
     crypto::Dilithium3Keypair,
@@ -99,6 +99,10 @@ enum Commands {
         /// Mining threads (overrides config)
         #[arg(long)]
         mining_threads: Option<usize>,
+        
+        /// Miner wallet file path (overrides config)
+        #[arg(long)]
+        miner_key: Option<PathBuf>,
     },
     
     /// Mine a single block
@@ -183,7 +187,7 @@ enum Commands {
         #[arg(long, default_value = "human")]
         format: OutputFormat,
         
-        /// Show full addresses (64 characters) instead of truncated
+        /// Show underlying public keys in addition to addresses
         #[arg(long)]
         full: bool,
     },
@@ -302,7 +306,7 @@ async fn main() -> Result<()> {
     log::info!("📁 Data directory: {:?}", config.storage.data_directory);
     
     match cli.command {
-        Commands::Start { rpc_port, listen_addr, enable_mining, mining_threads } => {
+        Commands::Start { rpc_port, listen_addr, enable_mining, mining_threads, miner_key } => {
             // Override config with CLI arguments
             if let Some(port) = rpc_port {
                 config.rpc.port = port;
@@ -314,6 +318,9 @@ async fn main() -> Result<()> {
                 config.mining.thread_count = threads;
             }
             config.mining.enabled = enable_mining;
+            if let Some(miner_path) = miner_key {
+                config.mining.wallet_path = miner_path;
+            }
             
             start_full_node(config).await?;
         }
@@ -471,7 +478,11 @@ async fn start_full_node(config: Config) -> Result<()> {
 
         let blockchain_clone = blockchain.clone();
         let _storage_clone = storage.clone();
-        let miner = std::sync::Arc::new(parking_lot::RwLock::new(Miner::new()?));
+        
+        // Use consistent wallet path resolution for RPC server
+        let miner = std::sync::Arc::new(parking_lot::RwLock::new(
+            Miner::with_config_and_data_dir(MiningConfig::default(), config.storage.data_directory.clone())?
+        ));
 
         // Store RPC config for later use after network is started
         Some((
@@ -549,18 +560,12 @@ async fn start_full_node(config: Config) -> Result<()> {
 
     // ----------------------- Mining Service -----------------------
     if config.mining.enabled {
-        let mut wallet_path = config.mining.wallet_path.clone();
-        if !wallet_path.is_absolute() {
-            wallet_path = config.storage.data_directory.join(&wallet_path);
-        }
-
         let mining_service = MiningService::new(
             blockchain.clone(),
             network_handle.clone(),
             config.mining.clone(),
             config.storage.data_directory.clone(),
             config.consensus.target_block_time,
-            wallet_path,
         );
         
         tokio::spawn(async move {
@@ -607,12 +612,38 @@ async fn mine_block_command(config: Config, threads: Option<usize>, _timeout: u6
     let storage = BlockchainStorage::new(&config.storage.data_directory)?;
     let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
-    // Create or load miner keypair
+    // Create or load miner keypair using consistent path resolution
     let keypair = if let Some(path) = miner_key_path {
-        // In a real implementation, you'd load the keypair from the string
+        // Use provided path directly
         Dilithium3Keypair::load_from_file(&path)?
     } else {
-        Dilithium3Keypair::new()?
+        // Use configured wallet path with data directory resolution
+        let wallet_path = config.mining.wallet_path.clone();
+        let resolved_path = if wallet_path.is_absolute() {
+            wallet_path
+        } else {
+            config.storage.data_directory.join(&wallet_path)
+        };
+        
+        match Dilithium3Keypair::load_from_file(&resolved_path) {
+            Ok(kp) => {
+                log::info!("🔑 Loaded existing miner wallet from {:?}", resolved_path);
+                kp
+            }
+            Err(_) => {
+                log::info!("🔑 Creating new miner keypair (no existing wallet found at {:?})", resolved_path);
+                let kp = Dilithium3Keypair::new()?;
+                
+                // Ensure parent directory exists
+                if let Some(parent) = resolved_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                
+                kp.save_to_file(&resolved_path)?;
+                log::info!("✅ New miner wallet saved to {:?}", resolved_path);
+                kp
+            }
+        }
     };
     
     log::info!("🔑 Mining with public key: {}", hex::encode(&keypair.public_key));
@@ -621,8 +652,8 @@ async fn mine_block_command(config: Config, threads: Option<usize>, _timeout: u6
     let pending_txs = blockchain.get_transactions_for_block(1_000_000, 1000);
     log::info!("📝 Found {} pending transactions", pending_txs.len());
     
-    // Start mining
-    let mut miner = Miner::new()?;
+    // Start mining with the loaded keypair
+    let mut miner = Miner::with_config_and_keypair(MiningConfig::default(), keypair)?;
     if let Some(t) = threads {
         let mut cfg = miner.get_config().clone();
         cfg.thread_count = t;
@@ -747,7 +778,8 @@ async fn submit_transaction_command(config: Config, from_key_path: PathBuf, to: 
     };
     
     // Check sender balance
-    let sender_balance = blockchain.get_balance(&sender_keypair.public_key);
+    let sender_address = blockchain.get_address_from_public_key(&sender_keypair.public_key);
+    let sender_balance = blockchain.get_balance(&sender_address);
     let total_cost = amount + transaction.fee;
     if sender_balance < total_cost {
         return Err(numi_core::BlockchainError::InvalidTransaction(
@@ -904,46 +936,48 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
             println!("📈 Total accounts: {total_accounts}");
             println!();
             
-            for (address, account) in &accounts {
-                let address_str = if full {
-                    hex::encode(address)
-                } else {
-                    hex::encode(&address[..address.len().min(16)])
-                };
+            for (public_key, account) in &accounts {
+                // Always show the user-friendly Base58 address
+                let base58_address = blockchain.get_address_from_public_key(public_key);
                 
-                println!("🏦 Address: {}{}", 
-                    address_str, 
-                    if !full { " (truncated)" } else { "" }
-                );
+                println!("🏦 Address: {}", base58_address);
                 println!("   Balance: {} NUMI", account.balance as f64 / 100.0);
                 println!("   Nonce: {}", account.nonce);
                 println!("   Transactions: {}", account.transaction_count);
+                
+                // Optionally show the full public key hex if requested
+                if full {
+                    println!("   Public Key: {}", hex::encode(public_key));
+                }
                 println!();
             }
             
             if !full {
-                println!("💡 Use --full to see complete 64-character addresses");
-                println!("   Truncated addresses cannot be used with the balance command");
+                println!("💡 Use --full to see the underlying public keys");
+                println!("   All addresses shown are ready to use with the balance command");
             }
         }
         OutputFormat::Json => {
             use serde_json::json;
             let mut accounts_json = Vec::new();
             
-            for (address, account) in &accounts {
-                let address_str = if full {
-                    hex::encode(address)
-                } else {
-                    hex::encode(&address[..address.len().min(16)])
-                };
+            for (public_key, account) in &accounts {
+                // Always use the user-friendly Base58 address
+                let base58_address = blockchain.get_address_from_public_key(public_key);
                 
-                accounts_json.push(json!({
-                    "address": address_str,
-                    "full_address": full,
+                let mut account_data = json!({
+                    "address": base58_address,
                     "balance": account.balance as f64 / 100.0,
                     "nonce": account.nonce,
                     "transaction_count": account.transaction_count
-                }));
+                });
+                
+                // Optionally include the full public key hex if requested
+                if full {
+                    account_data["public_key"] = json!(hex::encode(public_key));
+                }
+                
+                accounts_json.push(account_data);
             }
             
             let result = json!({
@@ -960,20 +994,23 @@ async fn show_accounts_command(config: Config, format: OutputFormat, full: bool)
             
             let mut accounts_yaml = Vec::new();
             
-            for (address, account) in &accounts {
-                let address_str = if full {
-                    hex::encode(address)
-                } else {
-                    hex::encode(&address[..address.len().min(16)])
-                };
+            for (public_key, account) in &accounts {
+                // Always use the user-friendly Base58 address
+                let base58_address = blockchain.get_address_from_public_key(public_key);
                 
-                accounts_yaml.push(json!({
-                    "address": address_str,
-                    "full_address": full,
+                let mut account_data = json!({
+                    "address": base58_address,
                     "balance": account.balance as f64 / 100.0,
                     "nonce": account.nonce,
                     "transaction_count": account.transaction_count
-                }));
+                });
+                
+                // Optionally include the full public key hex if requested
+                if full {
+                    account_data["public_key"] = json!(hex::encode(public_key));
+                }
+                
+                accounts_yaml.push(account_data);
             }
             
             let result = json!({
@@ -996,14 +1033,71 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
     let storage = BlockchainStorage::new(&config.storage.data_directory)?;
     let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     
-    // Validate and parse input address
-    let addr_bytes = parse_recipient_address(&address).await?;
-    let addr_hex = hex::encode(&addr_bytes);
+    // Determine the input type and get the appropriate public key bytes
+    let (public_key_bytes, display_address) = if address.len() == 64 {
+        // Input is public key hex (64 chars = 32 bytes) - this is what accounts command shows
+        let pk_bytes = hex::decode(&address)
+            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid public key hex: {e}")))?;
+        let addr = blockchain.get_address_from_public_key(&pk_bytes);
+        (pk_bytes, addr)
+    } else if address.len() == 128 {
+        // Input is full public key hex (128 chars = 64 bytes) - derive address from it
+        let pk_bytes = hex::decode(&address)
+            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid public key hex: {e}")))?;
+        if pk_bytes.len() != 64 {
+            return Err(BlockchainError::InvalidTransaction(
+                "Invalid public key length: expected 64 bytes".to_string(),
+            ));
+        }
+        let hashed_pk = numi_core::crypto::blake3_hash(&pk_bytes).to_vec();
+        let addr = blockchain.get_address_from_public_key(&hashed_pk);
+        (hashed_pk, addr)
+    } else if address.len() > 1000 && address.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Input is very long hex string (raw public key from accounts command)
+        let pk_bytes = hex::decode(&address)
+            .map_err(|e| BlockchainError::InvalidTransaction(format!("Invalid long public key hex: {e}")))?;
+        let addr = blockchain.get_address_from_public_key(&pk_bytes);
+        (pk_bytes, addr)
+    } else if PathBuf::from(&address).exists() {
+        // Input is wallet JSON file
+        let file_content = std::fs::read_to_string(&address)
+            .map_err(|e| BlockchainError::IoError(format!("Failed to read wallet file: {e}")))?;
+        let keypair: Dilithium3Keypair = serde_json::from_str(&file_content)
+            .map_err(|e| BlockchainError::SerializationError(format!("Invalid wallet file: {e}")))?;
+        let pk_bytes = numi_core::crypto::blake3_hash(&keypair.public_key).to_vec();
+        let addr = blockchain.get_address_from_public_key(&pk_bytes);
+        (pk_bytes, addr)
+    } else if NumiBlockchain::is_valid_address(&address) {
+        // Input is Base58 address - find matching public key
+        let mut found_pubkey = None;
+        for entry in blockchain.get_all_accounts() {
+            let (pubkey, _) = entry;
+            if blockchain.get_address_from_public_key(&pubkey) == address {
+                found_pubkey = Some(pubkey);
+                break;
+            }
+        }
+        match found_pubkey {
+            Some(pk) => (pk, address.clone()),
+            None => {
+                log::info!("📍 Address: {}", address);
+                log::info!("💰 Balance: 0 NUMI");
+                log::info!("");
+                log::info!("ℹ️  This address is valid but has no transactions.");
+                return Ok(());
+            }
+        }
+    } else {
+        // Invalid format
+        return Err(BlockchainError::InvalidTransaction(
+            format!("Invalid address format: {}. Expected Base58 address, hex public key, or wallet file path.", address)
+        ));
+    };
  
-    // Get balance
-    let balance = blockchain.get_balance(&addr_bytes);
+    // Get balance using public key bytes
+    let balance = blockchain.get_balance_by_pubkey(&public_key_bytes);
  
-    log::info!("📍 Address: {addr_hex}");
+    log::info!("📍 Address: {}", display_address);
     log::info!("💰 Balance: {} NUMI", balance as f64 / 100.0);
     
     // If balance is 0, provide helpful guidance
@@ -1020,7 +1114,7 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
     }
     
     // Try to get account state for more details
-    if let Ok(account_state) = blockchain.get_account_state(&addr_bytes) {
+    if let Ok(account_state) = blockchain.get_account_state(&public_key_bytes) {
         log::info!("🔢 Nonce: {}", account_state.nonce);
         log::info!("📊 Transaction count: {}", account_state.transaction_count);
     }
@@ -1042,14 +1136,14 @@ async fn show_balance_command(config: Config, address: String, history: bool) ->
             if let Some(block) = blockchain.get_block_by_height(height) {
                 for transaction in block.transactions {
                     // Check if this transaction involves our address
-                    let is_sender = addr_bytes == numi_core::crypto::blake3_hash(&transaction.from);
+                    let is_sender = public_key_bytes == transaction.from;
                     let is_receiver = match &transaction.transaction_type {
                         TransactionType::Transfer { to, .. } => {
-                            addr_bytes == numi_core::crypto::blake3_hash(to)
+                            public_key_bytes == *to
                         }
                         TransactionType::MiningReward { pool_address, .. } => {
                             if let Some(pool_addr) = pool_address {
-                                addr_bytes == numi_core::crypto::blake3_hash(pool_addr)
+                                public_key_bytes == *pool_addr
                             } else {
                                 // Mining reward to miner (sender)
                                 is_sender
@@ -1104,23 +1198,36 @@ async fn init_blockchain_command(config: Config, _force: bool, _genesis_config_p
     let storage = BlockchainStorage::new(&config.storage.data_directory)?;
     log::info!("✅ Storage initialized");
     
-    // Load or generate miner wallet for genesis and mining rewards
-    let wallet_path = config.storage.data_directory.join("miner-wallet.json");
-    let miner_keypair = match Dilithium3Keypair::load_from_file(&wallet_path) {
+    // Use consistent wallet path resolution for genesis miner
+    let wallet_path = config.mining.wallet_path.clone();
+    let resolved_wallet_path = if wallet_path.is_absolute() {
+        wallet_path
+    } else {
+        config.storage.data_directory.join(&wallet_path)
+    };
+    
+    let miner_keypair = match Dilithium3Keypair::load_from_file(&resolved_wallet_path) {
         Ok(kp) => {
-            log::info!("🔑 Loaded existing miner wallet from {wallet_path:?}");
+            log::info!("🔑 Loaded existing miner wallet from {:?}", resolved_wallet_path);
             kp
         }
         Err(_) => {
             let kp = Dilithium3Keypair::new()?;
-            kp.save_to_file(&wallet_path)?;
-            log::info!("🔑 Generated new miner wallet at {wallet_path:?}");
+            
+            // Ensure parent directory exists
+            if let Some(parent) = resolved_wallet_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            
+            kp.save_to_file(&resolved_wallet_path)?;
+            log::info!("🔑 Generated new miner wallet at {:?}", resolved_wallet_path);
             kp
         }
     };
+    
     // Initialize blockchain with specified miner keypair and consensus config
     let blockchain = NumiBlockchain::new_with_config(Some(config.consensus.clone()), Some(miner_keypair))?;
-    log::info!("✅ Blockchain initialized with miner wallet {wallet_path:?}");
+    log::info!("✅ Blockchain initialized with miner wallet {:?}", resolved_wallet_path);
     
     // Save initial state and blocks
     blockchain.save_to_storage(&storage)?;
@@ -1145,18 +1252,22 @@ async fn start_rpc_server_command(config: Config) -> Result<()> {
     let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
     let blockchain = Arc::new(RwLock::new(blockchain));
 
-    // Initialize network and miner
+    // Initialize network and miner with consistent wallet path resolution
     let network_manager = NetworkManager::new(blockchain.clone())?;
-    let miner = Miner::new()?;
+    
+    // Use consistent wallet path resolution
+    let miner = Miner::with_config_and_data_dir(MiningConfig::default(), config.storage.data_directory.clone())?;
     
     // Create and start RPC server with components
-    let rpc_server = RpcServer::with_config_and_components(
+    let network_handle = network_manager.create_handle();
+    let rpc_server = RpcServer::with_shared_components(
         blockchain, 
         Arc::new(storage), 
         RateLimitConfig::default(),
         AuthConfig::default(),
-        network_manager, 
-        miner
+        config.rpc.clone(),
+        network_handle, 
+        Arc::new(RwLock::new(miner))
     )?;
     rpc_server.start(config.rpc.port).await?;
     

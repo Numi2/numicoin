@@ -222,6 +222,23 @@ impl BlockHeader {
             .map(|s| s as usize)
             .map_err(|e| BlockchainError::SerializationError(e.to_string()))
     }
+
+    pub fn calculate_hash(&self) -> Result<BlockHash> {
+        // Create header data without signature for hashing
+        let header_data = HeaderForHashing {
+            version: self.version,
+            height: self.height,
+            timestamp: self.timestamp,
+            previous_hash: self.previous_hash,
+            merkle_root: self.merkle_root,
+            difficulty: self.difficulty,
+            nonce: self.nonce,
+            miner_public_key: self.miner_public_key.clone(),
+        };
+        let serialized = bincode::serialize(&header_data)
+            .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
+        Ok(crate::crypto::blake3_hash_block(&serialized))
+    }
 }
 
 #[cfg(test)]

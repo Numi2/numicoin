@@ -2,29 +2,32 @@
 import json
 import hashlib
 
-# Load the miner wallet
-with open('test-wallets/miner-wallet.json', 'r') as f:
-    wallet = json.load(f)
+def get_wallet_address(wallet_file):
+    """Extract wallet address from wallet JSON file"""
+    with open(wallet_file, 'r') as f:
+        wallet_data = json.load(f)
+    
+    # Get public key as bytes
+    public_key_bytes = bytes(wallet_data['public_key'])
+    
+    # Create address by hashing the public key
+    address_hash = hashlib.sha256(public_key_bytes).hexdigest()
+    
+    print(f"Wallet file: {wallet_file}")
+    print(f"Public key length: {len(public_key_bytes)} bytes")
+    print(f"Address (SHA256 hash): {address_hash}")
+    print(f"Address (first 32 chars): {address_hash[:32]}")
+    
+    return address_hash
 
-# Get the public key
-public_key = bytes(wallet['public_key'])
-
-# Derive address using Blake3 (simulate what the blockchain does)
-# For now, let's use SHA256 as a simple hash
-address = hashlib.sha256(public_key).digest()
-
-print(f"Full public key length: {len(public_key)} bytes")
-print(f"Full public key (first 64 chars): {public_key[:32].hex()}")
-print(f"Derived address (32 bytes): {address.hex()}")
-print(f"Derived address (64 bytes): {address.hex() + address.hex()}")
-
-# Check if the user's address matches any part
-user_address = "e002b3c9d7335cda3d8597c8e4bb20891d5571dc1ac30978413ad328d8a7a98162462bfd63df7fa54b5ca1d96c960676686deb2bf3db"
-print(f"User provided address: {user_address}")
-print(f"User address length: {len(user_address) // 2} bytes")
-
-# Check if user address matches first 32 bytes of derived address
-if user_address.startswith(address.hex()):
-    print("✅ User address matches first 32 bytes of derived address")
-else:
-    print("❌ User address does not match derived address") 
+if __name__ == "__main__":
+    # Test with our wallets
+    print("=== Miner Wallet ===")
+    miner_address = get_wallet_address("./core-data/miner-wallet.json")
+    
+    print("\n=== Test Wallet ===")
+    test_address = get_wallet_address("test-wallet.json")
+    
+    print(f"\n=== Summary ===")
+    print(f"Miner address: {miner_address}")
+    print(f"Test address: {test_address}") 

@@ -83,12 +83,13 @@ async fn main() -> Result<()> {
     };
     
     let blockchain = Arc::new(RwLock::new(blockchain));
-    let initial_balance = blockchain.read().get_balance(&numi_core::crypto::blake3_hash(&wallet.public_key));
+    let wallet_address = blockchain.read().get_address_from_public_key(&wallet.public_key);
+    let initial_balance = blockchain.read().get_balance(&wallet_address);
     println!("💎 Current Balance: {} NUMI", initial_balance as f64 / 100_000_000.0);
     println!();
     
     // Create a dummy network handle for mining service
-    let network = NetworkManager::new()?;
+    let network = NetworkManager::new(blockchain.clone())?;
     let network_handle = network.create_handle();
     
     // Start mining service
@@ -103,7 +104,6 @@ async fn main() -> Result<()> {
         config.mining.clone(),
         data_dir,
         Duration::from_secs(10), // Fast 10-second blocks for better user experience
-        "miner-wallet.json".into(),
     );
     
     // Start mining in background
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
             }
             _ = status_interval.tick() => {
                 let state = blockchain.read().get_chain_state();
-                let current_balance = blockchain.read().get_balance(&numi_core::crypto::blake3_hash(&wallet.public_key));
+                let current_balance = blockchain.read().get_balance(&wallet_address);
                 
                 // Check if we mined new blocks
                 if current_balance > last_balance {

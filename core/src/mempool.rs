@@ -11,16 +11,6 @@ use crate::{Result, BlockchainError};
 use crate::blockchain::NumiBlockchain;
 use crate::config::ConsensusConfig;
 
-// AI Agent Note: This is a production not ready. transaction mempool implementation
-// Features implemented:
-// - Fee-based transaction prioritization using BTreeMap
-// - Account nonce validation to prevent replay attacks
-// - Memory size limits and LRU eviction policy
-// - Double-spend detection via UTXO tracking
-// - Transaction validation before admission
-// - Concurrent access with high-performance data structures
-// - Anti-spam protection with rate limiting per account
-// - Transaction expiry and cleanup mechanisms
 
 /// Transaction priority score based on fee rate and age
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -470,17 +460,26 @@ impl TransactionMempool {
                     return Err(BlockchainError::InvalidTransaction("Zero amount transfer".to_string()));
                 }
                 
+                // Check balance if blockchain reference is available
                 if let Some(weak_chain) = &self.blockchain {
                     if let Some(blockchain_arc) = weak_chain.upgrade() {
                         let blockchain = blockchain_arc.read();
-                    let account_state = blockchain.get_account_state_or_default(&transaction.from);
-                    if account_state.balance < transaction.get_required_balance() {
-                        return Ok(ValidationResult::InsufficientBalance {
-                            required: transaction.get_required_balance(),
-                            available: account_state.balance,
-                        });
+                        let account_state = blockchain.get_account_state_or_default(&transaction.from);
+                        if account_state.balance < transaction.get_required_balance() {
+                            return Ok(ValidationResult::InsufficientBalance {
+                                required: transaction.get_required_balance(),
+                                available: account_state.balance,
+                            });
+                        }
+                    } else {
+                        // Blockchain reference is stale, skip balance validation
+                        log::warn!("⚠️ Blockchain reference is stale, skipping balance validation for transaction {}", 
+                                  hex::encode(transaction.id));
                     }
-                    }
+                } else {
+                    // No blockchain reference available, skip balance validation
+                    log::warn!("⚠️ No blockchain reference available, skipping balance validation for transaction {}", 
+                              hex::encode(transaction.id));
                 }
             }
             TransactionType::MiningReward { .. } => {
@@ -496,8 +495,19 @@ impl TransactionMempool {
     }
 
     fn calculate_transaction_size(&self, transaction: &Transaction) -> usize {
-        // Estimate serialized size
-        bincode::serialize(transaction).map(|bytes| bytes.len()).unwrap_or(512)
+        // Use the same size calculation as Transaction::calculate_size to ensure
+        // consistency between core validation and mempool admission.  This
+        // excludes the signature bytes, matching the fee rules enforced by
+        // `Transaction::validate_structure`.
+        transaction
+            .calculate_size()
+            .unwrap_or_else(|_| {
+                // Fallback to full serialization size only if the lighter
+                // calculation unexpectedly fails.
+                bincode::serialize(transaction)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(512)
+            })
     }
 
     fn calculate_fee_rate(&self, transaction: &Transaction, size_bytes: usize) -> u64 {

@@ -284,16 +284,31 @@ impl NumiBlockchain {
         let miner_keypair = if let Some(kp) = keypair {
             kp
         } else {
-            // Try to load from default wallet file first, fall back to new keypair
-            let default_wallet_path = "miner-wallet.json";
-            match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
+            // Use consistent wallet path resolution with default data directory
+            let default_data_dir = std::path::PathBuf::from("./core-data");
+            let default_wallet_path = default_data_dir.join("miner-wallet.json");
+            
+            match crate::crypto::Dilithium3Keypair::load_from_file(&default_wallet_path) {
                 Ok(kp) => {
-                    log::info!("🔑 Loaded existing miner wallet from {default_wallet_path}");
+                    log::info!("🔑 Loaded existing miner wallet from {:?}", default_wallet_path);
                     kp
                 }
                 Err(_) => {
-                    log::info!("🔑 Creating new miner keypair (no existing wallet found at {default_wallet_path})");
-                    crate::crypto::Dilithium3Keypair::new()?
+                    log::info!("🔑 Creating new miner keypair (no existing wallet found at {:?})", default_wallet_path);
+                    let kp = crate::crypto::Dilithium3Keypair::new()?;
+                    
+                    // Ensure parent directory exists
+                    if let Some(parent) = default_wallet_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    
+                    // Try to save the new keypair
+                    if let Err(e) = kp.save_to_file(&default_wallet_path) {
+                        log::warn!("⚠️ Failed to save new keypair to {:?}: {}", default_wallet_path, e);
+                    } else {
+                        log::info!("✅ New miner wallet saved to {:?}", default_wallet_path);
+                    }
+                    kp
                 }
             }
         };
@@ -354,26 +369,37 @@ impl NumiBlockchain {
     
     /// Load blockchain from storage with consensus configuration
     pub async fn load_from_storage_with_config(storage: &crate::storage::BlockchainStorage, consensus_config: Option<crate::config::ConsensusConfig>) -> Result<Self> {
-        // Try to load from default wallet file first, fall back to new keypair
-        let default_wallet_path = "miner-wallet.json";
-        let miner_keypair = match crate::crypto::Dilithium3Keypair::load_from_file(default_wallet_path) {
+        // Use consistent wallet path resolution with default data directory
+        // Since storage doesn't expose its path, we'll use the default location
+        let default_data_dir = std::path::PathBuf::from("./core-data");
+        let default_wallet_path = default_data_dir.join("miner-wallet.json");
+        
+        let miner_keypair = match crate::crypto::Dilithium3Keypair::load_from_file(&default_wallet_path) {
             Ok(kp) => {
-                log::info!("🔑 Loaded existing miner wallet from {default_wallet_path}");
+                log::info!("🔑 Loaded existing miner wallet from {:?}", default_wallet_path);
                 kp
             }
             Err(_) => {
-                log::info!("🔑 Creating new miner keypair (no existing wallet found at {default_wallet_path})");
-                crate::crypto::Dilithium3Keypair::new()?
+                log::info!("🔑 Creating new miner keypair (no existing wallet found at {:?})", default_wallet_path);
+                let kp = crate::crypto::Dilithium3Keypair::new()?;
+                
+                // Ensure parent directory exists
+                if let Some(parent) = default_wallet_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                
+                // Try to save the new keypair
+                if let Err(e) = kp.save_to_file(&default_wallet_path) {
+                    log::warn!("⚠️ Failed to save new keypair to {:?}: {}", default_wallet_path, e);
+                } else {
+                    log::info!("✅ New miner wallet saved to {:?}", default_wallet_path);
+                }
+                kp
             }
         };
         
-        let mempool = Arc::new(if let Some(ref config) = consensus_config {
-            TransactionMempool::new_with_config(config.clone())
-        } else {
-            TransactionMempool::new()
-        });
-        
-        let mut blockchain = Self {
+        // Create a temporary blockchain instance to wrap in Arc for mempool initialization
+        let temp_blockchain = Self {
             blocks: Arc::new(DashMap::new()),
             main_chain: Arc::new(RwLock::new(Vec::new())),
             accounts: Arc::new(DashMap::new()),
@@ -381,18 +407,35 @@ impl NumiBlockchain {
             checkpoints: Arc::new(RwLock::new(Vec::new())),
             orphan_pool: Arc::new(DashMap::new()),
             orphan_by_peer: Arc::new(DashMap::new()),
-            mempool,
+            mempool: Arc::new(TransactionMempool::new()), // Temporary mempool
             block_times: Arc::new(RwLock::new(VecDeque::new())),
             peer_metrics: Arc::new(DashMap::new()),
             genesis_hash: [0; 32],
-            miner_keypair,
+            miner_keypair: miner_keypair.clone(),
             target_block_time: Duration::from_secs(30), // 30 second blocks
             difficulty_adjustment_interval: 144,        // Adjust every 144 blocks (~1 hour)
             max_orphan_blocks: 1000,                   // Maximum orphan blocks to keep
             max_reorg_depth: 144,                      // Maximum reorganization depth
             block_processing_times: Arc::new(RwLock::new(VecDeque::new())),
         };
-        
+
+        // Wrap the blockchain in an Arc so we can provide a weak reference to the mempool
+        let blockchain_arc = Arc::new(RwLock::new(temp_blockchain));
+
+        // Build the mempool and provide a weak reference to the blockchain
+        let mut mempool = if let Some(ref config) = consensus_config {
+            TransactionMempool::new_with_config(config.clone())
+        } else {
+            TransactionMempool::new()
+        };
+        mempool.set_blockchain_handle(&blockchain_arc);
+
+        // Update the blockchain with the properly configured mempool
+        {
+            let mut locked_blockchain = blockchain_arc.write();
+            locked_blockchain.mempool = Arc::new(mempool);
+        }
+
         // Load all blocks from storage
         let stored_blocks = storage.iter_blocks(None, None)?.collect::<Result<Vec<_>>>()?;
         let mut blocks_by_height: BTreeMap<u64, Vec<Block>> = BTreeMap::new();
@@ -407,15 +450,20 @@ impl NumiBlockchain {
         // Rebuild blockchain from blocks in height order
         if blocks_by_height.is_empty() {
             // No stored blocks, create genesis block
-            blockchain.create_genesis_block()?;
+            {
+                let mut locked_blockchain = blockchain_arc.write();
+                locked_blockchain.create_genesis_block()?;
+            }
         } else {
             // Load existing blocks
             for (height, blocks) in blocks_by_height {
                 for block in blocks {
                     if height == 0 {
-                        blockchain.genesis_hash = block.calculate_hash()?;
+                        let mut locked_blockchain = blockchain_arc.write();
+                        locked_blockchain.genesis_hash = block.calculate_hash()?;
+                        drop(locked_blockchain);
                     }
-                    blockchain.process_block_internal(block, false).await?;
+                    blockchain_arc.read().process_block_internal(block, false).await?;
                 }
             }
         }
@@ -426,35 +474,45 @@ impl NumiBlockchain {
         // Load checkpoints
         if let Some(saved_checkpoints) = storage.load_checkpoints()? {
             for checkpoint in saved_checkpoints {
-                blockchain.checkpoints.write().push(checkpoint);
+                blockchain_arc.read().checkpoints.write().push(checkpoint);
             }
         }
         
         // Rebuild account states from the blockchain by replaying all transactions
-        blockchain.rebuild_account_states().await?;
+        blockchain_arc.read().rebuild_account_states().await?;
         
         // Recalculate total supply from all blocks to ensure accuracy
-        let recalculated_total_supply = blockchain.recalculate_total_supply().await?;
+        let recalculated_total_supply = blockchain_arc.read().recalculate_total_supply().await?;
         
         // Load chain state but override total_supply with recalculated value
         if let Some(mut saved_state) = storage.load_chain_state()? {
             saved_state.total_supply = recalculated_total_supply;
-            *blockchain.state.write() = saved_state;
+            *blockchain_arc.read().state.write() = saved_state;
         } else {
             // If no saved state, update the default state with recalculated total supply
-            let mut state = blockchain.state.write();
-            state.total_supply = recalculated_total_supply;
+            {
+                let blockchain = blockchain_arc.read();
+                let mut state = blockchain.state.write();
+                state.total_supply = recalculated_total_supply;
+            }
         }
         
         // Validate the loaded blockchain
-        if !blockchain.validate_chain().await {
+        if !blockchain_arc.read().validate_chain().await {
             return Err(BlockchainError::InvalidBlock("Loaded blockchain failed validation".to_string()));
         }
         
         log::info!("✅ Blockchain loaded from storage with {} blocks and {} NUMI total supply", 
-                  blockchain.get_current_height(), 
+                  blockchain_arc.read().get_current_height(), 
                   recalculated_total_supply as f64 / 100.0);
-        Ok(blockchain)
+
+        // Attempt to unwrap the Arc; this should succeed because the only
+        // remaining strong reference is `blockchain_arc` itself (the mempool
+        // kept a `Weak`).
+        match Arc::try_unwrap(blockchain_arc) {
+            Ok(rwlock) => Ok(rwlock.into_inner()),
+            Err(_) => Err(BlockchainError::ConsensusError("Failed to unwrap blockchain Arc".to_string())),
+        }
     }
 
     /// Process new block with enhanced DoS protection and validation
@@ -954,7 +1012,7 @@ impl NumiBlockchain {
         );
         
         // Sign the genesis block
-        genesis_block.sign(&self.miner_keypair)?;
+        genesis_block.sign(&self.miner_keypair, None)?;
         self.genesis_hash = genesis_block.calculate_hash()?;
         
         // Process genesis block (add to index, but transaction not applied automatically)
@@ -1041,7 +1099,7 @@ impl NumiBlockchain {
     async fn validate_transaction_in_context(&self, transaction: &Transaction) -> Result<()> {
         // Get current account state (using derived address)
         let address = self.derive_address(&transaction.from);
-        let account_state = self.accounts.get(&address)
+        let account_state = self.accounts.get(address.as_bytes())
             .map(|state| state.clone())
             .unwrap_or_else(|| AccountState {
                 balance: 0,
@@ -1084,15 +1142,11 @@ impl NumiBlockchain {
     async fn apply_transaction(&self, transaction: &Transaction) -> Result<()> {
         let sender_key = transaction.from.clone();
         
-        // Derive address from public key
-        let address = self.derive_address(&sender_key);
+        log::debug!("🔍 Applying transaction with sender key: {} (length: {})", 
+                   hex::encode(&sender_key[..sender_key.len().min(32)]), sender_key.len());
         
-        log::debug!("🔍 Applying transaction with sender key: {} (length: {}) -> address: {}", 
-                   hex::encode(&sender_key[..sender_key.len().min(32)]), sender_key.len(), 
-                   address);
-        
-        // Get or create sender account using address
-        let mut sender_state = self.accounts.get(address.as_bytes())
+        // Get or create sender account using public key bytes directly
+        let mut sender_state = self.accounts.get(&sender_key)
             .map(|state| state.clone())
             .unwrap_or_default();
         
@@ -1104,18 +1158,15 @@ impl NumiBlockchain {
                 sender_state.transaction_count += 1;
                 sender_state.total_sent += amount;
                 
-                // Derive recipient address
-                let recipient_address = self.derive_address(to);
-                
-                // Add to recipient
-                let mut recipient_state = self.accounts.get(recipient_address.as_bytes())
+                // Add to recipient using public key bytes directly
+                let mut recipient_state = self.accounts.get(to)
                     .map(|state| state.clone())
                     .unwrap_or_default();
                 
                 recipient_state.balance += amount;
                 recipient_state.total_received += amount;
                 
-                self.accounts.insert(recipient_address.as_bytes().to_vec(), recipient_state);
+                self.accounts.insert(to.clone(), recipient_state);
             }
             
             TransactionType::MiningReward { amount, .. } => {
@@ -1138,7 +1189,7 @@ impl NumiBlockchain {
             }
         }
         
-        self.accounts.insert(address.as_bytes().to_vec(), sender_state);
+        self.accounts.insert(sender_key, sender_state);
         log::info!("✅ Transaction applied successfully");
         Ok(())
     }
@@ -1420,6 +1471,44 @@ impl NumiBlockchain {
         self.blocks.get(hash).map(|meta| meta.block.clone())
     }
     
+    /// Get block headers starting from a specific hash
+    pub fn get_block_headers(&self, start_hash: Vec<u8>, count: u32) -> Vec<crate::block::BlockHeader> {
+        let mut headers = Vec::new();
+        
+        // If start_hash is empty, start from genesis
+        let start_height = if start_hash.is_empty() {
+            0
+        } else {
+            // Convert Vec<u8> to BlockHash
+            if start_hash.len() != 32 {
+                return headers; // Invalid hash length
+            }
+            let mut hash_array = [0u8; 32];
+            hash_array.copy_from_slice(&start_hash);
+            
+            // Find the block with this hash
+            if let Some(block_meta) = self.blocks.get(&hash_array) {
+                block_meta.block.header.height
+            } else {
+                return headers; // Block not found
+            }
+        };
+        
+        // Collect headers from start_height up to count
+        let main_chain = self.main_chain.read();
+        let end_height = std::cmp::min(start_height + count as u64, main_chain.len() as u64);
+        
+        for height in start_height..end_height {
+            if let Some(block_hash) = main_chain.get(height as usize) {
+                if let Some(block_meta) = self.blocks.get(block_hash) {
+                    headers.push(block_meta.block.header.clone());
+                }
+            }
+        }
+        
+        headers
+    }
+    
     /// Get account state
     pub fn get_account_state(&self, public_key: &[u8]) -> Result<AccountState> {
         self.accounts.get(public_key)
@@ -1447,6 +1536,11 @@ impl NumiBlockchain {
         bs58::encode(full_address).into_string()
     }
 
+    /// Get address from public key
+    pub fn get_address_from_public_key(&self, public_key: &[u8]) -> String {
+        self.derive_address(public_key)
+    }
+
     /// Validate a NumiCoin address
     pub fn is_valid_address(address: &str) -> bool {
         if let Ok(decoded) = bs58::decode(address).into_vec() {
@@ -1462,21 +1556,40 @@ impl NumiBlockchain {
         }
     }
     
-    /// Get account balance
+    /// Get account balance by public key bytes
+    pub fn get_balance_by_pubkey(&self, public_key: &[u8]) -> u64 {
+        let balance = self.accounts.get(public_key)
+            .map(|state| state.balance)
+            .unwrap_or(0);
+        
+        log::debug!("🔍 Balance lookup for pubkey {}: {} NUMI", 
+                   hex::encode(public_key),
+                   balance as f64 / 100.0);
+        
+        balance
+    }
+    
+    /// Get account balance by Base58 address (for backward compatibility)
     pub fn get_balance(&self, address: &str) -> u64 {
         if !Self::is_valid_address(address) {
             return 0;
         }
         
-        let balance = self.accounts.get(address.as_bytes())
-            .map(|state| state.balance)
-            .unwrap_or(0);
+        // This function is problematic because accounts are stored by public key,
+        // but we only have the Base58 address. We need to iterate through accounts
+        // to find matching addresses.
+        for entry in self.accounts.iter() {
+            let (pubkey, account_state) = entry.pair();
+            if self.derive_address(pubkey) == address {
+                log::debug!("🔍 Balance lookup for address {}: {} NUMI", 
+                           address,
+                           account_state.balance as f64 / 100.0);
+                return account_state.balance;
+            }
+        }
         
-        log::debug!("🔍 Balance lookup for address {}: {} NUMI", 
-                   address,
-                   balance as f64 / 100.0);
-        
-        balance
+        log::debug!("🔍 Balance lookup for address {}: 0 NUMI (not found)", address);
+        0
     }
     
     /// Get mining reward for given height

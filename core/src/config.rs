@@ -230,7 +230,7 @@ pub struct MiningConfig {
     pub nonce_chunk_size: u64,
     pub stats_update_interval_secs: u64,
     /// Path to the miner's wallet file (relative to data_directory)
-    pub wallet_path: String,
+    pub wallet_path: PathBuf,
     pub argon2_config: Argon2Config,
     pub enable_cpu_affinity: bool,
     pub thermal_throttle_temp: f32,
@@ -244,19 +244,19 @@ pub struct MiningConfig {
 impl Default for MiningConfig {
     fn default() -> Self {
         Self {
-            enabled: false, // Disabled by default
+            enabled: true,
             thread_count: num_cpus::get(),
-            nonce_chunk_size: 10_000,
+            nonce_chunk_size: 1_000_000,
             stats_update_interval_secs: 5,
-            wallet_path: "miner-wallet.json".to_string(),
+            wallet_path: PathBuf::from("wallet.key"),
             argon2_config: Argon2Config::default(),
-            enable_cpu_affinity: false,
+            enable_cpu_affinity: true,
             thermal_throttle_temp: 85.0,
-            power_limit_watts: 0.0,
+            power_limit_watts: 0.0, // 0 = no limit
             mining_pool_url: None,
             mining_pool_worker: None,
-            target_block_time_secs: 30,
-            difficulty_adjustment_interval: 144,
+            target_block_time_secs: 60,
+            difficulty_adjustment_interval: 2016,
         }
     }
 }
@@ -269,7 +269,7 @@ impl MiningConfig {
             thread_count: num_cpus::get(),
             nonce_chunk_size: 50_000,
             stats_update_interval_secs: 2,
-            wallet_path: "miner-wallet.json".to_string(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::production(),
             enable_cpu_affinity: true,
             thermal_throttle_temp: 90.0,
@@ -284,7 +284,7 @@ impl MiningConfig {
             thread_count: (num_cpus::get() / 2).max(1),
             nonce_chunk_size: 1_000,
             stats_update_interval_secs: 10,
-            wallet_path: "miner-wallet.json".to_string(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::development(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 70.0,
@@ -302,7 +302,7 @@ impl MiningConfig {
             thread_count: num_cpus::get_physical(),
             nonce_chunk_size: 5_000,
             stats_update_interval_secs: 5,
-            wallet_path: "miner-wallet.json".to_string(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::development(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 75.0,

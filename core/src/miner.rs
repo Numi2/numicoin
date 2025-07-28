@@ -1,18 +1,20 @@
+use crate::{
+    block::Block,
+    transaction::Transaction,
+    crypto::Dilithium3Keypair,
+    error::BlockchainError,
+    Result,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+use parking_lot::RwLock;
+use chrono;
+use num_cpus;
 use std::path::PathBuf;
 
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-
-use crate::block::{Block, BlockHash};
-use crate::transaction::{Transaction, TransactionType};
-use crate::crypto::{generate_difficulty_target, verify_pow, Dilithium3Keypair, Argon2Config};
-use crate::error::BlockchainError;
-use crate::{Result};
-
-use sysinfo::{System, SystemExt, ComponentExt};
+// Static flag to track if temperature warning has been logged
+static TEMP_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // Features must be checked:
 // - Multi-threaded mining with Rayon for parallel nonce search
@@ -25,7 +27,7 @@ use sysinfo::{System, SystemExt, ComponentExt};
 // - Mining pool support preparation
 
 /// Mining statistics with comprehensive performance metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MiningStats {
     pub hash_rate: u64,           // Hashes per second
     pub total_hashes: u64,        // Total hashes computed
@@ -41,7 +43,7 @@ pub struct MiningStats {
 }
 
 /// Mining configuration for different deployment scenarios
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MiningConfig {
     /// Number of threads to use (0 = auto-detect)
     pub thread_count: usize,
@@ -49,10 +51,10 @@ pub struct MiningConfig {
     pub nonce_chunk_size: u64,
     /// Statistics update interval in seconds
     pub stats_update_interval: u64,
-    /// Path to the miner's wallet file
-    pub wallet_path: String,
+    /// Path to the miner's wallet file (can be relative or absolute)
+    pub wallet_path: PathBuf,
     /// Argon2id configuration for PoW
-    pub argon2_config: Argon2Config,
+    pub argon2_config: crate::crypto::Argon2Config,
     /// Enable CPU affinity optimization
     pub enable_cpu_affinity: bool,
     /// Target temperature in Celsius (0 = no throttling)
@@ -67,7 +69,7 @@ impl From<crate::config::MiningConfig> for MiningConfig {
             thread_count: cfg.thread_count,
             nonce_chunk_size: cfg.nonce_chunk_size,
             stats_update_interval: cfg.stats_update_interval_secs,
-            wallet_path: cfg.wallet_path,
+            wallet_path: cfg.wallet_path.clone(),
             argon2_config: cfg.argon2_config,
             enable_cpu_affinity: cfg.enable_cpu_affinity,
             thermal_throttle_temp: cfg.thermal_throttle_temp,
@@ -82,8 +84,8 @@ impl Default for MiningConfig {
             thread_count: num_cpus::get(),
             nonce_chunk_size: 10_000,
             stats_update_interval: 5,
-            wallet_path: "miner-wallet.json".to_string(),
-            argon2_config: Argon2Config::default(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
+            argon2_config: crate::crypto::Argon2Config::default(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 85.0,
             power_limit_watts: 0.0,
@@ -98,8 +100,8 @@ impl MiningConfig {
             thread_count: num_cpus::get(),
             nonce_chunk_size: 50_000,
             stats_update_interval: 2,
-            wallet_path: "miner-wallet.json".to_string(),
-            argon2_config: Argon2Config::production(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
+            argon2_config: crate::crypto::Argon2Config::production(),
             enable_cpu_affinity: true,
             thermal_throttle_temp: 90.0,
             power_limit_watts: 0.0,
@@ -112,11 +114,20 @@ impl MiningConfig {
             thread_count: (num_cpus::get() / 2).max(1),
             nonce_chunk_size: 1_000,
             stats_update_interval: 10,
-            wallet_path: "miner-wallet.json".to_string(),
-            argon2_config: Argon2Config::development(),
+            wallet_path: PathBuf::from("miner-wallet.json"),
+            argon2_config: crate::crypto::Argon2Config::development(),
             enable_cpu_affinity: false,
             thermal_throttle_temp: 70.0,
             power_limit_watts: 50.0,
+        }
+    }
+    
+    /// Resolve wallet path relative to data directory if needed
+    pub fn resolve_wallet_path(&self, data_directory: &PathBuf) -> PathBuf {
+        if self.wallet_path.is_absolute() {
+            self.wallet_path.clone()
+        } else {
+            data_directory.join(&self.wallet_path)
         }
     }
 }
@@ -158,12 +169,46 @@ pub struct Miner {
 impl Miner {
     /// Create new miner with default configuration
     pub fn new() -> Result<Self> {
-        Self::with_config(MiningConfig::default())
+        let config = MiningConfig::default();
+        Self::with_config(config)
     }
     
     /// Create new miner with custom configuration
     pub fn with_config(config: MiningConfig) -> Result<Self> {
-        let keypair = Dilithium3Keypair::new()?;
+        // Use default data directory for wallet resolution
+        let data_dir = PathBuf::from("./core-data");
+        Self::with_config_and_data_dir(config, data_dir)
+    }
+    
+    /// Create new miner with custom configuration and data directory
+    pub fn with_config_and_data_dir(config: MiningConfig, data_directory: PathBuf) -> Result<Self> {
+        let wallet_path = config.resolve_wallet_path(&data_directory);
+        
+        // Try to load keypair from configured wallet path, fall back to new keypair
+        let keypair = match Dilithium3Keypair::load_from_file(&wallet_path) {
+            Ok(kp) => {
+                log::info!("🔑 Loaded existing miner wallet from {:?}", wallet_path);
+                kp
+            }
+            Err(_) => {
+                log::info!("🔑 Creating new miner keypair (no existing wallet found at {:?})", wallet_path);
+                let kp = Dilithium3Keypair::new()?;
+                
+                // Ensure parent directory exists
+                if let Some(parent) = wallet_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                
+                // Save the new keypair to the configured wallet path
+                if let Err(e) = kp.save_to_file(&wallet_path) {
+                    log::warn!("⚠️ Failed to save new keypair to {:?}: {}", wallet_path, e);
+                } else {
+                    log::info!("✅ New miner wallet saved to {:?}", wallet_path);
+                }
+                kp
+            }
+        };
+        
         Self::with_config_and_keypair(config, keypair)
     }
     
@@ -199,7 +244,7 @@ impl Miner {
     pub fn mine_block(
         &mut self,
         height: u64,
-        previous_hash: BlockHash,
+        previous_hash: crate::block::BlockHash,
         transactions: Vec<Transaction>,
         difficulty: u32,
         start_nonce: u64,
@@ -211,7 +256,7 @@ impl Miner {
         log::info!("🔨 Starting multi-threaded mining for block {height} (difficulty: {difficulty})");
         
         // Prepare mining parameters
-        let difficulty_target = generate_difficulty_target(difficulty);
+        let difficulty_target = crate::crypto::generate_difficulty_target(difficulty);
         let mut block = Block::new(
             height,
             previous_hash,
@@ -227,7 +272,7 @@ impl Miner {
                 // Construct the reward transaction addressed to the miner
                 let mut reward_tx = Transaction::new_with_fee(
                     self.keypair.public_key_bytes().to_vec(),
-                    TransactionType::MiningReward {
+                    crate::transaction::TransactionType::MiningReward {
                         block_height: height,
                         amount: reward_amount,
                         pool_address: None,
@@ -415,7 +460,7 @@ impl Miner {
                 local_hashes += 1;
                 
                 // Check if this nonce satisfies the difficulty target
-                match verify_pow(&header_blob, nonce, &difficulty_target) {
+                match crate::crypto::verify_pow(&header_blob, nonce, &difficulty_target) {
                     Ok(true) => {
                         // Found valid block!
                         let mining_time = thread_start_time.elapsed(); // compute elapsed
@@ -608,6 +653,11 @@ impl Miner {
         &self.config
     }
     
+    #[cfg(test)]
+    pub fn get_keypair(&self) -> &Dilithium3Keypair {
+        &self.keypair
+    }
+    
     /// Estimate time to mine next block based on current hash rate
     pub fn estimate_block_time(&self, difficulty: u32) -> std::time::Duration {
         let stats = self.stats.read();
@@ -652,24 +702,22 @@ impl Miner {
     }
     #[cfg(target_os = "windows")]
     fn set_cpu_affinity(thread_id: usize) {
-        let core_ids = thread_affinity::get_core_ids().unwrap_or_default();
+        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
         if !core_ids.is_empty() {
             let core_id = core_ids[thread_id % core_ids.len()];
-            if thread_affinity::set_thread_affinity([core_id]).is_ok() {
-                log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id);
-            }
+            core_affinity::set_for_current(core_id);
+            log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
         }
     }
     #[cfg(target_os = "macos")]
     fn set_cpu_affinity(thread_id: usize) {
-        // macOS implementation using thread_affinity crate might require additional setup or might not be fully supported.
+        // macOS implementation using core_affinity crate might require additional setup or might not be fully supported.
         // This is a best-effort implementation.
-        let core_ids = thread_affinity::get_core_ids().unwrap_or_default();
+        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
         if !core_ids.is_empty() {
             let core_id = core_ids[thread_id % core_ids.len()];
-            if thread_affinity::set_thread_affinity([core_id]).is_ok() {
-                log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id);
-            }
+            core_affinity::set_for_current(core_id);
+            log::debug!("Set CPU affinity for thread {} to core {:?}", thread_id, core_id.id);
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -677,24 +725,43 @@ impl Miner {
         // CPU affinity is not supported on this platform
     }
     
-    /// Get current CPU temperature (requires system monitoring)
+    /// Get CPU temperature for thermal throttling
     fn get_cpu_temperature() -> Option<f32> {
-        let mut sys = System::new_all();
-        sys.refresh_components();
-        
-        let temps: Vec<f32> = sys.components()
-            .iter()
-            .filter(|c| c.label().to_lowercase().contains("cpu"))
-            .map(|c| c.temperature())
-            .collect();
+        #[cfg(target_os = "linux")]
+        {
+            use sysinfo::{System, SystemExt, ComponentExt};
+            
+            let mut sys = System::new_all();
+            sys.refresh_components();
+            
+            let temps: Vec<f32> = sys.components()
+                .iter()
+                .filter(|c| c.label().to_lowercase().contains("cpu"))
+                .map(|c| c.temperature())
+                .collect();
 
-        if temps.is_empty() {
-            log::warn!("🌡️ No CPU temperature sensors found. Thermal throttling is disabled.");
-            return None;
+            if temps.is_empty() {
+                // Only log this warning once
+                if !TEMP_WARNING_LOGGED.load(Ordering::Relaxed) {
+                    log::warn!("🌡️ No CPU temperature sensors found. Thermal throttling is disabled.");
+                    TEMP_WARNING_LOGGED.store(true, Ordering::Relaxed);
+                }
+                return None;
+            }
+
+            temps.into_iter()
+                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         }
-
-        temps.into_iter()
-             .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Only log this warning once
+            if !TEMP_WARNING_LOGGED.load(Ordering::Relaxed) {
+                log::warn!("🌡️ CPU temperature monitoring not available on this platform. Thermal throttling is disabled.");
+                TEMP_WARNING_LOGGED.store(true, Ordering::Relaxed);
+            }
+            None
+        }
     }
 }
 
@@ -794,5 +861,35 @@ mod tests {
         // With zero hash rate, should return maximum duration
         let estimate = miner.estimate_block_time(10);
         assert!(estimate.as_secs() > 1000000); // Very large number
+    }
+    
+    #[test]
+    fn test_miner_wallet_persistence() {
+        use std::fs;
+        use tempfile::tempdir;
+        
+        let temp_dir = tempdir().unwrap();
+        let wallet_path = temp_dir.path().join("test-wallet.json");
+        
+        // Create a config with a specific wallet path
+        let mut config = MiningConfig::default();
+        config.wallet_path = wallet_path.clone();
+        
+        // Create miner - should create and save wallet
+        let miner1 = Miner::with_config(config.clone()).unwrap();
+        let public_key1 = miner1.get_keypair().public_key.clone();
+        
+        // Verify wallet file was created
+        assert!(wallet_path.exists());
+        
+        // Create another miner with same config - should load existing wallet
+        let miner2 = Miner::with_config(config).unwrap();
+        let public_key2 = miner2.get_keypair().public_key.clone();
+        
+        // Verify both miners use the same keypair (loaded from file)
+        assert_eq!(public_key1, public_key2);
+        
+        // Clean up
+        fs::remove_file(&wallet_path).unwrap();
     }
 } 

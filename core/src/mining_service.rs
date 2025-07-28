@@ -1,7 +1,6 @@
 use crate::{
     blockchain::NumiBlockchain,
     miner::Miner,
-    crypto::Dilithium3Keypair,
     config::MiningConfig,
     network::NetworkManagerHandle,
     error::MiningServiceError,
@@ -10,6 +9,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::time::{self, Duration};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct MiningService {
     blockchain: Arc<RwLock<NumiBlockchain>>,
@@ -17,7 +17,9 @@ pub struct MiningService {
     config: MiningConfig,
     data_directory: PathBuf,
     target_block_time: Duration,
-    wallet_path: PathBuf,
+    // Error state tracking to prevent spam
+    wallet_error_logged: Arc<AtomicBool>,
+    last_error_time: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 impl MiningService {
@@ -27,7 +29,6 @@ impl MiningService {
         config: MiningConfig,
         data_directory: PathBuf,
         target_block_time: Duration,
-        wallet_path: PathBuf,
     ) -> Self {
         Self {
             blockchain,
@@ -35,7 +36,8 @@ impl MiningService {
             config,
             data_directory,
             target_block_time,
-            wallet_path,
+            wallet_error_logged: Arc::new(AtomicBool::new(false)),
+            last_error_time: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -78,28 +80,36 @@ impl MiningService {
         let difficulty_clone = difficulty;
         let pending_txs_clone = pending_txs.clone();
         let data_directory_clone = self.data_directory.clone();
-        let wallet_path_clone = self.wallet_path.clone();
+        let wallet_error_logged = Arc::clone(&self.wallet_error_logged);
+        let last_error_time = Arc::clone(&self.last_error_time);
         
         // Perform mining in a blocking task
         let mining_result = tokio::task::spawn_blocking(move || {
-            // Load the miner wallet for mining rewards using configured path
-            let wallet_path = if wallet_path_clone.is_absolute() {
-                wallet_path_clone
-            } else {
-                // If relative path, resolve it relative to data directory
-                data_directory_clone.join(&wallet_path_clone)
-            };
-            
-            let miner_keypair = Dilithium3Keypair::load_from_file(&wallet_path)
+            // Use the new consistent wallet path resolution
+            let mut miner = Miner::with_config_and_data_dir(mining_cfg_clone.into(), data_directory_clone)
                 .map_err(|e| {
-                    log::error!("⛔ Failed to load miner wallet from {wallet_path:?}: {e}. Please ensure a wallet is configured for mining.");
-                    MiningServiceError::WalletNotFound(e.to_string())
+                    // Only log wallet errors once or after a significant delay
+                    let now = std::time::Instant::now();
+                    let should_log = !wallet_error_logged.load(Ordering::Relaxed) || {
+                        let last_time = last_error_time.write();
+                        if let Some(last) = *last_time {
+                            now.duration_since(last).as_secs() > 60 // Log again after 1 minute
+                        } else {
+                            true
+                        }
+                    };
+                    
+                    if should_log {
+                        log::error!("⛔ Failed to initialize miner: {e}. Please ensure a wallet is configured for mining.");
+                        wallet_error_logged.store(true, Ordering::Relaxed);
+                        *last_error_time.write() = Some(now);
+                    }
+                    MiningServiceError::MinerInitialization(e.to_string())
                 })?;
 
-            log::info!("💰 Using miner wallet from {wallet_path:?}");
-            
-            let mut miner = Miner::with_config_and_keypair(mining_cfg_clone.into(), miner_keypair)
-                .map_err(|e| MiningServiceError::MinerInitialization(e.to_string()))?;
+            // Reset error state on success
+            wallet_error_logged.store(false, Ordering::Relaxed);
+            log::info!("💰 Miner initialized successfully with configured wallet");
 
             miner.mine_block(
                 height_clone + 1,
@@ -120,7 +130,18 @@ impl MiningService {
                 log::info!("⏰ Mining timeout - no block found in this cycle");
             }
             Ok(Err(e)) => {
-                log::error!("❌ Mining error: {e}");
+                // Only log mining errors occasionally to reduce spam
+                let now = std::time::Instant::now();
+                let mut last_time = self.last_error_time.write();
+                if let Some(last) = *last_time {
+                    if now.duration_since(last).as_secs() > 30 { // Log every 30 seconds
+                        log::error!("❌ Mining error: {e}");
+                        *last_time = Some(now);
+                    }
+                } else {
+                    log::error!("❌ Mining error: {e}");
+                    *last_time = Some(now);
+                }
             }
             Err(e) => {
                 log::error!("❌ Mining task panicked: {e:?}");

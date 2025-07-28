@@ -16,9 +16,9 @@ rate_limit_per_peer = 1000
 
 [mining]
 enabled = true
-wallet_path = "numi.json"
+wallet_path = "miner-wallet.json"
 thread_count = 8
-nonce_chunk_size = 5000
+nonce_chunk_size = 10000
 stats_update_interval_secs = 5
 enable_cpu_affinity = false
 thermal_throttle_temp = 70.0

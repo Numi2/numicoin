@@ -17,14 +17,14 @@ use libp2p::{
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
+use parking_lot::RwLock;
 
-use crate::block::{Block, BlockHeader};
+use crate::block::Block;
 use crate::transaction::Transaction;
-use crate::{Result, BlockchainError, PeerDB, NumiBlockchain, config::ConsensusConfig};
+use crate::{Result, BlockchainError, PeerDB, NumiBlockchain};
 use crate::crypto::{Dilithium3Keypair};
 use crate::peer_db::PeerInfo;
-use crate::storage::BlockchainStorage;
 
 
 const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
@@ -118,7 +118,7 @@ pub struct NetworkManager {
     _local_kyber_pk: Vec<u8>,
     _local_kyber_sk: Vec<u8>,
     peer_db: PeerDB,
-    blockchain: Arc<RwLock<NumiBlockchain>>,
+    blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>,
 }
 
 // Safety: NetworkManager is moved into its own dedicated async task thread and is not shared thereafter, 
@@ -129,17 +129,20 @@ unsafe impl Sync for NetworkManager {}
 impl NetworkManagerHandle {
     /// Get the number of connected peers
     pub async fn get_peer_count(&self) -> usize {
-        self.peers.read().await.len()
+        let peers = self.peers.clone();
+        tokio::task::spawn_blocking(move || peers.read().len()).await.unwrap_or(0)
     }
 
     /// Check if the node is currently syncing
     pub async fn is_syncing(&self) -> bool {
-        *self.is_syncing.read().await
+        let is_syncing = self.is_syncing.clone();
+        tokio::task::spawn_blocking(move || *is_syncing.read()).await.unwrap_or(false)
     }
 
     /// Get current chain height
     pub async fn get_chain_height(&self) -> u64 {
-        *self.chain_height.read().await
+        let chain_height = self.chain_height.clone();
+        tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0)
     }
 
     /// Broadcast a block to the network
@@ -160,15 +163,21 @@ impl NetworkManagerHandle {
 
     /// Update peer reputation
     pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
-        let mut peers = self.peers.write().await;
-        if let Some(_peer) = peers.get_mut(&_peer_id) {
-            // Reputation logic is removed for now
-        }
+        let peers = self.peers.clone();
+        let peer_id = _peer_id;
+        tokio::task::spawn_blocking(move || {
+            let mut peers = peers.write();
+            if let Some(_peer) = peers.get_mut(&peer_id) {
+                // Reputation logic is removed for now
+            }
+        }).await.ok();
     }
 
     /// Check if a peer is banned
     pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
-        self.banned_peers.read().await.contains(peer_id)
+        let banned_peers = self.banned_peers.clone();
+        let peer_id = *peer_id;
+        tokio::task::spawn_blocking(move || banned_peers.read().contains(&peer_id)).await.unwrap_or(false)
     }
     /// Get list of verified peers from key registry
     pub async fn get_verified_peers(&self) -> Vec<PeerId> {
@@ -184,7 +193,7 @@ impl NetworkManagerHandle {
 }
 
 impl NetworkManager {
-    pub fn new(blockchain: Arc<RwLock<NumiBlockchain>>) -> Result<Self> {
+    pub fn new(blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>) -> Result<Self> {
         // Generate post-quantum key material for handshake and authentication
         let dilithium_kp = Dilithium3Keypair::new()?;
 
@@ -273,24 +282,32 @@ impl NetworkManager {
 
     /// Check if currently syncing
     pub async fn is_syncing(&self) -> bool {
-        *self.is_syncing.read().await
+        let is_syncing = self.is_syncing.clone();
+        tokio::task::spawn_blocking(move || *is_syncing.read()).await.unwrap_or(false)
     }
 
     /// Set syncing status
     pub async fn set_syncing(&self, syncing: bool) {
-        let mut guard = self.is_syncing.write().await;
-        *guard = syncing;
+        let is_syncing = self.is_syncing.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = is_syncing.write();
+            *guard = syncing;
+        }).await.ok();
     }
 
     /// Get current chain height
     pub async fn get_chain_height(&self) -> u64 {
-        *self.chain_height.read().await
+        let chain_height = self.chain_height.clone();
+        tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0)
     }
 
     /// Set current chain height
     pub async fn set_chain_height(&self, height: u64) {
-        let mut guard = self.chain_height.write().await;
-        *guard = height;
+        let chain_height = self.chain_height.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = chain_height.write();
+            *guard = height;
+        }).await.ok();
     }
 
     /// Start the network manager and bind to listening address
@@ -345,9 +362,11 @@ impl NetworkManager {
     async fn perform_maintenance(&mut self) {
         // Unban peers whose ban duration has expired
         let _now = Instant::now();
-        let _peers = self.peers.write().await;
-        
-        // Ban logic is removed for now
+        let peers = self.peers.clone();
+        tokio::task::spawn_blocking(move || {
+            let _peers = peers.write();
+            // Ban logic is removed for now
+        }).await.ok();
     }
 
     /// Main event processing loop
@@ -426,9 +445,12 @@ impl NetworkManager {
         let mut broadcast_futures = FuturesUnordered::new();
         
         // Get all connected peers
-        let peers = self.peers.read().await;
-        let peer_ids: Vec<PeerId> = peers.keys().cloned().collect();
-        drop(peers); // Release lock early
+        let peers = self.peers.clone();
+        let peer_ids: Vec<PeerId> = tokio::task::spawn_blocking(move || {
+            let peers = peers.read();
+            let peer_ids: Vec<PeerId> = peers.keys().cloned().collect();
+            peer_ids
+        }).await.unwrap_or_default();
 
         for _peer_id in peer_ids {
             let _topic_clone = Topic::new(topic);
@@ -524,7 +546,11 @@ impl NetworkManager {
                 if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
                     if let NetworkMessage::HeadersRequest { start_hash, count } = network_message {
                         log::info!("📜 Received headers request from peer, starting from hash: {:?}, count: {}", hex::encode(&start_hash), count);
-                        let headers = self.blockchain.read().await.get_block_headers(start_hash, count).unwrap_or_default();
+                        let blockchain = self.blockchain.clone();
+                        let start_hash = start_hash.clone();
+                        let headers = tokio::task::spawn_blocking(move || {
+                            blockchain.read().get_block_headers(start_hash, count)
+                        }).await.unwrap_or_default();
                         let response = NetworkMessage::HeadersResponse { headers };
                         if let Ok(response_data) = bincode::serialize(&response) {
                             self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_HEADERS_RESPONSE), response_data);
@@ -538,7 +564,12 @@ impl NetworkManager {
                         log::info!("📬 Received {} headers from peer", headers.len());
                         for header in headers {
                             let block_hash = header.calculate_hash().unwrap_or_default();
-                            if self.blockchain.read().await.get_block_by_hash(&block_hash).is_none() {
+                            let blockchain = self.blockchain.clone();
+                            let block_hash = block_hash.clone();
+                            let has_block = tokio::task::spawn_blocking(move || {
+                                blockchain.read().get_block_by_hash(&block_hash).is_none()
+                            }).await.unwrap_or(true);
+                            if has_block {
                                 log::info!("Requesting missing block: {}", hex::encode(block_hash));
                                 let request = NetworkMessage::BlockRequest(block_hash.to_vec());
                                 if let Ok(data) = bincode::serialize(&request) {
@@ -555,7 +586,12 @@ impl NetworkManager {
                         let mut block_hash = [0u8; 32];
                         block_hash.copy_from_slice(&block_hash_vec);
                         log::info!("📦 Received block request for hash: {}", hex::encode(block_hash));
-                        if let Some(block) = self.blockchain.read().await.get_block_by_hash(&block_hash) {
+                        let blockchain = self.blockchain.clone();
+                        let block_hash = block_hash.clone();
+                        let block = tokio::task::spawn_blocking(move || {
+                            blockchain.read().get_block_by_hash(&block_hash)
+                        }).await.unwrap_or(None);
+                        if let Some(block) = block {
                             let message = NetworkMessage::NewBlock(block);
                             if let Ok(data) = bincode::serialize(&message) {
                                 self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCKS), data);
@@ -632,8 +668,13 @@ impl NetworkManager {
             .map_err(|e| BlockchainError::NetworkError(format!("Invalid peer ID: {e}")))?;
 
         // Get peer info
-        let mut peers = self.peers.write().await;
-        if let Some(_peer_info) = peers.get_mut(&peer_id) {
+        let peers = self.peers.clone();
+        let peer_id = peer_id.clone();
+        let peer_info = tokio::task::spawn_blocking(move || {
+            let mut peers = peers.write();
+            peers.get_mut(&peer_id).cloned()
+        }).await.unwrap_or(None);
+        if let Some(_peer_info) = peer_info {
             // Validate message using peer's stored public key
             if let Some(peer_db_info) = self.peer_db.get_peer(&peer_id).await {
                 let mut data_to_verify = Vec::new();
@@ -684,7 +725,8 @@ impl NetworkManager {
     async fn on_peer_connected(&mut self, peer_id: PeerId) {
         log::info!("🔗 Peer connected: {peer_id}");
         
-        let local_chain_height = *self.chain_height.read().await;
+        let chain_height = self.chain_height.clone();
+        let local_chain_height = tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0);
 
         // Send our peer info to the newly connected peer
         let (timestamp, nonce, signature) = self.create_authenticated_message("peer_info", &[]).unwrap();
@@ -724,15 +766,21 @@ impl NetworkManager {
 
     /// Update peer reputation
     pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
-        let mut peers = self.peers.write().await;
-        if let Some(_peer) = peers.get_mut(&_peer_id) {
-            // Reputation logic is removed for now
-        }
+        let peers = self.peers.clone();
+        let peer_id = _peer_id;
+        tokio::task::spawn_blocking(move || {
+            let mut peers = peers.write();
+            if let Some(_peer) = peers.get_mut(&peer_id) {
+                // Reputation logic is removed for now
+            }
+        }).await.ok();
     }
 
     /// Check if a peer is banned
     pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
-        self.banned_peers.read().await.contains(peer_id)
+        let banned_peers = self.banned_peers.clone();
+        let peer_id = *peer_id;
+        tokio::task::spawn_blocking(move || banned_peers.read().contains(&peer_id)).await.unwrap_or(false)
     }
     
 }
@@ -742,9 +790,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use parking_lot::RwLock;
-    use crate::storage::BlockchainStorage;
     use crate::config::ConsensusConfig;
-    use tempfile::tempdir;
 
     fn create_test_blockchain() -> Arc<RwLock<NumiBlockchain>> {
         let blockchain = NumiBlockchain::new_with_config(Some(ConsensusConfig::default()), None).unwrap();

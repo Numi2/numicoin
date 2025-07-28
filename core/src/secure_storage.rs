@@ -7,7 +7,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use scrypt::{scrypt, Params as ScryptParams};
+use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{Dilithium3Keypair, derive_key, generate_random_bytes, blake3_hash, Hash};
@@ -20,15 +20,15 @@ use crate::{Result, BlockchainError};
 // - Both public and private keys must be stored together
 // - No key derivation support for enhanced security
 
-/// Key derivation configuration for Scrypt
+/// Key derivation configuration for Argon2
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyDerivationConfig {
-    /// CPU/memory cost parameter (N)
-    pub cost: u32,
-    /// Block size parameter (r)
-    pub block_size: u32,
-    /// Parallelization parameter (p)
-    pub parallelization: u32,
+    /// Memory cost parameter (m) - memory usage in KiB
+    pub memory_cost: u32,
+    /// Time cost parameter (t) - number of iterations
+    pub time_cost: u32,
+    /// Parallelism parameter (p) - number of threads
+    pub parallelism: u32,
     /// Output key length
     pub key_length: usize,
     /// Salt length for randomization
@@ -38,11 +38,11 @@ pub struct KeyDerivationConfig {
 impl Default for KeyDerivationConfig {
     fn default() -> Self {
         Self {
-            cost: 1048576,      // 2^20, strong protection
-            block_size: 8,       // Standard value
-            parallelization: 1,  // Single-threaded
-            key_length: 32,      // 256 bits
-            salt_length: 32,     // 256-bit salt
+            memory_cost: 65536,    // 64 MiB, strong protection
+            time_cost: 3,          // 3 iterations
+            parallelism: 1,        // Single-threaded
+            key_length: 32,        // 256 bits
+            salt_length: 32,       // 256-bit salt
         }
     }
 }
@@ -51,9 +51,9 @@ impl KeyDerivationConfig {
     /// High security configuration for production
     pub fn high_security() -> Self {
         Self {
-            cost: 2097152,      // 2^21, very strong
-            block_size: 8,
-            parallelization: 2,  // Dual-threaded
+            memory_cost: 131072,   // 128 MiB, very strong
+            time_cost: 4,          // 4 iterations
+            parallelism: 2,        // Dual-threaded
             key_length: 32,
             salt_length: 32,
         }
@@ -62,19 +62,19 @@ impl KeyDerivationConfig {
     /// Fast configuration for development/testing
     pub fn development() -> Self {
         Self {
-            cost: 16384,        // 2^14, much faster
-            block_size: 8,
-            parallelization: 1,
+            memory_cost: 8192,     // 8 MiB, much faster
+            time_cost: 2,          // 2 iterations
+            parallelism: 1,
             key_length: 32,
-            salt_length: 16,     // Shorter salt for speed
+            salt_length: 16,       // Shorter salt for speed
         }
     }
     
     pub fn test() -> Self {
         Self {
-            cost: 1024,         // 2^10, very fast for tests
-            block_size: 8,
-            parallelization: 1,
+            memory_cost: 1024,     // 1 MiB, very fast for tests
+            time_cost: 1,          // 1 iteration
+            parallelism: 1,
             key_length: 32,
             salt_length: 16,
         }
@@ -82,17 +82,17 @@ impl KeyDerivationConfig {
     
     /// Validate configuration parameters
     pub fn validate(&self) -> Result<()> {
-        if self.cost < 1024 || self.cost > 67108864 {
+        if self.memory_cost < 1024 || self.memory_cost > 1048576 {
             return Err(BlockchainError::CryptographyError(
-                "Invalid Scrypt cost parameter".to_string()));
+                "Invalid Argon2 memory cost parameter".to_string()));
         }
-        if self.block_size == 0 || self.block_size > 256 {
+        if self.time_cost < 1 || self.time_cost > 10 {
             return Err(BlockchainError::CryptographyError(
-                "Invalid Scrypt block size".to_string()));
+                "Invalid Argon2 time cost parameter".to_string()));
         }
-        if self.parallelization == 0 || self.parallelization > 64 {
+        if self.parallelism < 1 || self.parallelism > 64 {
             return Err(BlockchainError::CryptographyError(
-                "Invalid Scrypt parallelization parameter".to_string()));
+                "Invalid Argon2 parallelism parameter".to_string()));
         }
         if self.key_length < 16 || self.key_length > 64 {
             return Err(BlockchainError::CryptographyError(
@@ -113,7 +113,7 @@ pub struct EncryptedKeyEntry {
     pub nonce: Vec<u8>,
     /// AES-GCM authentication tag (16 bytes)
     pub auth_tag: Vec<u8>,
-    /// Scrypt salt for key derivation
+    /// Argon2 salt for key derivation
     pub salt: Vec<u8>,
     /// Key derivation parameters
     pub kdf_params: KeyDerivationConfig,
@@ -625,18 +625,36 @@ impl SecureKeyStore {
     
     // Private helper methods
     
-    /// Derive encryption key from password using Scrypt
+    /// Derive encryption key from password using Argon2
     fn derive_key_from_password(&self, password: &str, salt: &[u8]) -> Result<Vec<u8>> {
-        let params = ScryptParams::new(
-            (self.kdf_config.cost as f64).log2() as u8,
-            self.kdf_config.block_size,
-            self.kdf_config.parallelization,
-            self.kdf_config.key_length,
-        ).map_err(|e| BlockchainError::CryptographyError(format!("Invalid Scrypt parameters: {e}")))?;
+        // Create Argon2 instance with our parameters
+        let argon2 = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(
+                self.kdf_config.memory_cost,
+                self.kdf_config.time_cost,
+                self.kdf_config.parallelism,
+                Some(self.kdf_config.key_length),
+            ).map_err(|e| BlockchainError::CryptographyError(format!("Invalid Argon2 parameters: {e}")))?,
+        );
         
-        let mut key = vec![0u8; self.kdf_config.key_length];
-        scrypt(password.as_bytes(), salt, &params, &mut key)
+        // Create salt string from bytes
+        let salt_str = SaltString::encode_b64(salt)
+            .map_err(|e| BlockchainError::CryptographyError(format!("Invalid salt encoding: {e}")))?;
+        
+        // Hash password and extract key
+        let hash = argon2.hash_password(password.as_bytes(), &salt_str)
             .map_err(|e| BlockchainError::CryptographyError(format!("Key derivation failed: {e}")))?;
+        
+        let hash_value = hash.hash
+            .ok_or_else(|| BlockchainError::CryptographyError("Hash extraction failed".to_string()))?;
+        let hash_bytes = hash_value.as_bytes();
+        
+        // Ensure we get exactly the key length we need
+        let mut key = vec![0u8; self.kdf_config.key_length];
+        let copy_len = std::cmp::min(hash_bytes.len(), self.kdf_config.key_length);
+        key[..copy_len].copy_from_slice(&hash_bytes[..copy_len]);
         
         Ok(key)
     }

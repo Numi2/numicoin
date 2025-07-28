@@ -196,7 +196,7 @@ pub async fn handle_transaction(
 
     // Create transaction with proper fee
     let mut transaction = Transaction::new_with_fee(
-        from_pubkey,
+        from_pubkey.clone(),
         TransactionType::Transfer {
             to: to_pubkey,
             amount: tx_request.amount,
@@ -208,17 +208,53 @@ pub async fn handle_transaction(
     );
 
     // Set signature and recalculate transaction ID
-    if let Ok(dilithium_sig) = bincode::deserialize::<crate::crypto::Dilithium3Signature>(&signature_bytes) {
-        transaction.signature = Some(dilithium_sig);
-        // CRITICAL: Recalculate transaction ID after signature is set to ensure ID matches the complete transaction
-        // The signature is part of the transaction structure, so the ID must be recalculated for integrity
-        transaction.id = transaction.calculate_hash();
-    } else {
+    // In the new (v2) API the client sends *only* the detached Dilithium3 signature
+    // bytes hex-encoded.  We reconstruct the full `Dilithium3Signature` struct here
+    // using the already-provided sender public key and a freshly calculated
+    // message hash.
+
+    use crate::crypto::{blake3_hash, Dilithium3Signature, DILITHIUM3_SIGNATURE_SIZE, DILITHIUM3_PUBKEY_SIZE};
+
+    // Validate basic sizes to give helpful error messages early.
+    if signature_bytes.len() != DILITHIUM3_SIGNATURE_SIZE {
         rpc_server.increment_stat("failed_requests").await;
         return Ok(warp::reply::json(&ApiResponse::<()>::error(
-            "Invalid signature format - could not deserialize".to_string()
+            format!(
+                "Invalid signature length: expected {} bytes, got {}",
+                DILITHIUM3_SIGNATURE_SIZE,
+                signature_bytes.len()
+            ),
         )));
     }
+    if from_pubkey.len() != DILITHIUM3_PUBKEY_SIZE {
+        rpc_server.increment_stat("failed_requests").await;
+        return Ok(warp::reply::json(&ApiResponse::<()>::error(
+            "Invalid sender public key size".to_string(),
+        )));
+    }
+
+    // Recreate the payload that was originally signed by the client: the
+    // transaction without its signature or ID.  We serialise the struct via
+    // `bincode`; this avoids calling the now-private `serialize_for_signing`
+    // helper inside `Transaction`.
+    let signing_payload: Vec<u8> = {
+        let mut tx_clone = transaction.clone();
+        tx_clone.signature = None;
+        tx_clone.id = [0u8; 32];
+        bincode::serialize(&tx_clone).unwrap_or_default()
+    };
+
+    let sig_struct = Dilithium3Signature {
+        signature: signature_bytes.clone(),
+        public_key: from_pubkey.clone(),
+        message_hash: blake3_hash(&signing_payload),
+        created_at: chrono::Utc::now().timestamp() as u64,
+    };
+
+    transaction.signature = Some(sig_struct);
+    // Recalculate transaction ID now that the signature is populated so that the
+    // txid commits to the signature as well.
+    transaction.id = transaction.calculate_hash();
 
     let tx_id = hex::encode(transaction.id);
     let mempool_handle = {
@@ -315,17 +351,27 @@ pub async fn handle_mine(
         Ok(Some(mining_result)) => {
             let mining_time = start_time.elapsed();
             
-            // Add block to blockchain using proper async pattern
+            // Add the mined block to the blockchain
             let block_added = {
-                let _blockchain_clone = Arc::clone(&rpc_server.blockchain);
-                let _block_to_add = mining_result.block.clone();
-                
+                let blockchain_arc = Arc::clone(&rpc_server.blockchain);
+                let block_to_add = mining_result.block.clone();
+
+                // Offload potentially heavy validation onto a blocking thread; avoids
+                // `!Send` issues with parking_lot guards inside an async future.
                 tokio::task::spawn_blocking(move || {
-                    // In a real implementation, this would use:
-                    // futures::executor::block_on(blockchain.add_block(block_to_add))
-                    // For now, we'll simulate success
-                    true
-                }).await.unwrap_or(false)
+                    let blockchain_ref = blockchain_arc.read();
+                    futures::executor::block_on(async move {
+                        match blockchain_ref.add_block(block_to_add).await {
+                            Ok(res) => res,
+                            Err(e) => {
+                                log::error!("Failed to add mined block: {e}");
+                                false
+                            }
+                        }
+                    })
+                })
+                .await
+                .unwrap_or(false)
             };
             
             // Broadcast block to network if successfully added

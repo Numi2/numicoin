@@ -8,17 +8,15 @@ use crate::{
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::time::{self, Duration};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct MiningService {
     blockchain: Arc<RwLock<NumiBlockchain>>,
     network_handle: NetworkManagerHandle,
+    /// Shared miner instance reused across all cycles (thread-safe)
+    miner: Arc<RwLock<Miner>>, 
     config: MiningConfig,
-    data_directory: PathBuf,
     target_block_time: Duration,
     // Error state tracking to prevent spam
-    wallet_error_logged: Arc<AtomicBool>,
     last_error_time: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
@@ -26,17 +24,16 @@ impl MiningService {
     pub fn new(
         blockchain: Arc<RwLock<NumiBlockchain>>,
         network_handle: NetworkManagerHandle,
+        miner: Arc<RwLock<Miner>>, // persistent miner
         config: MiningConfig,
-        data_directory: PathBuf,
         target_block_time: Duration,
     ) -> Self {
         Self {
             blockchain,
             network_handle,
+            miner,
             config,
-            data_directory,
             target_block_time,
-            wallet_error_logged: Arc::new(AtomicBool::new(false)),
             last_error_time: Arc::new(RwLock::new(None)),
         }
     }
@@ -79,37 +76,13 @@ impl MiningService {
         let previous_hash_clone = previous_hash;
         let difficulty_clone = difficulty;
         let pending_txs_clone = pending_txs.clone();
-        let data_directory_clone = self.data_directory.clone();
-        let wallet_error_logged = Arc::clone(&self.wallet_error_logged);
-        let last_error_time = Arc::clone(&self.last_error_time);
-        
-        // Perform mining in a blocking task
-        let mining_result = tokio::task::spawn_blocking(move || {
-            // Use the new consistent wallet path resolution
-            let mut miner = Miner::with_config_and_data_dir(mining_cfg_clone.into(), data_directory_clone)
-                .map_err(|e| {
-                    // Only log wallet errors once or after a significant delay
-                    let now = std::time::Instant::now();
-                    let should_log = !wallet_error_logged.load(Ordering::Relaxed) || {
-                        let last_time = last_error_time.write();
-                        if let Some(last) = *last_time {
-                            now.duration_since(last).as_secs() > 60 // Log again after 1 minute
-                        } else {
-                            true
-                        }
-                    };
-                    
-                    if should_log {
-                        log::error!("⛔ Failed to initialize miner: {e}. Please ensure a wallet is configured for mining.");
-                        wallet_error_logged.store(true, Ordering::Relaxed);
-                        *last_error_time.write() = Some(now);
-                    }
-                    MiningServiceError::MinerInitialization(e.to_string())
-                })?;
+        let miner_arc = Arc::clone(&self.miner);
 
-            // Reset error state on success
-            wallet_error_logged.store(false, Ordering::Relaxed);
-            log::info!("💰 Miner initialized successfully with configured wallet");
+        // Perform mining in a blocking task using the shared Miner
+        let mining_result = tokio::task::spawn_blocking(move || {
+            let mut miner = miner_arc.write();
+            // Keep miner configuration up-to-date in case it changed at runtime
+            miner.update_config(mining_cfg_clone.into());
 
             miner.mine_block(
                 height_clone + 1,
@@ -162,9 +135,12 @@ impl MiningService {
         let block_clone = block.clone();
         log::info!("🔧 Adding block to blockchain...");
         
-        let add_block_result = futures::executor::block_on(async {
-            blockchain_clone_for_blocking.write().add_block(block_clone).await
-        });
+        let add_block_result = {
+            let blockchain = blockchain_clone_for_blocking.write();
+            futures::executor::block_on(async {
+                blockchain.add_block(block_clone).await
+            })
+        };
         
         match add_block_result {
             Ok(true) => {

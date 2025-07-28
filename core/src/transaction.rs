@@ -76,7 +76,7 @@ impl TransactionFee {
 
         let base_fee = BASE_TRANSACTION_FEE;
         // Calculate size fee: 1 NANO per 10000 bytes (0.0001 NANO per byte)
-        let size_fee = (size_bytes as u64 + 9999) / 10000; // Round up to nearest 10000 bytes
+        let size_fee = (size_bytes as u64).div_ceil(10000); // Round up to nearest 10000 bytes
         // Using integer arithmetic avoids consensus differences across CPU
         // architectures.  The multiplier is hundred-percent increments where
         // 0 → no priority fee, 1 → +100 %, 2 → +200 %, …

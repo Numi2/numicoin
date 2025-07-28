@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 use crate::block::Block;
 use crate::transaction::Transaction;
 use crate::{Result, BlockchainError, PeerDB, NumiBlockchain};
-use crate::crypto::{Dilithium3Keypair};
+use crate::crypto::{Dilithium3Keypair, KyberKeypair};
 use crate::peer_db::PeerInfo;
 
 
@@ -59,6 +59,8 @@ pub enum NetworkMessage {
     PeerInfo { 
         chain_height: u64, 
         peer_id: String,
+        dilithium_pk: Vec<u8>,
+        kyber_pk: Vec<u8>,
         timestamp: u64,
         nonce: u64,
         signature: Vec<u8>,
@@ -101,6 +103,8 @@ pub struct NetworkManagerHandle {
     chain_height: Arc<RwLock<u64>>,
     is_syncing: Arc<RwLock<bool>>,
     peer_db: PeerDB,
+    /// Local Kyber keypair (public key is shared with peers)
+    kyber_kp: KyberKeypair,
 }
 
 /// Production-ready P2P network manager (simplified version)
@@ -115,8 +119,7 @@ pub struct NetworkManager {
     is_syncing: Arc<RwLock<bool>>,
     
     local_dilithium_kp: Dilithium3Keypair,
-    _local_kyber_pk: Vec<u8>,
-    _local_kyber_sk: Vec<u8>,
+    kyber_kp: KyberKeypair,
     peer_db: PeerDB,
     blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>,
 }
@@ -187,8 +190,14 @@ impl NetworkManagerHandle {
     }
 
     /// Add a peer to the peer database.
-    pub async fn add_peer_to_db(&self, peer_id: PeerId, public_key: Dilithium3Keypair) {
-        self.peer_db.add_peer(peer_id, public_key).await;
+    pub async fn add_peer_to_db(&self, peer_id: PeerId, dilithium_kp: Dilithium3Keypair) {
+        // In this simplified implementation we do not have the peer's Kyber
+        // public key readily available at this call site, so we store an
+        // empty vector for now.  The correct Kyber key is inserted elsewhere
+        // when we receive peer handshake data.
+        self.peer_db
+            .add_peer(peer_id, dilithium_kp.public_key.clone(), self.kyber_kp.public.clone())
+            .await;
     }
 }
 
@@ -260,8 +269,7 @@ impl NetworkManager {
             is_syncing: Arc::new(RwLock::new(false)),
             
             local_dilithium_kp: dilithium_kp,
-            _local_kyber_pk: Vec::new(),
-            _local_kyber_sk: Vec::new(),
+            kyber_kp: KyberKeypair::new()?,
             peer_db: PeerDB::new(),
             blockchain,
         })
@@ -277,6 +285,7 @@ impl NetworkManager {
             chain_height: self.chain_height.clone(),
             is_syncing: self.is_syncing.clone(),
             peer_db: self.peer_db.clone(),
+            kyber_kp: self.kyber_kp.clone(),
         }
     }
 
@@ -495,107 +504,95 @@ impl NetworkManager {
 
         match topic_str.as_str() {
             TOPIC_BLOCKS => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::NewBlock(block) = network_message {
-                        log::info!("📦 Received new block: {}", hex::encode(block.calculate_hash().unwrap_or([0u8; 32])));
-                        
-                        // Validate block before processing
-                        if let Err(e) = self.validate_block(&block).await {
-                            log::warn!("❌ Block validation failed: {e}");
-                            return Ok(());
-                        }
-                        
-                        // Process validated block
-                        log::info!("✅ Block validated successfully");
+                if let Ok(NetworkMessage::NewBlock(block)) = bincode::deserialize::<NetworkMessage>(&data) {
+                    log::info!("📦 Received new block: {}", hex::encode(block.calculate_hash().unwrap_or([0u8; 32])));
+                    
+                    // Validate block before processing
+                    if let Err(e) = self.validate_block(&block).await {
+                        log::warn!("❌ Block validation failed: {e}");
+                        return Ok(());
                     }
+                    
+                    // Process validated block
+                    log::info!("✅ Block validated successfully");
                 }
             }
             TOPIC_TRANSACTIONS => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::NewTransaction(tx) = network_message {
-                        log::info!("💸 Received new transaction: {}", hex::encode(tx.id));
-                        
-                        // Validate transaction before processing
-                        if let Err(e) = self.validate_transaction(&tx).await {
-                            log::warn!("❌ Transaction validation failed: {e}");
-                            return Ok(());
-                        }
-                        
-                        // Process validated transaction
-                        log::info!("✅ Transaction validated successfully");
+                if let Ok(NetworkMessage::NewTransaction(tx)) = bincode::deserialize::<NetworkMessage>(&data) {
+                    log::info!("💸 Received new transaction: {}", hex::encode(tx.id));
+                    
+                    // Validate transaction before processing
+                    if let Err(e) = self.validate_transaction(&tx).await {
+                        log::warn!("❌ Transaction validation failed: {e}");
+                        return Ok(());
                     }
+                    
+                    // Process validated transaction
+                    log::info!("✅ Transaction validated successfully");
                 }
             }
             TOPIC_PEER_INFO => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::PeerInfo { chain_height, peer_id, timestamp, nonce, signature } = network_message {
-                        log::debug!("👥 Peer info: {peer_id} at height {chain_height}");
-                        
-                        // Validate peer info message
-                        if let Err(e) = self.validate_peer_info(&peer_id, timestamp, nonce, &signature, &data).await {
-                            log::warn!("❌ Peer info validation failed: {e}");
-                            return Ok(());
-                        }
-                        
-                        // Update peer information
-                        log::info!("✅ Peer info validated successfully");
+                if let Ok(NetworkMessage::PeerInfo { chain_height, peer_id, dilithium_pk, kyber_pk, timestamp, nonce, signature }) = bincode::deserialize::<NetworkMessage>(&data) {
+                    log::debug!("👥 Peer info: {peer_id} at height {chain_height}");
+                    
+                    // Validate peer info message
+                    if let Err(e) = self.validate_peer_info(&peer_id, &dilithium_pk, &kyber_pk, timestamp, nonce, &signature, &data).await {
+                        log::warn!("❌ Peer info validation failed: {e}");
+                        return Ok(());
                     }
+                    
+                    // Update peer information
+                    log::info!("✅ Peer info validated successfully");
                 }
             }
             TOPIC_HEADERS_REQUEST => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::HeadersRequest { start_hash, count } = network_message {
-                        log::info!("📜 Received headers request from peer, starting from hash: {:?}, count: {}", hex::encode(&start_hash), count);
-                        let blockchain = self.blockchain.clone();
-                        let start_hash = start_hash.clone();
-                        let headers = tokio::task::spawn_blocking(move || {
-                            blockchain.read().get_block_headers(start_hash, count)
-                        }).await.unwrap_or_default();
-                        let response = NetworkMessage::HeadersResponse { headers };
-                        if let Ok(response_data) = bincode::serialize(&response) {
-                            self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_HEADERS_RESPONSE), response_data);
-                        }
+                if let Ok(NetworkMessage::HeadersRequest { start_hash, count }) = bincode::deserialize::<NetworkMessage>(&data) {
+                    log::info!("📜 Received headers request from peer, starting from hash: {:?}, count: {}", hex::encode(&start_hash), count);
+                    let blockchain = self.blockchain.clone();
+                    let start_hash = start_hash.clone();
+                    let headers = tokio::task::spawn_blocking(move || {
+                        blockchain.read().get_block_headers(start_hash, count)
+                    }).await.unwrap_or_default();
+                    let response = NetworkMessage::HeadersResponse { headers };
+                    if let Ok(response_data) = bincode::serialize(&response) {
+                        self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_HEADERS_RESPONSE), response_data);
                     }
                 }
             }
             TOPIC_HEADERS_RESPONSE => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::HeadersResponse { headers } = network_message {
-                        log::info!("📬 Received {} headers from peer", headers.len());
-                        for header in headers {
-                            let block_hash = header.calculate_hash().unwrap_or_default();
-                            let blockchain = self.blockchain.clone();
-                            let block_hash = block_hash.clone();
-                            let has_block = tokio::task::spawn_blocking(move || {
-                                blockchain.read().get_block_by_hash(&block_hash).is_none()
-                            }).await.unwrap_or(true);
-                            if has_block {
-                                log::info!("Requesting missing block: {}", hex::encode(block_hash));
-                                let request = NetworkMessage::BlockRequest(block_hash.to_vec());
-                                if let Ok(data) = bincode::serialize(&request) {
-                                    self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCK_REQUEST), data);
-                                }
+                if let Ok(NetworkMessage::HeadersResponse { headers }) = bincode::deserialize::<NetworkMessage>(&data) {
+                    log::info!("📬 Received {} headers from peer", headers.len());
+                    for header in headers {
+                        let block_hash = header.calculate_hash().unwrap_or_default();
+                        let blockchain = self.blockchain.clone();
+
+                        let has_block = tokio::task::spawn_blocking(move || {
+                            blockchain.read().get_block_by_hash(&block_hash).is_none()
+                        }).await.unwrap_or(true);
+                        if has_block {
+                            log::info!("Requesting missing block: {}", hex::encode(block_hash));
+                            let request = NetworkMessage::BlockRequest(block_hash.to_vec());
+                            if let Ok(data) = bincode::serialize(&request) {
+                                self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCK_REQUEST), data);
                             }
                         }
                     }
                 }
             }
             TOPIC_BLOCK_REQUEST => {
-                if let Ok(network_message) = bincode::deserialize::<NetworkMessage>(&data) {
-                    if let NetworkMessage::BlockRequest(block_hash_vec) = network_message {
-                        let mut block_hash = [0u8; 32];
-                        block_hash.copy_from_slice(&block_hash_vec);
-                        log::info!("📦 Received block request for hash: {}", hex::encode(block_hash));
-                        let blockchain = self.blockchain.clone();
-                        let block_hash = block_hash.clone();
-                        let block = tokio::task::spawn_blocking(move || {
-                            blockchain.read().get_block_by_hash(&block_hash)
-                        }).await.unwrap_or(None);
-                        if let Some(block) = block {
-                            let message = NetworkMessage::NewBlock(block);
-                            if let Ok(data) = bincode::serialize(&message) {
-                                self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCKS), data);
-                            }
+                if let Ok(NetworkMessage::BlockRequest(block_hash_vec)) = bincode::deserialize::<NetworkMessage>(&data) {
+                    let mut block_hash = [0u8; 32];
+                    block_hash.copy_from_slice(&block_hash_vec);
+                    log::info!("📦 Received block request for hash: {}", hex::encode(block_hash));
+                    let blockchain = self.blockchain.clone();
+
+                    let block = tokio::task::spawn_blocking(move || {
+                        blockchain.read().get_block_by_hash(&block_hash)
+                    }).await.unwrap_or(None);
+                    if let Some(block) = block {
+                        let message = NetworkMessage::NewBlock(block);
+                        if let Ok(data) = bincode::serialize(&message) {
+                            self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCKS), data);
                         }
                     }
                 }
@@ -662,38 +659,44 @@ impl NetworkManager {
     }
 
     /// Validate peer info message
-    async fn validate_peer_info(&self, peer_id_str: &str, timestamp: u64, nonce: u64, signature: &[u8], message_data: &[u8]) -> Result<()> {
+    async fn validate_peer_info(&self, peer_id_str: &str, dilithium_pk: &[u8], kyber_pk: &[u8], timestamp: u64, nonce: u64, signature: &[u8], message_data: &[u8]) -> Result<()> {
         // Parse peer ID
         let peer_id = PeerId::from_str(peer_id_str)
             .map_err(|e| BlockchainError::NetworkError(format!("Invalid peer ID: {e}")))?;
 
         // Get peer info
         let peers = self.peers.clone();
-        let peer_id = peer_id.clone();
+
         let peer_info = tokio::task::spawn_blocking(move || {
             let mut peers = peers.write();
             peers.get_mut(&peer_id).cloned()
         }).await.unwrap_or(None);
-        if let Some(_peer_info) = peer_info {
-            // Validate message using peer's stored public key
-            if let Some(peer_db_info) = self.peer_db.get_peer(&peer_id).await {
-                let mut data_to_verify = Vec::new();
-                data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
-                data_to_verify.extend_from_slice(&nonce.to_le_bytes());
-                data_to_verify.extend_from_slice(message_data);
+        if let Some(existing_peer_info) = peer_info {
+            // Verify signature with stored public key
+            let mut data_to_verify = Vec::new();
+            data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
+            data_to_verify.extend_from_slice(&nonce.to_le_bytes());
+            data_to_verify.extend_from_slice(message_data);
 
-                if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: peer_db_info.public_key.public_key_bytes().to_vec(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, peer_db_info.public_key.public_key_bytes())? {
-                    return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
-                }
-
-                self.peer_db.update_peer_nonce(&peer_id, nonce).await?;
-            } else {
-                log::warn!("Peer not found in DB, skipping validation");
+            if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: existing_peer_info.dilithium_pk.clone(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, &existing_peer_info.dilithium_pk)? {
+                return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
             }
+
+            self.peer_db.update_peer_nonce(&peer_id, nonce).await?;
         } else {
-            // New peer - add to db
-            let public_key = Dilithium3Keypair::from_public_key(signature)?;
-            self.peer_db.add_peer(peer_id, public_key).await;
+            // New peer - add to DB and local map
+            // Store in DB with provided keys
+            self.peer_db.add_peer(peer_id.clone(), dilithium_pk.to_vec(), kyber_pk.to_vec()).await;
+            // Also register in local peers map
+            let peers_map = self.peers.clone();
+            let peer_id_clone = peer_id.clone();
+            let last_nonce = nonce;
+            let dilithium_pk_vec = dilithium_pk.to_vec();
+            let kyber_pk_vec = kyber_pk.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut map = peers_map.write();
+                map.insert(peer_id_clone, PeerInfo { dilithium_pk: dilithium_pk_vec, kyber_pk: kyber_pk_vec, last_nonce });
+            }).await.ok();
         }
 
         Ok(())
@@ -733,6 +736,8 @@ impl NetworkManager {
         let peer_info_message = NetworkMessage::PeerInfo {
             chain_height: local_chain_height,
             peer_id: self.local_peer_id.to_string(),
+            dilithium_pk: self.local_dilithium_kp.public_key_bytes().to_vec(),
+            kyber_pk: self.kyber_kp.public.clone(),
             timestamp,
             nonce,
             signature,

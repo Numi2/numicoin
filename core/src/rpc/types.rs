@@ -176,7 +176,7 @@ pub struct TransactionRequest {
     pub amount: u64,        // Amount in smallest units (NANO units, 1 NUMI = 100 NANO)
     pub nonce: u64,         // Account nonce (prevents replay attacks)
     pub fee: Option<u64>,   // Optional custom fee in NANO units (uses calculated minimum if not provided)
-    pub signature: String,  // Hex-encoded Dilithium3 signature
+    pub signature: String,  // Hex-encoded detached Dilithium3 signature bytes
 }
 
 /// Transaction response
@@ -235,8 +235,7 @@ pub async fn decode_hex_field(
     hex::decode(cleaned).map_err(|e| {
         // Provide a more descriptive error to help users troubleshoot.
         format!(
-            "Invalid {field_name} hex format ({}). Expected even-length hex string, optionally prefixed with 0x",
-            e
+            "Invalid {field_name} hex format ({e}). Expected even-length hex string, optionally prefixed with 0x"
         )
     })
 }

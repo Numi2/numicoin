@@ -7,6 +7,7 @@ use super::types::RateLimitConfig;
 
 /// Rate limiting tracker per IP
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct RateLimitEntry {
     pub requests: Vec<Instant>,
     pub blocked_until: Option<Instant>,
@@ -15,11 +16,7 @@ pub struct RateLimitEntry {
 
 impl RateLimitEntry {
     pub fn new() -> Self {
-        Self {
-            requests: Vec::new(),
-            blocked_until: None,
-            violations: 0,
-        }
+        Self::default()
     }
     
     pub fn is_blocked(&self) -> bool {
@@ -87,7 +84,7 @@ impl RateLimiter {
         // Check rate limit
         let mut entry = self.rate_limiter
             .entry(client_addr)
-            .or_insert_with(RateLimitEntry::new);
+            .or_default();
         
         entry.can_make_request(&self.config)
     }

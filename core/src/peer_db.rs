@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::crypto::Dilithium3Keypair;
 use crate::error::BlockchainError;
 use crate::Result;
 use libp2p::PeerId;
@@ -16,7 +15,8 @@ pub struct PeerDB {
 /// Information about a peer, including their public key for signature verification.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
-    pub public_key: Dilithium3Keypair,
+    pub dilithium_pk: Vec<u8>,
+    pub kyber_pk: Vec<u8>,
     pub last_nonce: u64,
 }
 
@@ -35,15 +35,12 @@ impl PeerDB {
     }
 
     /// Adds a new peer to the database.
-    pub async fn add_peer(&self, peer_id: PeerId, public_key: Dilithium3Keypair) {
-        let mut peers = self.peers.write().await;
-        peers.insert(
-            peer_id,
-            PeerInfo {
-                public_key,
-                last_nonce: 0,
-            },
-        );
+    pub async fn add_peer(&self, peer_id: PeerId, dilithium_pk: Vec<u8>, kyber_pk: Vec<u8>) {
+        let peers = self.peers.clone();
+        tokio::spawn(async move {
+            let mut guard = peers.write().await;
+            guard.insert(peer_id, PeerInfo { dilithium_pk, kyber_pk, last_nonce: 0 });
+        }).await.ok();
     }
 
     /// Retrieves the information for a given peer.

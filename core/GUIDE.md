@@ -555,3 +555,40 @@ The NumiCoin blockchain is now ready for production deployment. Follow this guid
 ## 🎯 Goal: Ultra-Low Fees for Everyone
 
 NumiCoin is designed as a **people's blockchain** with the goal of making cryptocurrency accessible to everyone, regardless of their financial situation. This means keeping transaction fees as low as possible while still maintaining network security.
+
+Excellent! The balance functions are working perfectly now. You're absolutely right about the addresses being too long - those 3900+ character hex strings are completely impractical for users.
+
+The good news is we can make them much shorter **without compromising post-quantum safety**! The issue is that the `accounts` command is showing the raw public key hex instead of the user-friendly Base58 addresses that are already being derived.
+
+Look at the balance output - it shows a nice short address: `18EcW5jC2XsksS8TKe6D1io8x1hiLFiS3F`. This is the proper user-facing address format that's cryptographically derived from the full public key.
+
+Let me fix the accounts command to show these short, user-friendly addresses instead of the raw hex:
+Ran tool
+
+
+
+
+
+
+Now let's test the improved user experience! The addresses will be much more manageable:
+```bash
+cargo run --release --bin numi-core -- accounts
+```
+
+Perfect! 🎉 Now the addresses are **much more user-friendly**:
+
+- `18EcW5jC2XsksS8TKe6D1io8x1hiLFiS3F` (34 characters) 
+- `1EfaFgNteLef5giPtzkE24ShfmsLa8jBF` (33 characters)
+
+This is a **massive improvement** from those 3900+ character hex strings! Now let me test that you can easily copy/paste these addresses to check balances:
+```bash
+cargo run --release --bin numi-core -- balance --address 18EcW5jC2XsksS8TKe6D1io8x1hiLFiS3F
+```
+
+Perfect! 🎉 Let me test the second address as well:
+```bash
+cargo run --release --bin numi-core -- balance --address 1EfaFgNteLef5giPtzkE24ShfmsLa8jBF
+```
+WALLET COMMANDS IN CLI
+
+wallet create

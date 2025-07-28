@@ -183,9 +183,16 @@ impl Block {
     }
     
     pub fn get_mining_reward(&self) -> u64 {
-        // Fixed mining reward: 0.005 NUMI per block
-        const MINING_REWARD: u64 = 5_000_000; // 0.005 NUMI in smallest units
-        MINING_REWARD
+        // Use the centralized, halving-schedule-aware reward calculation so that
+        // the reward embedded in a block is always consistent with what the
+        // miner and wallet logic expect.  This eliminates inconsistencies
+        // between auditing utilities (which may inspect blocks directly) and
+        // mining code (which already relies on `WalletManager::calculate_mining_reward`).
+        //
+        // NOTE: `get_total_fees()` can be added on the caller side if the full
+        // reward including transaction fees is required.
+
+        crate::miner::WalletManager::calculate_mining_reward(self.header.height)
     }
     
     pub fn serialize_header_for_hashing(&self) -> Result<Vec<u8>> {

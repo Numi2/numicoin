@@ -251,7 +251,11 @@ impl Dilithium3Keypair {
         if message.len() > MAX_SIGNABLE_MESSAGE_SIZE {
             return Err(BlockchainError::InvalidArgument("Message too large to sign".to_string()));
         }
-
+        // Prevent signing with a verification-only keypair (all-zero secret key)
+        if self.secret_key.iter().all(|&b| b == 0) {
+            return Err(BlockchainError::CryptographyError("Cannot sign with verification-only keypair".to_string()));
+        }
+        
         let pq_sk = pqcrypto_dilithium::dilithium3::SecretKey::from_bytes(&self.secret_key)
             .map_err(|e| BlockchainError::CryptographyError(format!("Invalid secret key: {e}")))?;
 
@@ -280,24 +284,20 @@ impl Dilithium3Keypair {
             return Ok(false);
         }
 
-        // Parse public key, return false on failure
-        let pq_pk = match pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key) {
-            Ok(pk) => pk,
-            Err(err) => {
-                log::warn!("Invalid public key in verification: {err:?}");
-                return Ok(false);
-            }
+        // Parse inputs; keep timing roughly constant even on failure
+        let pk_opt = pqcrypto_dilithium::dilithium3::PublicKey::from_bytes(public_key).ok();
+        let sig_opt = pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature).ok();
+
+        // Verify if both could be parsed; otherwise perform dummy work to mask timing
+        let verified = if let (Some(pk), Some(sig)) = (pk_opt, sig_opt) {
+            pqcrypto_dilithium::dilithium3::verify_detached_signature(&sig, message, &pk).is_ok()
+        } else {
+            // Dummy constant-time operation
+            let _ = blake3_hash(message);
+            false
         };
-        // Parse signature, return false on failure
-        let pq_sig = match pqcrypto_dilithium::dilithium3::DetachedSignature::from_bytes(&signature.signature) {
-            Ok(sig) => sig,
-            Err(err) => {
-                log::warn!("Invalid signature format in verification: {err:?}");
-                return Ok(false);
-            }
-        };
-        // Perform signature verification
-        Ok(pqcrypto_dilithium::dilithium3::verify_detached_signature(&pq_sig, message, &pq_pk).is_ok())
+
+        Ok(verified)
     }
     
     /// Validate key integrity using fingerprint
@@ -558,16 +558,15 @@ pub fn argon2id_pow_hash(data: &[u8], salt: &[u8], config: &Argon2Config) -> Res
     
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     
-    // Use appropriate salt length
-    let salt_to_use = if salt.len() >= config.salt_length {
-        &salt[..config.salt_length]
+    // Ensure salt has the required length without recursion
+    let mut salt_buf = vec![0u8; config.salt_length];
+    if salt.len() >= config.salt_length {
+        salt_buf.copy_from_slice(&salt[..config.salt_length]);
     } else {
-        // Pad salt if too short
-        let mut padded_salt = vec![0u8; config.salt_length];
-        padded_salt[..salt.len()].copy_from_slice(salt);
-        return argon2id_pow_hash(data, &padded_salt, config);
-    };
-    
+        salt_buf[..salt.len()].copy_from_slice(salt);
+    }
+    let salt_to_use: &[u8] = &salt_buf;
+
     // Perform Argon2id hashing
     let mut output = vec![0u8; config.output_length];
     argon2.hash_password_into(data, salt_to_use, &mut output)
@@ -855,6 +854,44 @@ pub fn verify_signature_with_timeout(
     }
 }
 
+// ===== Post-Quantum Kyber KEM helpers =====
+use pqcrypto_kyber::kyber768;
+use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey, Ciphertext as KemCiphertext, SharedSecret as KemSharedSecret};
+
+#[derive(Clone)]
+pub struct KyberKeypair {
+    pub public: Vec<u8>,
+    secret: Vec<u8>,
+}
+
+impl KyberKeypair {
+    pub fn new() -> Result<Self> {
+        let (pk, sk) = kyber768::keypair();
+        Ok(Self {
+            public: pk.as_bytes().to_vec(),
+            secret: sk.as_bytes().to_vec(),
+        })
+    }
+
+    /// Encapsulate a shared secret for the given peer public key
+    pub fn encapsulate(peer_public: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        let pk = kyber768::PublicKey::from_bytes(peer_public)
+            .map_err(|_| BlockchainError::CryptographyError("Invalid Kyber public key".into()))?;
+        let (cipher, shared) = kyber768::encapsulate(&pk);
+        Ok((cipher.as_bytes().to_vec(), shared.as_bytes().to_vec()))
+    }
+
+    /// Decapsulate a ciphertext with our secret key to retrieve the shared secret
+    pub fn decapsulate(&self, cipher: &[u8]) -> Result<Vec<u8>> {
+        let sk = kyber768::SecretKey::from_bytes(&self.secret)
+            .map_err(|_| BlockchainError::CryptographyError("Invalid Kyber secret key".into()))?;
+        let ct = kyber768::Ciphertext::from_bytes(cipher)
+            .map_err(|_| BlockchainError::CryptographyError("Invalid Kyber ciphertext".into()))?;
+        let shared = kyber768::decapsulate(&ct, &sk);
+        Ok(shared.as_bytes().to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,12 +990,20 @@ mod tests {
         
         // Test size limit
         let mut big_hasher = Blake3Hasher::new();
-        let big_data = vec![0u8; 500_000_000];
-        big_hasher.update(&big_data).unwrap();
-        // This should succeed
-        
-        let huge_data = vec![0u8; 600_000_000];
-        assert!(big_hasher.update(&huge_data).is_err()); // Should fail due to size limit
+        // Allocate a 100 MB buffer once and reuse it to exceed the 1 GB cap
+        let chunk = vec![0u8; 100_000_000]; // 100 MB
+
+        // Feed 9 × 100 MB = 900 MB (should succeed)
+        for _ in 0..9 {
+            big_hasher.update(&chunk).unwrap();
+        }
+
+        // The 10th chunk would push total to 1 GB, still allowed (exact limit),
+        // so push an extra byte afterwards to exceed the cap.
+        big_hasher.update(&chunk).unwrap();
+
+        // Now any additional update should fail due to size limit
+        assert!(big_hasher.update(&[0u8]).is_err());
     }
     
     #[test]

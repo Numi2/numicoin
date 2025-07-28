@@ -23,8 +23,6 @@ pub struct TransactionPriority {
     pub tx_id: TransactionId,
 }
 
-
-
 /// Transaction entry in the mempool with metadata
 #[derive(Debug, Clone)]
 pub struct MempoolEntry {
@@ -70,7 +68,7 @@ pub struct TransactionMempool {
     /// All transactions indexed by ID for O(1) lookup
     transactions: Arc<DashMap<TransactionId, MempoolEntry>>,
     
-    /// Account nonces to prevent replay attacks
+    /// Account nonces to prevent replay attacks (tracks highest nonce per account)
     account_nonces: Arc<DashMap<Vec<u8>, u64>>,
     
     /// Transactions by sender account for efficient account queries
@@ -96,6 +94,9 @@ pub struct TransactionMempool {
     current_size_bytes: Arc<RwLock<usize>>,
     rejected_count_1h: Arc<RwLock<usize>>,
     last_cleanup: Arc<RwLock<Instant>>,
+    
+    /// Priority queue needs refresh flag
+    needs_priority_refresh: Arc<RwLock<bool>>,
 }
 
 impl Default for TransactionMempool {
@@ -133,6 +134,7 @@ impl TransactionMempool {
             current_size_bytes: Arc::new(RwLock::new(0)),
             rejected_count_1h: Arc::new(RwLock::new(0)),
             last_cleanup: Arc::new(RwLock::new(Instant::now())),
+            needs_priority_refresh: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -146,8 +148,12 @@ impl TransactionMempool {
         let tx_id = transaction.id;
         let sender = &transaction.from;
         
+        log::debug!("🔍 Adding transaction {} to mempool from {}", 
+                   hex::encode(tx_id), hex::encode(&sender[..8.min(sender.len())]));
+        
         // Check if transaction already exists
         if self.transactions.contains_key(&tx_id) {
+            log::debug!("❌ Transaction {} already exists in mempool", hex::encode(tx_id));
             return Ok(ValidationResult::DuplicateTransaction);
         }
 
@@ -155,11 +161,13 @@ impl TransactionMempool {
         let validation_result = self.validate_transaction(&transaction).await?;
         if validation_result != ValidationResult::Valid {
             *self.rejected_count_1h.write() += 1;
+            log::warn!("❌ Transaction {} validation failed: {:?}", hex::encode(tx_id), validation_result);
             return Ok(validation_result);
         }
 
         // Check spam protection
         if !self.check_submission_rate_limit(sender).await {
+            log::warn!("⚠️ Rate limit exceeded for account {}", hex::encode(&sender[..8.min(sender.len())]));
             return Ok(ValidationResult::AccountSpamming { 
                 rate_limit: self.max_submissions_per_hour as u64 
             });
@@ -173,6 +181,8 @@ impl TransactionMempool {
         if !self.has_space_for_transaction(tx_size, fee_rate) {
             // Try to evict lower-priority transactions
             if !self.make_space_for_transaction(tx_size, fee_rate).await {
+                log::warn!("💰 Transaction {} fee too low: got {}, minimum {}", 
+                          hex::encode(tx_id), fee_rate, self.dynamic_min_fee_rate());
                 return Ok(ValidationResult::FeeTooLow { 
                     minimum: self.dynamic_min_fee_rate(), 
                     got: fee_rate 
@@ -183,7 +193,7 @@ impl TransactionMempool {
         // Create mempool entry
         let priority = TransactionPriority {
             fee_rate,
-            age_penalty: 0, // Will increase over time
+            age_penalty: u64::MAX, // New transactions start with highest age priority
             tx_id,
         };
 
@@ -198,10 +208,19 @@ impl TransactionMempool {
 
         // Add to all data structures atomically
         self.transactions.insert(tx_id, entry);
-        self.priority_queue.write().insert(priority, tx_id);
         
-        // Update account tracking
-        self.account_nonces.insert(sender.clone(), transaction.nonce);
+        // Update priority queue
+        {
+            let mut queue = self.priority_queue.write();
+            queue.insert(priority, tx_id);
+        }
+        
+        // Update account tracking - use the highest nonce we've seen
+        let current_nonce = self.account_nonces.get(sender).map(|n| *n).unwrap_or(0);
+        if transaction.nonce > current_nonce {
+            self.account_nonces.insert(sender.clone(), transaction.nonce);
+        }
+        
         self.transactions_by_account
             .entry(sender.clone())
             .or_default()
@@ -212,9 +231,12 @@ impl TransactionMempool {
         
         // Record submission for rate limiting
         self.record_submission(sender).await;
+        
+        // Mark that priorities may need refresh
+        *self.needs_priority_refresh.write() = true;
 
-        log::info!("✅ Transaction {} added to mempool (fee_rate: {})", 
-                  hex::encode(tx_id), fee_rate);
+        log::info!("✅ Transaction {} added to mempool (fee_rate: {}, size: {} bytes)", 
+                  hex::encode(tx_id), fee_rate, tx_size);
 
         Ok(ValidationResult::Valid)
     }
@@ -222,10 +244,13 @@ impl TransactionMempool {
     /// Get highest priority transactions for block creation
     pub fn get_transactions_for_block(&self, max_block_size: usize, max_transactions: usize) -> Vec<Transaction> {
         // Ensure priorities are up-to-date before selection
-        self.refresh_priorities();
+        self.refresh_priorities_if_needed();
+        
         let mut selected = Vec::new();
         let mut total_size = 0;
         let priority_queue = self.priority_queue.read();
+        
+        log::debug!("🎯 Selecting transactions for block (max_size: {max_block_size}, max_txs: {max_transactions})");
         
         // Iterate from highest to lowest priority
         for (_, tx_id) in priority_queue.iter().rev() {
@@ -240,18 +265,27 @@ impl TransactionMempool {
                 
                 selected.push(entry.transaction.clone());
                 total_size += entry.size_bytes;
+                
+                log::debug!("  📦 Selected tx {} (fee_rate: {}, size: {})", 
+                           hex::encode(tx_id), entry.fee_rate, entry.size_bytes);
             }
         }
         
+        log::info!("📦 Selected {} transactions for block (total size: {} bytes)", selected.len(), total_size);
         selected
     }
 
     /// Remove transactions (typically after block inclusion)
     pub async fn remove_transactions(&self, tx_ids: &[TransactionId]) {
+        log::debug!("🗑️ Removing {} transactions from mempool", tx_ids.len());
+        
         for tx_id in tx_ids {
             if let Some((_, entry)) = self.transactions.remove(tx_id) {
                 // Remove from priority queue
-                self.priority_queue.write().remove(&entry.priority);
+                {
+                    let mut queue = self.priority_queue.write();
+                    queue.remove(&entry.priority);
+                }
                 
                 // Update account tracking
                 let sender = &entry.transaction.from;
@@ -260,6 +294,8 @@ impl TransactionMempool {
                     if account_txs.is_empty() {
                         drop(account_txs);
                         self.transactions_by_account.remove(sender);
+                        // Reset nonce tracking for empty accounts
+                        self.account_nonces.remove(sender);
                     }
                 }
                 
@@ -267,8 +303,13 @@ impl TransactionMempool {
                 *self.current_size_bytes.write() -= entry.size_bytes;
                 
                 log::debug!("🗑️ Removed transaction {} from mempool", hex::encode(tx_id));
+            } else {
+                log::debug!("⚠️ Transaction {} not found in mempool for removal", hex::encode(tx_id));
             }
         }
+        
+        // Recalculate nonces for affected accounts to ensure consistency
+        self.recalculate_account_nonces().await;
     }
 
     /// Get transactions for a specific account
@@ -345,8 +386,10 @@ impl TransactionMempool {
             *self.rejected_count_1h.write() = 0;
             *self.last_cleanup.write() = now;
         }
-        // Re-compute priorities after cleanup so that age penalties are updated
-        self.refresh_priorities();
+        
+        // Force priority refresh after cleanup
+        *self.needs_priority_refresh.write() = true;
+        self.refresh_priorities_if_needed();
     }
 
     /// Get all transactions currently in the mempool
@@ -379,22 +422,31 @@ impl TransactionMempool {
         }
     }
 
+    /// Refresh priorities only if needed (performance optimization)
+    fn refresh_priorities_if_needed(&self) {
+        if *self.needs_priority_refresh.read() {
+            self.refresh_priorities();
+            *self.needs_priority_refresh.write() = false;
+        }
+    }
+
     /// Refresh the priority queue by applying an age‐based penalty to every
     /// transaction.  Newer transactions keep their full fee_rate while older
     /// transactions gradually lose priority, ensuring liveness and discouraging
     /// spam with low fees that linger in the mempool.
-    pub fn refresh_priorities(&self) {
+    fn refresh_priorities(&self) {
         let now = Instant::now();
         let mut new_queue: BTreeMap<TransactionPriority, TransactionId> = BTreeMap::new();
+        let mut updated_entries = Vec::new();
 
-        // Recompute priority for every transaction
+        // First pass: collect all entries and calculate new priorities
         for entry in self.transactions.iter() {
             let age_secs = now.duration_since(entry.added_at).as_secs();
             // Older transactions get a *lower* effective priority.  Because we
             // iterate over the queue in reverse order (highest first), we store
             // u64::MAX - age to invert the ordering so that large values mean
-            // 2higher priority2.
-            let age_penalty = u64::MAX - age_secs;
+            // higher priority.
+            let age_penalty = u64::MAX.saturating_sub(age_secs);
 
             let new_priority = TransactionPriority {
                 fee_rate: entry.fee_rate,
@@ -402,15 +454,42 @@ impl TransactionMempool {
                 tx_id: *entry.key(),
             };
 
-            // Update the entry's cached priority so removal logic remains valid
-            if let Some(mut e) = self.transactions.get_mut(entry.key()) {
-                e.priority = new_priority.clone();
-            }
-
-            new_queue.insert(new_priority, *entry.key());
+            new_queue.insert(new_priority.clone(), *entry.key());
+            updated_entries.push((*entry.key(), new_priority));
         }
 
+        // Second pass: update cached priorities in entries
+        for (tx_id, new_priority) in updated_entries {
+            if let Some(mut entry) = self.transactions.get_mut(&tx_id) {
+                entry.priority = new_priority;
+            }
+        }
+
+        // Atomically replace the priority queue
         *self.priority_queue.write() = new_queue;
+        
+        log::debug!("🔄 Refreshed {} transaction priorities", self.transactions.len());
+    }
+
+    /// Recalculate account nonces based on remaining transactions
+    async fn recalculate_account_nonces(&self) {
+        for account_entry in self.transactions_by_account.iter() {
+            let account = account_entry.key();
+            let tx_ids = account_entry.value();
+            
+            let mut max_nonce = 0;
+            for tx_id in tx_ids.iter() {
+                if let Some(entry) = self.transactions.get(tx_id) {
+                    max_nonce = max_nonce.max(entry.transaction.nonce);
+                }
+            }
+            
+            if max_nonce > 0 {
+                self.account_nonces.insert(account.clone(), max_nonce);
+            } else {
+                self.account_nonces.remove(account);
+            }
+        }
     }
 
     async fn validate_transaction(&self, transaction: &Transaction) -> Result<ValidationResult> {
@@ -443,7 +522,7 @@ impl TransactionMempool {
             return Ok(ValidationResult::InvalidSignature);
         }
         
-        // Check nonce (prevent replay attacks)
+        // Check nonce (prevent replay attacks) - ensure sequential nonces
         if let Some(last_nonce) = self.account_nonces.get(&transaction.from) {
             if transaction.nonce <= *last_nonce {
                 return Ok(ValidationResult::InvalidNonce {
@@ -478,7 +557,7 @@ impl TransactionMempool {
                     }
                 } else {
                     // No blockchain reference available, skip balance validation
-                    log::warn!("⚠️ No blockchain reference available, skipping balance validation for transaction {}", 
+                    log::debug!("⚠️ No blockchain reference available, skipping balance validation for transaction {}", 
                               hex::encode(transaction.id));
                 }
             }

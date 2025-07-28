@@ -232,9 +232,6 @@ pub struct MiningConfig {
     /// Path to the miner's wallet file (relative to data_directory)
     pub wallet_path: PathBuf,
     pub argon2_config: Argon2Config,
-    pub enable_cpu_affinity: bool,
-    pub thermal_throttle_temp: f32,
-    pub power_limit_watts: f32,
     pub mining_pool_url: Option<String>,
     pub mining_pool_worker: Option<String>,
     pub target_block_time_secs: u64,
@@ -250,9 +247,6 @@ impl Default for MiningConfig {
             stats_update_interval_secs: 5,
             wallet_path: PathBuf::from("wallet.key"),
             argon2_config: Argon2Config::default(),
-            enable_cpu_affinity: true,
-            thermal_throttle_temp: 85.0,
-            power_limit_watts: 0.0, // 0 = no limit
             mining_pool_url: None,
             mining_pool_worker: None,
             target_block_time_secs: 60,
@@ -271,8 +265,6 @@ impl MiningConfig {
             stats_update_interval_secs: 2,
             wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::production(),
-            enable_cpu_affinity: true,
-            thermal_throttle_temp: 90.0,
             ..Default::default()
         }
     }
@@ -286,9 +278,6 @@ impl MiningConfig {
             stats_update_interval_secs: 10,
             wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::development(),
-            enable_cpu_affinity: false,
-            thermal_throttle_temp: 70.0,
-            power_limit_watts: 50.0,
             target_block_time_secs: 10, // Faster blocks for development
             difficulty_adjustment_interval: 20,
             ..Default::default()
@@ -304,9 +293,6 @@ impl MiningConfig {
             stats_update_interval_secs: 5,
             wallet_path: PathBuf::from("miner-wallet.json"),
             argon2_config: Argon2Config::development(),
-            enable_cpu_affinity: false,
-            thermal_throttle_temp: 75.0,
-            power_limit_watts: 0.0, // No power limit for testnet
             target_block_time_secs: 15, // Slightly slower than development
             difficulty_adjustment_interval: 30,
             ..Default::default()
@@ -647,7 +633,6 @@ impl StorageConfig {
             backup_interval_hours: 12,
             retention_days: 7,
             sync_mode: SyncMode::Normal,
-            ..Default::default()
         }
     }
 
@@ -694,9 +679,9 @@ impl Default for ConsensusConfig {
             max_reorg_depth: 144,
             checkpoint_interval: 1000,
             finality_depth: 2016,
-            genesis_supply: 50_000_000_000, // 50 NUMI (same as other blocks)
-            mining_reward_halving_interval: 1_000_000,
-            initial_mining_reward: 50_000_000_000, // 50 NUMI
+            genesis_supply: 1000, // 10 NUMI (1000 NANO units) 
+            mining_reward_halving_interval: 210_000, // Bitcoin-like halving every 210k blocks
+            initial_mining_reward: 1000, // 10 NUMI (1000 NANO units)
         }
     }
 }
@@ -733,10 +718,9 @@ impl ConsensusConfig {
             max_reorg_depth: 20,
             checkpoint_interval: 100,
             finality_depth: 200,
-            genesis_supply: 50_000_000_000, // 50 NUMI (same as other blocks)
-            mining_reward_halving_interval: 1_000_000, // 1M blocks halving for testnet
-            initial_mining_reward: 50_000_000_000, // 50 NUMI initial reward
-            ..Default::default()
+            genesis_supply: 1000, // 10 NUMI (1000 NANO units) - same as mainnet 
+            mining_reward_halving_interval: 1000, // 1k blocks halving for faster testing
+            initial_mining_reward: 1000, // 10 NUMI (1000 NANO units) - same as mainnet
         }
     }
 

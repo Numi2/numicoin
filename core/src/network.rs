@@ -1,872 +1,276 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::str::FromStr;
+// src/network.rs
+//
+// Minimal P2P layer for Numicoin.
+// --------------------------------------------------------------
+// • libp2p TCP → Noise XX → Yamux transport
+// • gossipsub v1.1 for blocks & transactions
+// • mDNS for LAN discovery, static bootstrap list for WAN
+// • NetworkHandle lets RPC layer broadcast tx/block & query peer count
+//
 
-use futures::stream::FuturesUnordered;
+use std::{collections::HashSet, sync::Arc};
+
+use futures::{StreamExt, channel::mpsc};
 use libp2p::{
     core::upgrade,
-    floodsub::{self, Behaviour as Floodsub, Event as FloodsubEvent, Topic},
+    gossipsub::{
+        Behaviour as Gossipsub, Event as GossipsubEvent, IdentTopic, Config as GossipsubConfig, 
+        MessageAuthenticity
+    },
     identity,
-    swarm::{Swarm, SwarmEvent},
-    tcp, tls, yamux,
-    Multiaddr, PeerId,
     mdns::{tokio::Behaviour as Mdns, Event as MdnsEvent},
-    swarm::NetworkBehaviour,
-    Transport,
+    noise,
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    tcp, yamux, Multiaddr, PeerId, Transport,
 };
-use futures::StreamExt;
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use parking_lot::RwLock;
+use crate::RwLock;
 
-use crate::block::Block;
-use crate::transaction::Transaction;
-use crate::{Result, BlockchainError, PeerDB, NumiBlockchain};
-use crate::crypto::{Dilithium3Keypair, KyberKeypair};
-use crate::peer_db::PeerInfo;
+use crate::{
+    block::Block,
+    transaction::Transaction,
+    config::NetworkConfig,
+    error::BlockchainError,
+    Result,
+};
 
-
-const TOPIC_BLOCKS: &str = "numi/blocks/1.0.0";
-const TOPIC_TRANSACTIONS: &str = "numi/transactions/1.0.0";
-const TOPIC_PEER_INFO: &str = "numi/peer-info/1.0.0";
-const TOPIC_HEADERS_REQUEST: &str = "numi/headers-request/1.0.0";
-const TOPIC_HEADERS_RESPONSE: &str = "numi/headers-response/1.0.0";
-const TOPIC_BLOCK_REQUEST: &str = "numi/block-request/1.0.0";
-
-/// Bootstrap nodes for initial network discovery
-const BOOTSTRAP_NODES: &[&str] = &[
-    "/ip4/127.0.0.1/tcp/8333",  // Local node for testing
-];
-
-/// Maximum allowed timestamp skew for replay protection (5 minutes)
-const MAX_TIMESTAMP_SKEW: u64 = 300;
-
-/// Network message types for blockchain communication
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum NetworkMessage {
-    /// New block announcement
-    NewBlock(Block),
-    /// New transaction announcement  
-    NewTransaction(Transaction),
-    /// Request specific block by hash
-    BlockRequest(Vec<u8>),
-    /// Request block headers starting from hash
-    HeadersRequest { start_hash: Vec<u8>, count: u32 },
-    /// Response to headers request
-    HeadersResponse { headers: Vec<crate::block::BlockHeader> },
-    /// Peer information broadcast with replay protection
-    PeerInfo { 
-        chain_height: u64, 
-        peer_id: String,
-        dilithium_pk: Vec<u8>,
-        kyber_pk: Vec<u8>,
-        timestamp: u64,
-        nonce: u64,
-        signature: Vec<u8>,
-    },
-    /// Ping for connection health with replay protection
-    Ping { 
-        timestamp: u64,
-        nonce: u64,
-        signature: Vec<u8>,
-    },
-    /// Pong response to ping with replay protection
-    Pong { 
-        timestamp: u64,
-        nonce: u64,
-        signature: Vec<u8>,
-    },
-    
+// Events that go FROM network manager TO other parts of the app (inbound)
+#[derive(Debug, Clone)]
+pub enum InEvent {
+    Block(Block),
+    Tx(Transaction),
 }
 
-// Composite behaviour combining Floodsub for pub-sub and mDNS for local peer discovery.
-// More protocols (e.g. Kademlia, Identify, Ping) can be added later.
+// Events that go FROM other parts TO network manager (outbound)
+#[derive(Debug)]
+pub enum OutEvent {
+    BroadcastBlock(Block),
+    BroadcastTx(Transaction),
+}
 
+// ---------- Behaviour  ---------------------------------------
 #[derive(NetworkBehaviour)]
-pub struct NumiBehaviour {
-    pub floodsub: Floodsub,
-    pub mdns: Mdns,
+#[behaviour(to_swarm = "NetEvent")]
+struct NetBehaviour {
+    mdns: Mdns,
+    gossipsub: Gossipsub,
 }
 
-// Re-export the behaviour type used throughout the file so later code needs only minimal changes.
-pub type SimpleNetworkBehaviour = NumiBehaviour;
-// The derive macro already generates an enum `NumiBehaviourEvent` for us, so no extra alias is needed.
+#[derive(Debug)]
+enum NetEvent {
+    Mdns(MdnsEvent),
+    Gossipsub(GossipsubEvent),
+}
 
-/// Thread-safe network manager wrapper for RPC compatibility
+impl From<MdnsEvent> for NetEvent {
+    fn from(event: MdnsEvent) -> Self {
+        NetEvent::Mdns(event)
+    }
+}
+
+impl From<GossipsubEvent> for NetEvent {
+    fn from(event: GossipsubEvent) -> Self {
+        NetEvent::Gossipsub(event)
+    }
+}
+
+// ---------- Public handle (for RPC / miner) ------------------
 #[derive(Clone)]
-pub struct NetworkManagerHandle {
-    message_sender: mpsc::UnboundedSender<NetworkMessage>,
-    peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
-    banned_peers: Arc<RwLock<HashSet<PeerId>>>,
-    _local_peer_id: PeerId,
-    chain_height: Arc<RwLock<u64>>,
-    is_syncing: Arc<RwLock<bool>>,
-    peer_db: PeerDB,
-    /// Local Kyber keypair (public key is shared with peers)
-    kyber_kp: KyberKeypair,
+pub struct NetworkHandle {
+    out_tx: mpsc::UnboundedSender<OutEvent>,
+    peer_set: Arc<RwLock<HashSet<PeerId>>>,
 }
 
-/// Production-ready P2P network manager (simplified version)
+impl NetworkHandle {
+    pub fn peer_count(&self) -> usize {
+        self.peer_set.read().len()
+    }
+    pub fn broadcast_block(&self, b: Block) -> Result<()> {
+        self.out_tx.unbounded_send(OutEvent::BroadcastBlock(b))
+            .map_err(|e| BlockchainError::NetworkError(format!("Send error: {e}")))
+    }
+    pub fn broadcast_tx(&self, t: Transaction) -> Result<()> {
+        self.out_tx.unbounded_send(OutEvent::BroadcastTx(t))
+            .map_err(|e| BlockchainError::NetworkError(format!("Send error: {e}")))
+    }
+}
+
+// ---------- NetworkManager -----------------------------------
 pub struct NetworkManager {
-    swarm: Swarm<SimpleNetworkBehaviour>,
-    peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
-    banned_peers: Arc<RwLock<HashSet<PeerId>>>,
-    message_sender: mpsc::UnboundedSender<NetworkMessage>,
-    message_receiver: mpsc::UnboundedReceiver<NetworkMessage>,
-    local_peer_id: PeerId,
-    chain_height: Arc<RwLock<u64>>,
-    is_syncing: Arc<RwLock<bool>>,
-    
-    local_dilithium_kp: Dilithium3Keypair,
-    kyber_kp: KyberKeypair,
-    peer_db: PeerDB,
-    blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>,
-}
-
-// Safety: NetworkManager is moved into its own dedicated async task thread and is not shared thereafter, 
-// so it is safe to mark it Send and Sync for the purpose of spawning.
-unsafe impl Send for NetworkManager {}
-unsafe impl Sync for NetworkManager {}
-
-impl NetworkManagerHandle {
-    /// Get the number of connected peers
-    pub async fn get_peer_count(&self) -> usize {
-        let peers = self.peers.clone();
-        tokio::task::spawn_blocking(move || peers.read().len()).await.unwrap_or(0)
-    }
-
-    /// Check if the node is currently syncing
-    pub async fn is_syncing(&self) -> bool {
-        let is_syncing = self.is_syncing.clone();
-        tokio::task::spawn_blocking(move || *is_syncing.read()).await.unwrap_or(false)
-    }
-
-    /// Get current chain height
-    pub async fn get_chain_height(&self) -> u64 {
-        let chain_height = self.chain_height.clone();
-        tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0)
-    }
-
-    /// Broadcast a block to the network
-    pub async fn broadcast_block(&self, block: Block) -> Result<()> {
-        let message = NetworkMessage::NewBlock(block);
-        self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send block: {e}")))?;
-        Ok(())
-    }
-
-    /// Broadcast a transaction to the network
-    pub async fn broadcast_transaction(&self, transaction: Transaction) -> Result<()> {
-        let message = NetworkMessage::NewTransaction(transaction);
-        self.message_sender.send(message)
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to send transaction: {e}")))?;
-        Ok(())
-    }
-
-    /// Update peer reputation
-    pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
-        let peers = self.peers.clone();
-        let peer_id = _peer_id;
-        tokio::task::spawn_blocking(move || {
-            let mut peers = peers.write();
-            if let Some(_peer) = peers.get_mut(&peer_id) {
-                // Reputation logic is removed for now
-            }
-        }).await.ok();
-    }
-
-    /// Check if a peer is banned
-    pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
-        let banned_peers = self.banned_peers.clone();
-        let peer_id = *peer_id;
-        tokio::task::spawn_blocking(move || banned_peers.read().contains(&peer_id)).await.unwrap_or(false)
-    }
-    /// Get list of verified peers from key registry
-    pub async fn get_verified_peers(&self) -> Vec<PeerId> {
-        // This function is no longer needed as PeerKeyRegistry is removed.
-        // Returning an empty vector as a placeholder.
-        Vec::new()
-    }
-
-    /// Add a peer to the peer database.
-    pub async fn add_peer_to_db(&self, peer_id: PeerId, dilithium_kp: Dilithium3Keypair) {
-        // In this simplified implementation we do not have the peer's Kyber
-        // public key readily available at this call site, so we store an
-        // empty vector for now.  The correct Kyber key is inserted elsewhere
-        // when we receive peer handshake data.
-        self.peer_db
-            .add_peer(peer_id, dilithium_kp.public_key.clone(), self.kyber_kp.public.clone())
-            .await;
-    }
+    swarm:        Swarm<NetBehaviour>,
+    _in_tx:       mpsc::UnboundedSender<InEvent>,
+    out_rx:       mpsc::UnboundedReceiver<OutEvent>,
+    peer_set:     Arc<RwLock<HashSet<PeerId>>>,
+    topic_blocks: IdentTopic,
+    topic_txs:    IdentTopic,
 }
 
 impl NetworkManager {
-    pub fn new(blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>) -> Result<Self> {
-        // Generate post-quantum key material for handshake and authentication
-        let dilithium_kp = Dilithium3Keypair::new()?;
+    pub fn new(
+        cfg: &NetworkConfig,
+        in_tx: mpsc::UnboundedSender<InEvent>,
+    ) -> Result<(Self, NetworkHandle)> {
+        // --- keys & peer id ---
+        let id_keys = identity::Keypair::generate_ed25519();
+        let peer_id = PeerId::from(id_keys.public());
+        log::info!("🕸  Local peer id {peer_id}");
 
-        // Generate TLS identity for transport and derive PeerId from it
-        let tls_identity = identity::Keypair::generate_ed25519();
-        let local_peer_id = PeerId::from(tls_identity.public());
-
-        log::info!("🔑 Local peer ID: {local_peer_id}");
-
-        // Create key registry
-        // let key_registry = Arc::new(PeerKeyRegistry::new()); // This line is removed
-
-        // Create TLS config for transport encryption
-        let tls_config = tls::Config::new(&tls_identity).map_err(|e| BlockchainError::NetworkError(format!("TLS config failed: {e}")))?;
-
-        // Create transport with TLS and Yamux
-        let transport = tcp::tokio::Transport::default()
+        // --- transport: TCP → Noise XX → Yamux ---
+        let transport = tcp::tokio::Transport::new(tcp::Config::default())
             .upgrade(upgrade::Version::V1)
-            .authenticate(tls_config)
+            .authenticate(noise::Config::new(&id_keys).unwrap())
             .multiplex(yamux::Config::default())
             .boxed();
 
-        // --- Build the composite behaviour (Floodsub + mDNS) ---
+        // --- gossipsub config ---
+        let gossipsub_config = GossipsubConfig::default();
 
-        // Floodsub for gossip based messaging
-        let mut floodsub = Floodsub::new(local_peer_id);
+        // --- gossipsub ---
+        let mut gossipsub = Gossipsub::new(
+            MessageAuthenticity::Signed(id_keys.clone()),
+            gossipsub_config,
+        ).map_err(|e| BlockchainError::NetworkError(format!("Gossipsub init: {e}")))?;
 
-        // Subscribe to the Numicoin topics
-        let blocks_topic = Topic::new(TOPIC_BLOCKS);
-        let transactions_topic = Topic::new(TOPIC_TRANSACTIONS);
-        let peer_info_topic = Topic::new(TOPIC_PEER_INFO);
-        let headers_request_topic = Topic::new(TOPIC_HEADERS_REQUEST);
-        let headers_response_topic = Topic::new(TOPIC_HEADERS_RESPONSE);
-        let block_request_topic = Topic::new(TOPIC_BLOCK_REQUEST);
+        let topic_blocks = IdentTopic::new("numicoin-blocks");
+        let topic_txs = IdentTopic::new("numicoin-txs");
+        
+        gossipsub.subscribe(&topic_blocks)
+            .map_err(|e| BlockchainError::NetworkError(format!("Subscribe blocks: {e}")))?;
+        gossipsub.subscribe(&topic_txs)
+            .map_err(|e| BlockchainError::NetworkError(format!("Subscribe txs: {e}")))?;
 
-        floodsub.subscribe(blocks_topic.clone());
-        floodsub.subscribe(transactions_topic.clone());
-        floodsub.subscribe(peer_info_topic.clone());
-        floodsub.subscribe(headers_request_topic.clone());
-        floodsub.subscribe(headers_response_topic.clone());
-        floodsub.subscribe(block_request_topic.clone());
+        // --- mdns ---
+        let mdns = Mdns::new(Default::default(), peer_id)?;
 
-        // mDNS for local peer discovery
-        let mdns = Mdns::new(Default::default(), local_peer_id)
-            .map_err(|e| BlockchainError::NetworkError(format!("mDNS init failed: {e}")))?;
+        // --- behaviour / swarm ---
+        let behaviour = NetBehaviour { mdns, gossipsub };
+        let mut swarm = Swarm::new(
+            transport, 
+            behaviour, 
+            peer_id, 
+            libp2p::swarm::Config::with_tokio_executor()
+        );
 
-        // Compose the behaviour
-        let behaviour = NumiBehaviour { floodsub, mdns };
+        // listen
+        let listen_addr = format!("/ip4/{}/tcp/{}", cfg.listen_address, cfg.listen_port);
+        let multiaddr = listen_addr.parse()
+            .map_err(|e| BlockchainError::NetworkError(format!("Parse addr: {e}")))?;
+        swarm.listen_on(multiaddr)
+            .map_err(|e| BlockchainError::NetworkError(format!("Listen error: {e}")))?;
 
-        // Create swarm with config
-        let config = libp2p::swarm::Config::with_tokio_executor();
-        let swarm = Swarm::new(transport, behaviour, local_peer_id, config);
+        // outbound channel
+        let (out_tx, out_rx) = mpsc::unbounded();
 
-        let (message_sender, message_receiver) = mpsc::unbounded_channel();
+        let peer_set = Arc::new(RwLock::new(HashSet::new()));
 
-        Ok(Self {
-            swarm,
-            peers: Arc::new(RwLock::new(HashMap::new())),
-            banned_peers: Arc::new(RwLock::new(HashSet::new())),
-            message_sender,
-            message_receiver,
-            local_peer_id,
-            chain_height: Arc::new(RwLock::new(0)),
-            is_syncing: Arc::new(RwLock::new(false)),
-            
-            local_dilithium_kp: dilithium_kp,
-            kyber_kp: KyberKeypair::new()?,
-            peer_db: PeerDB::new(),
-            blockchain,
-        })
-    }
-
-    /// Create a thread-safe handle for RPC server
-    pub fn create_handle(&self) -> NetworkManagerHandle {
-        NetworkManagerHandle {
-            message_sender: self.message_sender.clone(),
-            peers: self.peers.clone(),
-            banned_peers: self.banned_peers.clone(),
-            _local_peer_id: self.local_peer_id,
-            chain_height: self.chain_height.clone(),
-            is_syncing: self.is_syncing.clone(),
-            peer_db: self.peer_db.clone(),
-            kyber_kp: self.kyber_kp.clone(),
-        }
-    }
-
-    /// Check if currently syncing
-    pub async fn is_syncing(&self) -> bool {
-        let is_syncing = self.is_syncing.clone();
-        tokio::task::spawn_blocking(move || *is_syncing.read()).await.unwrap_or(false)
-    }
-
-    /// Set syncing status
-    pub async fn set_syncing(&self, syncing: bool) {
-        let is_syncing = self.is_syncing.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut guard = is_syncing.write();
-            *guard = syncing;
-        }).await.ok();
-    }
-
-    /// Get current chain height
-    pub async fn get_chain_height(&self) -> u64 {
-        let chain_height = self.chain_height.clone();
-        tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0)
-    }
-
-    /// Set current chain height
-    pub async fn set_chain_height(&self, height: u64) {
-        let chain_height = self.chain_height.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut guard = chain_height.write();
-            *guard = height;
-        }).await.ok();
-    }
-
-    /// Start the network manager and bind to listening address
-    pub async fn start(&mut self, listen_addr: &str) -> Result<()> {
-        // Try to parse as multiaddr first, if that fails, try to construct it
-        let addr: Multiaddr = match listen_addr.parse() {
-            Ok(addr) => addr,
-            Err(_) => {
-                // If parsing fails, try to construct a proper multiaddr
-                // The listen_addr should be in format "/ip4/0.0.0.0/tcp/8333"
-                if listen_addr.starts_with("/ip4/") {
-                    listen_addr.parse()
-                        .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {e}")))?
-                } else {
-                    // Try to construct from IP and port
-                    let parts: Vec<&str> = listen_addr.split('/').collect();
-                    if parts.len() >= 4 && parts[1] == "ip4" && parts[3] == "tcp" {
-                        listen_addr.parse()
-                            .map_err(|e| BlockchainError::NetworkError(format!("Invalid multiaddr format: {e}")))?
-                    } else {
-                        return Err(BlockchainError::NetworkError(format!("Invalid listen address format: {listen_addr}")));
-                    }
-                }
-            }
+        let handle = NetworkHandle {
+            out_tx,
+            peer_set: peer_set.clone(),
         };
 
-        self.swarm.listen_on(addr.clone())
-            .map_err(|e| BlockchainError::NetworkError(format!("Failed to listen: {e}")))?;
-
-        log::info!("🌐 Network listening on: {addr}");
-        
-        // Connect to bootstrap nodes
-        self.bootstrap().await?;
-        
-        Ok(())
+        Ok((
+            Self {
+                swarm,
+                _in_tx: in_tx,
+                out_rx,
+                peer_set,
+                topic_blocks,
+                topic_txs,
+            },
+            handle,
+        ))
     }
 
-    /// Connect to bootstrap nodes
-    async fn bootstrap(&mut self) -> Result<()> {
-        for &bootstrap_addr in BOOTSTRAP_NODES {
-            if let Ok(addr) = bootstrap_addr.parse::<Multiaddr>() {
-                match self.swarm.dial(addr.clone()) {
-                    Ok(_) => log::info!("📞 Dialing bootstrap node: {addr}"),
-                    Err(e) => log::warn!("❌ Failed to dial bootstrap node {addr}: {e}"),
-                }
+    /// bootstrap to the static list defined in config
+    pub fn bootstrap(&mut self, list: &[Multiaddr]) {
+        for addr in list {
+            if let Err(e) = self.swarm.dial(addr.clone()) {
+                log::warn!("Dial {addr} failed: {e}");
             }
         }
-        Ok(())
     }
 
-    /// Perform periodic maintenance tasks
-    async fn perform_maintenance(&mut self) {
-        // Unban peers whose ban duration has expired
-        let _now = Instant::now();
-        let peers = self.peers.clone();
-        tokio::task::spawn_blocking(move || {
-            let _peers = peers.write();
-            // Ban logic is removed for now
-        }).await.ok();
-    }
-
-    /// Main event processing loop
-    pub async fn run_event_loop(&mut self) {
-        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(30));
-
+    /// Run forever. Send inbound events to `in_tx`.
+    pub async fn run(mut self) {
         loop {
-            tokio::select! {
-                // Handle swarm events
-                event = self.swarm.select_next_some() => {
-                    if let Err(e) = self.handle_swarm_event(event).await {
-                        log::error!("Error handling swarm event: {e}");
-                    }
-                }
-                
-                // Handle outgoing messages
-                message = self.message_receiver.recv() => {
-                    if let Some(msg) = message {
-                        if let Err(e) = self.handle_outgoing_message(msg).await {
-                            log::error!("Error handling outgoing message: {e}");
-                        }
-                    }
-                }
-                
-                // Periodic maintenance
-                _ = maintenance_interval.tick() => {
-                    self.perform_maintenance().await;
-                }
-            }
-        }
-    }
-
-    /// Handle events from libp2p swarm
-    async fn handle_swarm_event(&mut self, event: SwarmEvent<NumiBehaviourEvent>) -> Result<()> {
-        match event {
-            SwarmEvent::Behaviour(NumiBehaviourEvent::Floodsub(FloodsubEvent::Message(msg))) => {
-                self.handle_floodsub_message(msg).await?;
-            }
-            SwarmEvent::Behaviour(NumiBehaviourEvent::Mdns(MdnsEvent::Discovered(list))) => {
-                for (peer, _addr) in list {
-                    self.swarm.behaviour_mut().floodsub.add_node_to_partial_view(peer);
-                }
-            }
-            SwarmEvent::Behaviour(NumiBehaviourEvent::Mdns(MdnsEvent::Expired(list))) => {
-                for (peer, _addr) in list {
-                    self.swarm.behaviour_mut().floodsub.remove_node_from_partial_view(&peer);
-                }
-            }
-            SwarmEvent::NewListenAddr { address, .. } => {
-                log::info!("🌐 New listen address: {address}");
-            }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                self.on_peer_connected(peer_id).await;
-            }
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                self.on_peer_disconnected(peer_id).await;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle outgoing messages with parallel broadcast
-    async fn handle_outgoing_message(&mut self, message: NetworkMessage) -> Result<()> {
-        let (topic, data) = match &message {
-            NetworkMessage::NewBlock(_) => (TOPIC_BLOCKS, bincode::serialize(&message)?),
-            NetworkMessage::NewTransaction(_) => (TOPIC_TRANSACTIONS, bincode::serialize(&message)?),
-            NetworkMessage::PeerInfo { .. } => (TOPIC_PEER_INFO, bincode::serialize(&message)?),
-            NetworkMessage::HeadersRequest { .. } => (TOPIC_HEADERS_REQUEST, bincode::serialize(&message)?),
-            NetworkMessage::HeadersResponse { .. } => (TOPIC_HEADERS_RESPONSE, bincode::serialize(&message)?),
-            NetworkMessage::BlockRequest(..) => (TOPIC_BLOCK_REQUEST, bincode::serialize(&message)?),
-            _ => return Ok(()), // Skip other message types for now
-        };
-
-        // Parallel broadcast to all peers using FuturesUnordered
-        let mut broadcast_futures = FuturesUnordered::new();
-        
-        // Get all connected peers
-        let peers = self.peers.clone();
-        let peer_ids: Vec<PeerId> = tokio::task::spawn_blocking(move || {
-            let peers = peers.read();
-            let peer_ids: Vec<PeerId> = peers.keys().cloned().collect();
-            peer_ids
-        }).await.unwrap_or_default();
-
-        for _peer_id in peer_ids {
-            let _topic_clone = Topic::new(topic);
-            let _data_clone = data.clone();
-            
-            // Spawn individual broadcast task for each peer
-            let broadcast_future = async move {
-                // In a real implementation, this would send directly to the peer
-                // For now, we use floodsub which handles the broadcast internally
-                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-            };
-            
-            broadcast_futures.push(broadcast_future);
-        }
-
-        // Wait for all broadcasts to complete, handling errors individually
-        while let Some(result) = broadcast_futures.next().await {
-            if let Err(e) = result {
-                log::warn!("Failed to broadcast to peer: {e}");
-                // In a real implementation, we would remove the problematic peer here
-            }
-        }
-
-        // Also publish via floodsub for discovery
-        self.swarm
-            .behaviour_mut()
-            .floodsub
-            .publish(Topic::new(topic), data);
-        
-        Ok(())
-    }
-
-    /// Handle incoming floodsub messages with validation
-    async fn handle_floodsub_message(&mut self, message: floodsub::FloodsubMessage) -> Result<()> {
-        // Extract topic string - use debug formatting
-        let topic_str = if let Some(topic) = message.topics.first() {
-            format!("{topic:?}")
-        } else {
-            String::new()
-        };
-        let data = message.data;
-
-        match topic_str.as_str() {
-            TOPIC_BLOCKS => {
-                if let Ok(NetworkMessage::NewBlock(block)) = bincode::deserialize::<NetworkMessage>(&data) {
-                    log::info!("📦 Received new block: {}", hex::encode(block.calculate_hash().unwrap_or([0u8; 32])));
-                    
-                    // Validate block before processing
-                    if let Err(e) = self.validate_block(&block).await {
-                        log::warn!("❌ Block validation failed: {e}");
-                        return Ok(());
-                    }
-                    
-                    // Process validated block
-                    log::info!("✅ Block validated successfully");
-                }
-            }
-            TOPIC_TRANSACTIONS => {
-                if let Ok(NetworkMessage::NewTransaction(tx)) = bincode::deserialize::<NetworkMessage>(&data) {
-                    log::info!("💸 Received new transaction: {}", hex::encode(tx.id));
-                    
-                    // Validate transaction before processing
-                    if let Err(e) = self.validate_transaction(&tx).await {
-                        log::warn!("❌ Transaction validation failed: {e}");
-                        return Ok(());
-                    }
-                    
-                    // Process validated transaction
-                    log::info!("✅ Transaction validated successfully");
-                }
-            }
-            TOPIC_PEER_INFO => {
-                if let Ok(NetworkMessage::PeerInfo { chain_height, peer_id, dilithium_pk, kyber_pk, timestamp, nonce, signature }) = bincode::deserialize::<NetworkMessage>(&data) {
-                    log::debug!("👥 Peer info: {peer_id} at height {chain_height}");
-                    
-                    // Validate peer info message
-                    if let Err(e) = self.validate_peer_info(&peer_id, &dilithium_pk, &kyber_pk, timestamp, nonce, &signature, &data).await {
-                        log::warn!("❌ Peer info validation failed: {e}");
-                        return Ok(());
-                    }
-                    
-                    // Update peer information
-                    log::info!("✅ Peer info validated successfully");
-                }
-            }
-            TOPIC_HEADERS_REQUEST => {
-                if let Ok(NetworkMessage::HeadersRequest { start_hash, count }) = bincode::deserialize::<NetworkMessage>(&data) {
-                    log::info!("📜 Received headers request from peer, starting from hash: {:?}, count: {}", hex::encode(&start_hash), count);
-                    let blockchain = self.blockchain.clone();
-                    let start_hash = start_hash.clone();
-                    let headers = tokio::task::spawn_blocking(move || {
-                        blockchain.read().get_block_headers(start_hash, count)
-                    }).await.unwrap_or_default();
-                    let response = NetworkMessage::HeadersResponse { headers };
-                    if let Ok(response_data) = bincode::serialize(&response) {
-                        self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_HEADERS_RESPONSE), response_data);
-                    }
-                }
-            }
-            TOPIC_HEADERS_RESPONSE => {
-                if let Ok(NetworkMessage::HeadersResponse { headers }) = bincode::deserialize::<NetworkMessage>(&data) {
-                    log::info!("📬 Received {} headers from peer", headers.len());
-                    for header in headers {
-                        let block_hash = header.calculate_hash().unwrap_or_default();
-                        let blockchain = self.blockchain.clone();
-
-                        let has_block = tokio::task::spawn_blocking(move || {
-                            blockchain.read().get_block_by_hash(&block_hash).is_none()
-                        }).await.unwrap_or(true);
-                        if has_block {
-                            log::info!("Requesting missing block: {}", hex::encode(block_hash));
-                            let request = NetworkMessage::BlockRequest(block_hash.to_vec());
-                            if let Ok(data) = bincode::serialize(&request) {
-                                self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCK_REQUEST), data);
+            futures::select! {
+                swarm_event = self.swarm.select_next_some() => {
+                    match swarm_event {
+                        SwarmEvent::Behaviour(NetEvent::Mdns(ev)) => match ev {
+                            MdnsEvent::Discovered(list) => {
+                                for (p, _addr) in list { 
+                                    self.peer_set.write().insert(p);
+                                    self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&p);
+                                }
                             }
+                            MdnsEvent::Expired(list) => {
+                                for (p, _addr) in list { 
+                                    self.peer_set.write().remove(&p);
+                                    self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&p);
+                                }
+                            }
+                        },
+                        SwarmEvent::Behaviour(NetEvent::Gossipsub(ev)) => match ev {
+                            GossipsubEvent::Message { 
+                                propagation_source: _,
+                                message_id: _,
+                                message,
+                            } => {
+                                if message.topic == self.topic_blocks.hash() {
+                                    if let Ok(b) = bincode::deserialize::<Block>(&message.data) {
+                                        let _ = self._in_tx.unbounded_send(InEvent::Block(b));
+                                    }
+                                } else if message.topic == self.topic_txs.hash() {
+                                    if let Ok(tx) = bincode::deserialize::<Transaction>(&message.data) {
+                                        let _ = self._in_tx.unbounded_send(InEvent::Tx(tx));
+                                    }
+                                }
+                            }
+                            GossipsubEvent::Subscribed { peer_id, topic: _ } => {
+                                self.peer_set.write().insert(peer_id);
+                            }
+                            GossipsubEvent::Unsubscribed { peer_id, topic: _ } => {
+                                self.peer_set.write().remove(&peer_id);
+                            }
+                            _ => {}
+                        },
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            self.peer_set.write().insert(peer_id);
+                        }
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            self.peer_set.write().remove(&peer_id);
+                        }
+                        _ => {}
+                    }
+                },
+                out = self.out_rx.next() => {
+                    match out {
+                        Some(out_event) => {
+                            match out_event {
+                                OutEvent::BroadcastBlock(b) => {
+                                    if let Ok(bytes) = bincode::serialize(&b) {
+                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                            self.topic_blocks.clone(),
+                                            bytes,
+                                        );
+                                    }
+                                }
+                                OutEvent::BroadcastTx(t) => {
+                                    if let Ok(bytes) = bincode::serialize(&t) {
+                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                            self.topic_txs.clone(),
+                                            bytes,
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        None => {
+                            // Channel closed, exit
+                            break;
                         }
                     }
                 }
             }
-            TOPIC_BLOCK_REQUEST => {
-                if let Ok(NetworkMessage::BlockRequest(block_hash_vec)) = bincode::deserialize::<NetworkMessage>(&data) {
-                    let mut block_hash = [0u8; 32];
-                    block_hash.copy_from_slice(&block_hash_vec);
-                    log::info!("📦 Received block request for hash: {}", hex::encode(block_hash));
-                    let blockchain = self.blockchain.clone();
-
-                    let block = tokio::task::spawn_blocking(move || {
-                        blockchain.read().get_block_by_hash(&block_hash)
-                    }).await.unwrap_or(None);
-                    if let Some(block) = block {
-                        let message = NetworkMessage::NewBlock(block);
-                        if let Ok(data) = bincode::serialize(&message) {
-                            self.swarm.behaviour_mut().floodsub.publish(Topic::new(TOPIC_BLOCKS), data);
-                        }
-                    }
-                }
-            }
-            
-            _ => {
-                log::debug!("📨 Unknown message topic: {topic_str}");
-            }
-        }
-        Ok(())
-    }
-
-    /// Validate incoming block
-    async fn validate_block(&self, block: &Block) -> Result<()> {
-        // Verify block signature
-        if !block.verify_signature()? {
-            return Err(BlockchainError::NetworkError("Invalid block signature".to_string()));
-        }
-
-        // Verify Merkle root
-        if !block.verify_merkle_root() {
-            return Err(BlockchainError::NetworkError("Invalid Merkle root".to_string()));
-        }
-
-        // Verify block timestamp is reasonable
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
-            .as_secs();
-
-        let block_timestamp = block.header.timestamp.timestamp() as u64;
-        if block_timestamp > current_time + MAX_TIMESTAMP_SKEW {
-            return Err(BlockchainError::NetworkError("Block timestamp too far in future".to_string()));
-        }
-
-        Ok(())
-    }
-
-    /// Validate incoming transaction
-    async fn validate_transaction(&self, transaction: &Transaction) -> Result<()> {
-        // Verify transaction signature
-        if !transaction.verify_signature()? {
-            return Err(BlockchainError::NetworkError("Invalid transaction signature".to_string()));
-        }
-
-        // Verify transaction hash
-        if transaction.calculate_hash() != transaction.id {
-            return Err(BlockchainError::NetworkError("Invalid transaction hash".to_string()));
-        }
-
-        
-        // Verify transaction timestamp is reasonable
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
-            .as_secs();
-
-        let tx_timestamp = transaction.timestamp.timestamp() as u64;
-        if tx_timestamp > current_time + MAX_TIMESTAMP_SKEW {
-            return Err(BlockchainError::NetworkError("Transaction timestamp too far in future".to_string()));
-        }
-
-        Ok(())
-    }
-
-    /// Validate peer info message
-    async fn validate_peer_info(&self, peer_id_str: &str, dilithium_pk: &[u8], kyber_pk: &[u8], timestamp: u64, nonce: u64, signature: &[u8], message_data: &[u8]) -> Result<()> {
-        // Parse peer ID
-        let peer_id = PeerId::from_str(peer_id_str)
-            .map_err(|e| BlockchainError::NetworkError(format!("Invalid peer ID: {e}")))?;
-
-        // Get peer info
-        let peers = self.peers.clone();
-
-        let peer_info = tokio::task::spawn_blocking(move || {
-            let mut peers = peers.write();
-            peers.get_mut(&peer_id).cloned()
-        }).await.unwrap_or(None);
-        if let Some(existing_peer_info) = peer_info {
-            // Verify signature with stored public key
-            let mut data_to_verify = Vec::new();
-            data_to_verify.extend_from_slice(&timestamp.to_le_bytes());
-            data_to_verify.extend_from_slice(&nonce.to_le_bytes());
-            data_to_verify.extend_from_slice(message_data);
-
-            if !Dilithium3Keypair::verify(&data_to_verify, &crate::crypto::Dilithium3Signature { signature: signature.to_vec(), public_key: existing_peer_info.dilithium_pk.clone(), created_at: chrono::Utc::now().timestamp() as u64, message_hash: crate::crypto::blake3_hash(&data_to_verify) }, &existing_peer_info.dilithium_pk)? {
-                return Err(BlockchainError::NetworkError("Invalid message signature".to_string()));
-            }
-
-            self.peer_db.update_peer_nonce(&peer_id, nonce).await?;
-        } else {
-            // New peer - add to DB and local map
-            // Store in DB with provided keys
-            self.peer_db.add_peer(peer_id.clone(), dilithium_pk.to_vec(), kyber_pk.to_vec()).await;
-            // Also register in local peers map
-            let peers_map = self.peers.clone();
-            let peer_id_clone = peer_id.clone();
-            let last_nonce = nonce;
-            let dilithium_pk_vec = dilithium_pk.to_vec();
-            let kyber_pk_vec = kyber_pk.to_vec();
-            tokio::task::spawn_blocking(move || {
-                let mut map = peers_map.write();
-                map.insert(peer_id_clone, PeerInfo { dilithium_pk: dilithium_pk_vec, kyber_pk: kyber_pk_vec, last_nonce });
-            }).await.ok();
-        }
-
-        Ok(())
-    }
-
-    /// Generate authenticated message with replay protection
-    pub fn create_authenticated_message(&self, _message_type: &str, data: &[u8]) -> Result<(u64, u64, Vec<u8>)> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| BlockchainError::NetworkError(format!("Time error: {e}")))?
-            .as_secs();
-
-        // Generate random nonce (in production, use proper RNG)
-        let nonce = timestamp ^ (data.len() as u64);
-
-        // Create data to sign
-        let mut data_to_sign = Vec::new();
-        data_to_sign.extend_from_slice(&timestamp.to_le_bytes());
-        data_to_sign.extend_from_slice(&nonce.to_le_bytes());
-        data_to_sign.extend_from_slice(data);
-
-        // Sign with our private key
-        let signature = self.local_dilithium_kp.sign(&data_to_sign)?;
-
-        Ok((timestamp, nonce, signature.signature))
-    }
-
-    /// Handle peer connection
-    async fn on_peer_connected(&mut self, peer_id: PeerId) {
-        log::info!("🔗 Peer connected: {peer_id}");
-        
-        let chain_height = self.chain_height.clone();
-        let local_chain_height = tokio::task::spawn_blocking(move || *chain_height.read()).await.unwrap_or(0);
-
-        // Send our peer info to the newly connected peer
-        let (timestamp, nonce, signature) = self.create_authenticated_message("peer_info", &[]).unwrap();
-        let peer_info_message = NetworkMessage::PeerInfo {
-            chain_height: local_chain_height,
-            peer_id: self.local_peer_id.to_string(),
-            dilithium_pk: self.local_dilithium_kp.public_key_bytes().to_vec(),
-            kyber_pk: self.kyber_kp.public.clone(),
-            timestamp,
-            nonce,
-            signature,
-        };
-        
-        if let Ok(data) = bincode::serialize(&peer_info_message) {
-            self.swarm
-                .behaviour_mut()
-                .floodsub
-                .publish(Topic::new(TOPIC_PEER_INFO), data);
-        }
-
-        // Request headers from the peer to check for sync
-        let headers_request = NetworkMessage::HeadersRequest {
-            start_hash: Vec::new(), // Start from genesis for now
-            count: 100, // Request a batch of headers
-        };
-        if let Ok(data) = bincode::serialize(&headers_request) {
-             self.swarm
-                .behaviour_mut()
-                .floodsub
-                .publish(Topic::new(TOPIC_HEADERS_REQUEST), data);
         }
     }
-
-    /// Handle peer disconnection
-    async fn on_peer_disconnected(&self, peer_id: PeerId) {
-        log::info!("🔌 Peer disconnected: {peer_id}");
-        
-    }
-
-    /// Update peer reputation
-    pub async fn update_peer_reputation(&self, _peer_id: PeerId, _delta: i32) {
-        let peers = self.peers.clone();
-        let peer_id = _peer_id;
-        tokio::task::spawn_blocking(move || {
-            let mut peers = peers.write();
-            if let Some(_peer) = peers.get_mut(&peer_id) {
-                // Reputation logic is removed for now
-            }
-        }).await.ok();
-    }
-
-    /// Check if a peer is banned
-    pub async fn is_peer_banned(&self, peer_id: &PeerId) -> bool {
-        let banned_peers = self.banned_peers.clone();
-        let peer_id = *peer_id;
-        tokio::task::spawn_blocking(move || banned_peers.read().contains(&peer_id)).await.unwrap_or(false)
-    }
-    
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use parking_lot::RwLock;
-    use crate::config::ConsensusConfig;
-
-    fn create_test_blockchain() -> Arc<RwLock<NumiBlockchain>> {
-        let blockchain = NumiBlockchain::new_with_config(Some(ConsensusConfig::default()), None).unwrap();
-        Arc::new(RwLock::new(blockchain))
-    }
-    
-    #[tokio::test]
-    async fn test_network_manager_key_registry_integration() {
-        // Test that NetworkManager properly integrates with PeerKeyRegistry
-        let blockchain = create_test_blockchain();
-        let network_manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
-        let handle = network_manager.create_handle();
-        
-        // Verify key registry is accessible through handle
-        let verified_peers = handle.get_verified_peers().await;
-        assert_eq!(verified_peers.len(), 0); // Should be empty initially
-    }
-
-    #[tokio::test]
-    async fn test_network_manager_sync_flags() {
-        let blockchain = create_test_blockchain();
-        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
-        // Initially not syncing
-        assert!(!manager.is_syncing().await);
-        // Set syncing
-        manager.set_syncing(true).await;
-        assert!(manager.is_syncing().await);
-        // Unset syncing
-        manager.set_syncing(false).await;
-        assert!(!manager.is_syncing().await);
-    }
-
-    #[tokio::test]
-    async fn test_network_manager_chain_height() {
-        let blockchain = create_test_blockchain();
-        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
-        // Initial height is 0
-        assert_eq!(manager.get_chain_height().await, 0);
-        // Update chain height
-        manager.set_chain_height(42).await;
-        assert_eq!(manager.get_chain_height().await, 42);
-    }
-
-    #[tokio::test]
-    async fn test_network_manager_handle_sync_and_height() {
-        let blockchain = create_test_blockchain();
-        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
-        let handle = manager.create_handle();
-        // Initially not syncing and height 0
-        assert!(!handle.is_syncing().await);
-        assert_eq!(handle.get_chain_height().await, 0);
-        // Manager updates
-        manager.set_syncing(true).await;
-        manager.set_chain_height(7).await;
-        // Handle reflects updates
-        assert!(handle.is_syncing().await);
-        assert_eq!(handle.get_chain_height().await, 7);
-    }
-
-    #[tokio::test]
-    async fn test_network_manager_broadcast_messages() {
-        use crate::transaction::TransactionType;
-        
-        let blockchain = create_test_blockchain();
-        let manager = NetworkManager::new(blockchain).expect("Failed to create NetworkManager");
-        let handle = manager.create_handle();
-        // Test broadcast_block via handle
-        let block = Block::new(0, [0u8; 32], vec![], 1, vec![]);
-        assert!(handle.broadcast_block(block).await.is_ok());
-        // Test broadcast_transaction via handle
-        let tx = Transaction::new(Vec::new(), TransactionType::Transfer { to: Vec::new(), amount: 0, memo: None }, 0);
-        assert!(handle.broadcast_transaction(tx).await.is_ok());
-    }
-} 

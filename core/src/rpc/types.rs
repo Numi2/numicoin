@@ -187,22 +187,7 @@ pub struct TransactionResponse {
     pub validation_result: String,
 }
 
-/// Mining request with optional parameters
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MiningRequest {
-    pub threads: Option<usize>,
-    pub timeout_seconds: Option<u64>,
-}
 
-/// Mining response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MiningResponse {
-    pub message: String,
-    pub block_height: u64,
-    pub block_hash: String,
-    pub mining_time_ms: u64,
-    pub hash_rate: u64,
-}
 
 /// Login request
 #[derive(Debug, Serialize, Deserialize)]

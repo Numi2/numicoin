@@ -1,17 +1,19 @@
 pub mod block;
-pub mod transaction;
-pub mod crypto;
 pub mod blockchain;
+pub mod config;
+pub mod crypto;
+pub mod error;
+pub mod mempool;
 pub mod miner;
+pub mod local_miner;
 pub mod mining_service;
 pub mod network;
-pub mod storage;
-pub mod error;
 pub mod rpc;
-pub mod mempool;
 pub mod secure_storage;
-pub mod config;
-pub mod peer_db;
+pub mod storage;
+pub mod stratum_server;
+pub mod transaction;
+pub mod sync_lock;
 
 pub use block::{Block, BlockHeader};
 pub use transaction::{Transaction, TransactionType};
@@ -23,6 +25,8 @@ pub use mempool::TransactionMempool;
 pub use secure_storage::SecureKeyStore;
 pub use config::{Config, NetworkConfig, MiningConfig, RpcConfig, SecurityConfig};
 pub use mining_service::MiningService;
-pub use peer_db::PeerDB;
+
+// Re-export the Tokio-backed RwLock so downstream crates can `use numi_core::RwLock`.
+pub use sync_lock::RwLock;
 
 pub type Result<T> = std::result::Result<T, BlockchainError>; 

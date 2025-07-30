@@ -1,10 +1,9 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use warp::Rejection;
 
 use crate::rpc::RpcServer;
-use crate::transaction::{Transaction, TransactionType, TransactionFee, MIN_TRANSACTION_FEE};
+use crate::transaction::{Transaction, TransactionType};
 use super::types::*;
 use super::auth::AuthManager;
 use super::error::RpcError;
@@ -113,10 +112,9 @@ pub async fn handle_block(
         Some(block) => {
             // Calculate transaction summaries without holding lock
             let transaction_summaries: Vec<TransactionSummary> = block.transactions.iter().map(|tx| {
-                let (tx_type, amount) = match &tx.transaction_type {
+                let (tx_type, amount) = match &tx.kind {
                     TransactionType::Transfer { amount, .. } => ("transfer".to_string(), *amount),
                     TransactionType::MiningReward { amount, .. } => ("mining_reward".to_string(), *amount),
-                    TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => ("contract".to_string(), 0),
                 };
                 
                 TransactionSummary {
@@ -183,19 +181,10 @@ pub async fn handle_transaction(
     };
 
     // Determine fee: use provided fee or calculate minimum
-    let fee = if let Some(custom_fee) = tx_request.fee {
-        custom_fee
-    } else {
-        // Calculate minimum fee for transaction size (estimate ~500 bytes for typical transfer)
-        let estimated_size = 500;
-        match TransactionFee::minimum_for_size(estimated_size) {
-            Ok(fee_info) => fee_info.total,
-            Err(_) => MIN_TRANSACTION_FEE,
-        }
-    };
+    let fee = tx_request.fee.unwrap_or(100); // Default fee of 1 NUMI
 
     // Create transaction with proper fee
-    let mut transaction = Transaction::new_with_fee(
+    let mut transaction = Transaction::new(
         from_pubkey.clone(),
         TransactionType::Transfer {
             to: to_pubkey,
@@ -203,9 +192,8 @@ pub async fn handle_transaction(
             memo: None,
         },
         tx_request.nonce,
-        fee,
-        0, // No gas limit for simple transfers
     );
+    transaction.fee = fee; // Set the fee after creation
 
     // Set signature and recalculate transaction ID
     // In the new (v2) API the client sends *only* the detached Dilithium3 signature
@@ -254,7 +242,7 @@ pub async fn handle_transaction(
     transaction.signature = Some(sig_struct);
     // Recalculate transaction ID now that the signature is populated so that the
     // txid commits to the signature as well.
-    transaction.id = transaction.calculate_hash();
+    transaction.id = transaction.hash();
 
     let tx_id = hex::encode(transaction.id);
     let mempool_handle = {
@@ -272,11 +260,9 @@ pub async fn handle_transaction(
         }
     };
 
-    // Broadcast transaction to network if valid (only after mempool accepts it)
-    if let crate::mempool::ValidationResult::Valid = mempool_result {
-        if let Some(ref network) = rpc_server.network_manager {
-            let _ = network.broadcast_transaction(transaction).await;
-        }
+    // Optional: broadcast transaction to network peers
+    if let Some(ref network) = rpc_server.network_manager {
+        let _ = network.broadcast_tx(transaction);
     }
 
     let response = TransactionResponse {
@@ -289,126 +275,15 @@ pub async fn handle_transaction(
     Ok(warp::reply::json(&ApiResponse::success(response)))
 }
 
-/// Mining endpoint handler - fixed with proper async calls and thread-safe patterns
+/// Mining endpoint handler - now directs users to Stratum V2
 pub async fn handle_mine(
-    mining_request: MiningRequest,
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
-    // Check if admin endpoints are enabled
-    if !rpc_server.rpc_config.admin_endpoints_enabled {
-        rpc_server.increment_stat("failed_requests").await;
-        return Ok(warp::reply::json(&ApiResponse::<()>::error(
-            "Admin endpoints are disabled".to_string()
-        )));
-    }
-    let start_time = Instant::now();
-    
-    // Get current blockchain state for mining using proper async pattern
-    let (current_height, previous_hash, difficulty, pending_transactions) = {
-        let blockchain_clone = Arc::clone(&rpc_server.blockchain);
-        tokio::task::spawn_blocking(move || {
-            let blockchain = blockchain_clone.read();
-            let current_height = blockchain.get_current_height();
-            let previous_hash = blockchain.get_latest_block_hash();
-            let difficulty = blockchain.get_current_difficulty();
-            let pending_transactions = blockchain.get_transactions_for_block(1_000_000, 1000); // 1MB, 1000 txs max
-            (current_height, previous_hash, difficulty, pending_transactions)
-        }).await.unwrap_or((0, [0; 32], 1, Vec::new()))
-    };
-    
-    // Configure mining based on request
-    let _thread_count = mining_request.threads.unwrap_or_else(num_cpus::get);
-    let timeout_ms = mining_request.timeout_seconds.unwrap_or(60) * 1000;
-    
-    // Mine block using proper async pattern with timeout
-    let mining_result = {
-        let miner_clone = Arc::clone(&rpc_server.miner);
-        
-        // Create a timeout for mining operation
-        let mining_future = tokio::task::spawn_blocking(move || {
-            let mut miner = miner_clone.write();
-            miner.mine_block(
-                current_height + 1,
-                previous_hash,
-                pending_transactions,
-                difficulty,
-                0, // start_nonce
-            )
-        });
-        
-        // Apply timeout to mining operation
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            mining_future
-        ).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(crate::BlockchainError::MiningError("Mining task failed".to_string())),
-            Err(_) => Err(crate::BlockchainError::MiningError("Mining timeout".to_string())),
-        }
-    };
-    
-    match mining_result {
-        Ok(Some(mining_result)) => {
-            let mining_time = start_time.elapsed();
-            
-            // Add the mined block to the blockchain
-            let block_added = {
-                let blockchain_arc = Arc::clone(&rpc_server.blockchain);
-                let block_to_add = mining_result.block.clone();
-
-                // Offload potentially heavy validation onto a blocking thread; avoids
-                // `!Send` issues with parking_lot guards inside an async future.
-                tokio::task::spawn_blocking(move || {
-                    let blockchain_ref = blockchain_arc.read();
-                    futures::executor::block_on(async move {
-                        match blockchain_ref.add_block(block_to_add).await {
-                            Ok(res) => res,
-                            Err(e) => {
-                                log::error!("Failed to add mined block: {e}");
-                                false
-                            }
-                        }
-                    })
-                })
-                .await
-                .unwrap_or(false)
-            };
-            
-            // Broadcast block to network if successfully added
-            if block_added {
-                if let Some(ref network) = rpc_server.network_manager {
-                    let _ = network.broadcast_block(mining_result.block.clone()).await;
-                }
-            }
-            
-            let response = MiningResponse {
-                message: if block_added { 
-                    "Block mined and added to blockchain".to_string() 
-                } else { 
-                    "Block mined but failed to add to blockchain".to_string() 
-                },
-                block_height: mining_result.block.header.height,
-                block_hash: hex::encode(mining_result.block.calculate_hash().unwrap_or([0u8; 32])),
-                mining_time_ms: mining_time.as_millis() as u64,
-                hash_rate: mining_result.hash_rate,
-            };
-
-            rpc_server.increment_stat("successful_requests").await;
-            Ok(warp::reply::json(&ApiResponse::success(response)))
-        }
-        Ok(None) => {
-            rpc_server.increment_stat("failed_requests").await;
-            Ok(warp::reply::json(&ApiResponse::<()>::error(
-                "Mining timed out or was stopped".to_string()
-            )))
-        }
-        Err(e) => {
-            rpc_server.increment_stat("failed_requests").await;
-            Ok(warp::reply::json(&ApiResponse::<()>::error(
-                format!("Mining failed: {e}")
-            )))
-        }
-    }
+    // CPU mining is no longer supported - use external Stratum V2 miners
+    rpc_server.increment_stat("failed_requests").await;
+    Ok(warp::reply::json(&ApiResponse::<()>::error(
+        "CPU mining no longer supported. Use external Stratum V2 miners to connect to this node. Stratum server running on port 3333.".to_string()
+    )))
 }
 
 /// Statistics endpoint handler (admin only)

@@ -69,6 +69,12 @@ impl From<MiningServiceError> for BlockchainError {
     }
 }
 
+impl From<BlockchainError> for MiningServiceError {
+    fn from(e: BlockchainError) -> Self {
+        MiningServiceError::MiningError(e.to_string())
+    }
+}
+
 // The `thiserror::Error` derive automatically implements `std::error::Error` and
 // `fmt::Display`, so the manual implementations are no longer necessary.
 

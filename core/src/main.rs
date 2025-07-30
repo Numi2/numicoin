@@ -2,27 +2,27 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
-use parking_lot::RwLock;
+use numi_core::RwLock;
+use futures::channel::mpsc;
+use crossbeam::channel::bounded;
 
 use numi_core::{
     config::Config,
     blockchain::NumiBlockchain,
     storage::BlockchainStorage,
-    rpc::{RpcServer, RateLimitConfig, AuthConfig},
-    crypto::Dilithium3Keypair,
-    transaction::{Transaction, TransactionType},
+    rpc::{RpcServer, RateLimitConfig, AuthConfig, client::{show_status, show_balance, send_transaction}},
+    crypto::{Dilithium3Keypair, derive_address_from_public_key},
     network::NetworkManager,
     mining_service::MiningService,
     miner::Miner,
+    local_miner::LocalMiner,
     Result,
     BlockchainError,
 };
-use chrono::Utc;
-use reqwest::Client;
-use numi_core::rpc::types::{ApiResponse, BalanceResponse, StatusResponse, TransactionRequest, TransactionResponse, MiningRequest, MiningResponse};
+use numi_core::stratum_server::StratumV2Server;
 
 #[derive(Parser)]
-#[command(name = "numi", about = "NumiCoin - Production blockchain node", version)]
+#[command(name = "numi", about = "NumiCoin", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -39,61 +39,156 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the blockchain node
-    Start {
-        #[arg(long)]
+    /// Start the blockchain node with optional Stratum V2 mining server
+    Node {
+        #[arg(long, help = "Enable Stratum V2 mining server")]
+        mining: bool,
+        #[arg(long, help = "Enable local CPU mining as fallback")]
         mine: bool,
-        
-        #[arg(long, default_value = "4")]
-        threads: usize,
+        #[arg(long, help = "Number of CPU threads for local mining")]
+        threads: Option<usize>,
     },
     
-    /// Show node status
+    /// Show blockchain and node status  
     Status,
     
-    /// Get account balance
-    Balance {
-        address: String,
+    /// Wallet operations
+    Wallet {
+        #[command(subcommand)]
+        wallet_cmd: WalletCommands,
     },
     
-    /// Send transaction
+    /// Send a transaction
     Send {
-        #[arg(long)]
+        #[arg(long, help = "Path to wallet file")]
         wallet: PathBuf,
+        #[arg(help = "Recipient address")]
         to: String,
+        #[arg(help = "Amount to send (NUMI)")]
         amount: f64,
-        #[arg(long)]
+        #[arg(long, help = "Optional memo")]
         memo: Option<String>,
     },
     
-    /// Create new wallet
-    Wallet {
-        #[arg(long, default_value = "wallet.json")]
-        output: PathBuf,
-    },
-    
-    /// Mine blocks
-    Mine {
-        #[arg(long)]
-        wallet: PathBuf,
-    },
-    
-    /// Debug commands for blockchain analysis
-    Debug {
-        #[command(subcommand)]
-        debug_cmd: DebugCommands,
-    },
+    /// Show mining information (Stratum V2)
+    Mining,
 }
 
 #[derive(Subcommand)]
-enum DebugCommands {
-    /// Recalculate and display total supply from blockchain
-    RecalculateSupply,
+enum WalletCommands {
+    /// Create a new wallet
+    Create {
+        #[arg(long, default_value = "wallet.json", help = "Output file path")]
+        output: PathBuf,
+    },
+    
+    /// Check wallet balance
+    Balance {
+        #[arg(help = "Wallet address or file path")]
+        address: String,
+    },
 }
 
-// Helper to build RPC base URL
-fn rpc_base_url(config: &Config) -> String {
-    format!("http://{}:{}", config.rpc.bind_address, config.rpc.port)
+// CLI subcommand handlers
+async fn handle_node(mining: bool, mine: bool, threads: Option<usize>, mut config: Config) -> Result<()> {
+    config.mining.enabled = mining;
+    config.mining.local_mining_enabled = mine;
+    if let Some(t) = threads {
+        config.mining.cpu_threads = t;
+    }
+    
+    if mining {
+        println!("🚀 Starting NumiCoin node with Stratum V2 mining server");
+        println!("   Miners can connect to: {}:{}", 
+            config.mining.stratum_bind_address, 
+            config.mining.stratum_bind_port
+        );
+    } else {
+        println!("🚀 Starting NumiCoin node (mining server disabled)");
+    }
+    
+    if mine {
+        println!("🖥️  Local CPU mining enabled ({} threads)", config.mining.cpu_threads);
+    }
+    
+    start_node(config).await
+}
+
+async fn handle_status(config: Config) -> Result<()> {
+    show_status(config).await
+}
+
+async fn handle_wallet_create(output: PathBuf) -> Result<()> {
+    println!("🔑 Creating new wallet...");
+    let keypair = Dilithium3Keypair::new()?;
+    
+    // Ensure parent directory exists
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    
+    keypair.save_to_file(&output)?;
+    let address = derive_address_from_public_key(&keypair.public_key_bytes())?;
+    
+    println!("✅ Wallet created successfully!");
+    println!("   File: {}", output.display());
+    println!("   Address: {}", address);
+    println!();
+    println!("⚠️  IMPORTANT: Keep this wallet file secure!");
+    println!("   Loss of this file means loss of funds.");
+    
+    Ok(())
+}
+
+async fn handle_wallet_balance(address_or_file: String, config: Config) -> Result<()> {
+    // Check if it's a file path or an address
+    if std::path::Path::new(&address_or_file).exists() {
+        // It's a wallet file - load it and get the address
+        let keypair = Dilithium3Keypair::load_from_file(&address_or_file)?;
+        let address = derive_address_from_public_key(&keypair.public_key_bytes())?;
+        show_balance_for_address(address, config).await
+    } else {
+        // It's an address directly
+        show_balance_for_address(address_or_file, config).await
+    }
+}
+
+async fn show_balance_for_address(address: String, config: Config) -> Result<()> {
+    show_balance(config, address).await
+}
+
+async fn handle_send(wallet: PathBuf, to: String, amount: f64, memo: Option<String>, config: Config) -> Result<()> {
+    send_transaction(config, wallet, to, amount, memo).await
+}
+
+async fn handle_mining_info(config: Config) -> Result<()> {
+
+    println!("Numicoin uses Stratum V2 protocol for mining.");
+  
+    println!("🔗 Connection Details:");
+    println!("   Server: {}:{}", 
+        config.mining.stratum_bind_address, 
+        config.mining.stratum_bind_port
+    );
+    println!("   Protocol: Stratum V2 with Noise XX encryption");
+    println!("   Features: BLAKE3 validation, Dilithium3 signatures");
+    println!();
+    println!("📖 How to Connect:");
+    println!("   1. Use any Stratum V2 compatible miner");
+    println!("   2. Point it to the server address above");
+    println!("   3. Mining server will distribute work automatically");
+    println!("   4. Rewards go to the node operator's wallet");
+    println!();
+    if !config.mining.enabled {
+        println!("⚠️  Mining server is currently DISABLED");
+        println!("   Start the node with --mining to enable it:");
+        println!("   numi-core node --mining");
+    } else {
+        println!("✅ Mining server is ENABLED and ready for connections");
+    }
+    println!();
+    
+    Ok(())
 }
 
 #[tokio::main]
@@ -116,33 +211,16 @@ async fn main() -> Result<()> {
     }
     
     match cli.command {
-        Commands::Start { mine, threads } => {
-            config.mining.enabled = mine;
-            config.mining.thread_count = threads;
-            start_node(config).await?;
-        }
-        Commands::Status => {
-            show_status(config).await?;
-        }
-        Commands::Balance { address } => {
-            show_balance(config, address).await?;
-        }
-        Commands::Send { wallet, to, amount, memo } => {
-            send_transaction(config, wallet, to, amount, memo).await?;
-        }
-        Commands::Wallet { output } => {
-            create_wallet(output).await?;
-        }
-        Commands::Mine { wallet } => {
-            mine_blocks(config, wallet).await?;
-        }
-        Commands::Debug { debug_cmd } => {
-            match debug_cmd {
-                DebugCommands::RecalculateSupply => {
-                    debug_recalculate_supply(config).await?;
-                }
+        Commands::Node { mining, mine, threads } => handle_node(mining, mine, threads, config).await?,
+        Commands::Status => handle_status(config).await?,
+        Commands::Wallet { wallet_cmd } => {
+            match wallet_cmd {
+                WalletCommands::Create { output } => handle_wallet_create(output).await?,
+                WalletCommands::Balance { address } => handle_wallet_balance(address, config).await?,
             }
-        }
+        },
+        Commands::Send { wallet, to, amount, memo } => handle_send(wallet, to, amount, memo, config).await?,
+        Commands::Mining => handle_mining_info(config).await?,
     }
     
     Ok(())
@@ -171,27 +249,33 @@ async fn start_node(config: Config) -> Result<()> {
     ));
     
     // Initialize network manager
-    let mut network_manager = NetworkManager::new(blockchain.clone())?;
-    let network_handle = network_manager.create_handle();
+    let (in_tx, _in_rx) = mpsc::unbounded();
+    let (network_manager, network_handle) = NetworkManager::new(&config.network, in_tx)?;
 
-    // Build the libp2p multi-address "/ip4/<listen_address>/tcp/<port>"
-    let listen_multiaddr = format!("/ip4/{}/tcp/{}", 
-        config.network.listen_address,
-        config.network.listen_port);
-
-    // Spawn the network manager in the background (listening + event loop)
+    // Spawn the network manager in the background (event processing)
     tokio::spawn(async move {
-        if let Err(e) = async {
-            network_manager.start(&listen_multiaddr).await?;
-            network_manager.run_event_loop().await;
-            Ok::<(), BlockchainError>(())
-        }.await {
-            log::error!("Network manager error: {e}");
-        }
+        network_manager.run().await;
     });
     
     // Initialize miner
     let miner = Arc::new(RwLock::new(Miner::new()?));
+    
+    // Create channel for Stratum connection tracking
+    let (stratum_signal_tx, stratum_signal_rx) = bounded::<bool>(1);
+    
+    // Start LocalMiner if enabled
+    let local_miner = if config.mining.local_mining_enabled {
+        log::info!("🖥️  Starting local CPU miner with {} threads", config.mining.cpu_threads);
+        Some(LocalMiner::spawn(
+            blockchain.clone(),
+            miner.clone(),
+            config.mining.cpu_threads,
+            config.consensus.clone(),
+            stratum_signal_rx,
+        ))
+    } else {
+        None
+    };
     
     // Create rate limit config from RPC config
     let rate_limit_config = RateLimitConfig {
@@ -227,22 +311,28 @@ async fn start_node(config: Config) -> Result<()> {
         }
     });
     
-    // Start mining service if enabled – reuse the already-initialized miner
+    // Start Stratum server if mining is enabled – offload PoW via Stratum
     if config.mining.enabled {
-        let mining_service = MiningService::new(
-            blockchain.clone(),
-            storage.clone(),
-            network_handle,
-            miner.clone(),
-            config.mining.clone(),
-            config.consensus.target_block_time,
+        // Build the mining service and wrap in Arc for sharing
+        let mining_service = Arc::new(
+            MiningService::new(
+                blockchain.clone(),
+                network_handle.clone(),
+                miner.clone(),
+                config.mining.clone(),
+                config.consensus.clone(),
+            )
         );
-        
+        let bind = format!("{}:{}", config.mining.stratum_bind_address, config.mining.stratum_bind_port);
+        let bind_clone = bind.clone();
         tokio::spawn(async move {
-            mining_service.start_mining_loop().await;
+            log::info!("🚀 Starting Stratum mining server on {}", bind_clone);
+            let stratum_server = StratumV2Server::with_connection_tracking(mining_service, Some(stratum_signal_tx));
+            if let Err(e) = stratum_server.start().await {
+                log::error!("Stratum server error: {}", e);
+            }
         });
-        
-        log::info!("Mining enabled with {} threads", config.mining.thread_count);
+        log::info!("Stratum server launched on {}", bind);
     }
     
     log::info!("Node started successfully");
@@ -254,238 +344,20 @@ async fn start_node(config: Config) -> Result<()> {
     tokio::select! {
         _ = signal::ctrl_c() => {
             log::info!("Shutting down...");
-        }
-    }
-    
-    Ok(())
-}
-
-async fn show_status(config: Config) -> Result<()> {
-    let client = Client::new();
-    let url = format!("{}/status", rpc_base_url(&config));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| BlockchainError::NetworkError(e.to_string()))?
-        .json::<ApiResponse<StatusResponse>>()
-        .await
-        .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
-
-    if response.success {
-        let data = response.data.ok_or_else(|| BlockchainError::InvalidArgument("No data in response".to_string()))?;
-        println!("Chain Height: {}", data.total_blocks);
-        println!("Total Supply: {} NUMI", data.total_supply);
-        println!("Difficulty: {}", data.current_difficulty);
-        println!("Best Block Hash: {}", data.best_block_hash);
-        println!("Pending Transactions: {}", data.mempool_transactions);
-        println!("Mempool Size: {} bytes", data.mempool_size_bytes);
-        println!("Network Peers: {}", data.network_peers);
-        println!("Is Syncing: {}", data.is_syncing);
-    } else {
-        return Err(BlockchainError::NetworkError(response.error.unwrap_or_else(|| "Unknown error".into())));
-    }
-    Ok(())
-}
-
-async fn show_balance(config: Config, address: String) -> Result<()> {
-    let client = Client::new();
-    let url = format!("{}/balance/{}", rpc_base_url(&config), address);
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| BlockchainError::NetworkError(e.to_string()))?
-        .json::<ApiResponse<BalanceResponse>>()
-        .await
-        .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
-
-    if response.success {
-        let data = response.data.ok_or_else(|| BlockchainError::InvalidArgument("No data in response".to_string()))?;
-        println!("Address: {}", data.address);
-        println!("Balance: {} NUMI", data.balance);
-        println!("Nonce: {}", data.nonce);
-    } else {
-        return Err(BlockchainError::NetworkError(response.error.unwrap_or_else(|| "Unknown error".into())));
-    }
-    Ok(())
-}
-
-async fn send_transaction(config: Config, wallet_path: PathBuf, to: String, amount: f64, memo: Option<String>) -> Result<()> {
-    let client = Client::new();
-    let base_url = rpc_base_url(&config);
-
-    // Load sender wallet
-    let keypair = load_wallet(&wallet_path).await?;
-    let sender_pubkey = keypair.public_key.clone();
-    let from_address = hex::encode(&sender_pubkey);
-
-    // Fetch current nonce via RPC (fallback to 0 if unavailable)
-    let nonce = match client
-        .get(&format!("{}/balance/{}", base_url, from_address))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            match resp.json::<ApiResponse<BalanceResponse>>().await {
-                Ok(api_resp) if api_resp.success => api_resp.data.map(|d| d.nonce).unwrap_or(0),
-                _ => 0,
+            
+            // Shutdown local miner if running
+            if let Some(ref miner) = local_miner {
+                log::info!("🛑 Stopping local miner...");
+                miner.shutdown();
             }
         }
-        Err(_) => 0,
-    };
-
-    // Parse recipient address
-    let recipient_pubkey = hex::decode(&to)
-        .map_err(|_| BlockchainError::InvalidArgument("Invalid recipient address".to_string()))?;
-
-    let amount_raw = amount as u64;
-
-    // Create and sign transaction
-    let transaction_type = TransactionType::Transfer {
-        to: recipient_pubkey,
-        amount: amount_raw,
-        memo,
-    };
-
-    let mut transaction = Transaction::new(sender_pubkey.clone(), transaction_type, nonce);
-    transaction.sign(&keypair)?;
-
-    let signature_hex = match &transaction.signature {
-        Some(sig) => hex::encode(&sig.signature),
-        None => return Err(BlockchainError::InvalidSignature("Missing signature".to_string())),
-    };
-
-    let tx_request = TransactionRequest {
-        from: from_address,
-        to: to.clone(),
-        amount: amount_raw,
-        nonce,
-        fee: Some(transaction.fee),
-        signature: signature_hex,
-    };
-
-    let resp = client
-        .post(&format!("{}/transaction", base_url))
-        .json(&tx_request)
-        .send()
-        .await
-        .map_err(|e| BlockchainError::NetworkError(e.to_string()))?
-        .json::<ApiResponse<TransactionResponse>>()
-        .await
-        .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
-
-    if resp.success {
-        let data = resp.data.ok_or_else(|| BlockchainError::InvalidArgument("No data in response".to_string()))?;
-        println!("Transaction ID: {}", data.id);
-        println!("Validation Result: {}", data.validation_result);
-        println!("Status: {}", data.status);
-    } else {
-        return Err(BlockchainError::InvalidArgument(resp.error.unwrap_or_else(|| "Unknown error".into())));
-    }
-    Ok(())
-}
-
-async fn create_wallet(output: PathBuf) -> Result<()> {
-    let keypair = Dilithium3Keypair::new()?;
-    let public_key = keypair.public_key.clone();
-    let address = hex::encode(&public_key);
-    
-    let wallet_data = serde_json::json!({
-        "public_key": hex::encode(&public_key),
-        "private_key": hex::encode(&keypair.secret_key_bytes()),
-        "address": address,
-        "created_at": Utc::now().to_rfc3339()
-    });
-    
-    std::fs::write(&output, serde_json::to_string_pretty(&wallet_data)?)?;
-    
-    log::info!("Wallet created successfully");
-    println!("File: {}", output.display());
-    println!("Address: {}", address);
-    
-    Ok(())
-}
-
-async fn mine_blocks(config: Config, _wallet_path: PathBuf) -> Result<()> {
-    log::info!("Requesting remote mining via RPC...");
-
-    let client = Client::new();
-    let base_url = rpc_base_url(&config);
-
-    let mining_req = MiningRequest {
-        threads: Some(config.mining.thread_count),
-        timeout_seconds: Some(60),
-    };
-
-    let resp = client
-        .post(&format!("{}/mine", base_url))
-        .json(&mining_req)
-        .send()
-        .await
-        .map_err(|e| BlockchainError::NetworkError(e.to_string()))?
-        .json::<ApiResponse<MiningResponse>>()
-        .await
-        .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
-
-    if resp.success {
-        let data = resp.data.ok_or_else(|| BlockchainError::InvalidArgument("No data in response".to_string()))?;
-        println!("{}", data.message);
-        println!("Block Hash: {}", data.block_hash);
-        println!("Mining Time: {} ms", data.mining_time_ms);
-        println!("Hash Rate: {} H/s", data.hash_rate);
-    } else {
-        return Err(BlockchainError::InvalidArgument(resp.error.unwrap_or_else(|| "Mining failed".into())));
-    }
-    Ok(())
-}
-
-async fn load_wallet(path: &PathBuf) -> Result<Dilithium3Keypair> {
-    let data = std::fs::read_to_string(path)?;
-    let wallet: serde_json::Value = serde_json::from_str(&data)?;
-    
-    let private_key_hex = wallet["private_key"].as_str()
-        .ok_or_else(|| BlockchainError::InvalidArgument("Invalid wallet format".to_string()))?;
-    
-    let private_key = hex::decode(private_key_hex)
-        .map_err(|e| BlockchainError::InvalidArgument(format!("Invalid private key hex: {}", e)))?;
-    
-    Dilithium3Keypair::from_bytes(
-        wallet["public_key"].as_str()
-            .ok_or_else(|| BlockchainError::InvalidArgument("Missing public key".to_string()))?
-            .as_bytes()
-            .to_vec(),
-        private_key,
-    )
-}
-
-async fn debug_recalculate_supply(config: Config) -> Result<()> {
-    println!("Loading blockchain and recalculating total supply...");
-    
-    // Initialize storage and load blockchain
-    let storage = Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
-    let blockchain = NumiBlockchain::load_from_storage(&storage).await?;
-    
-    // Get current state
-    let state = blockchain.get_chain_state();
-    println!("Current stored total supply: {} NUMI", state.total_supply as f64 / 100.0);
-    println!("Current chain height: {}", state.total_blocks);
-    
-    // Manually recalculate total supply
-    let recalculated_supply = blockchain.recalculate_and_update_total_supply().await?;
-    println!("Recalculated total supply: {} NUMI", recalculated_supply as f64 / 100.0);
-    
-    // Check if they match
-    if state.total_supply == recalculated_supply {
-        println!("✅ Total supply is correct!");
-    } else {
-        println!("❌ Total supply mismatch detected!");
-        println!("  Stored: {} NUMI", state.total_supply as f64 / 100.0);
-        println!("  Calculated: {} NUMI", recalculated_supply as f64 / 100.0);
-        println!("  Difference: {} NUMI", (recalculated_supply as i64 - state.total_supply as i64) as f64 / 100.0);
     }
     
     Ok(())
 }
+
+
+
+
 
 

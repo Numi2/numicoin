@@ -16,6 +16,8 @@ rate_limit_per_peer = 1000
 
 [mining]
 enabled = true
+stratum_bind_address = "0.0.0.0"
+stratum_bind_port = 3333
 wallet_path = "miner-wallet.json"
 thread_count = 8
 nonce_chunk_size = 10000
@@ -78,16 +80,16 @@ retention_days = 30
 sync_mode = "Fast"
 
 [consensus]
-difficulty_adjustment_interval = 20
+difficulty_adjustment_interval = 1
 max_block_size = 524288
-max_transactions_per_block = 100
+max_transactions_per_block = 10000
 min_transaction_fee = 1
-max_reorg_depth = 10
-checkpoint_interval = 20
-finality_depth = 50
-genesis_supply = 1000
-mining_reward_halving_interval = 1000000
-initial_mining_reward = 1000
+max_reorg_depth = 114
+checkpoint_interval = 1111
+finality_depth = 2016
+genesis_supply = 8888
+mining_reward_halving_interval = 111_111
+initial_mining_reward = 8888
 
 # Transaction fee structure (aligned with transaction.rs constants)
 # - Base fee: 1 NANO per transaction

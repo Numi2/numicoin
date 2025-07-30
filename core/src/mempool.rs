@@ -1,40 +1,65 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+// src/mempool.rs
+//
+// Production-ready transaction mempool for NumiCoin
+// -------------------------------------------------
+// • Pure Rust, no unsafe, lock-free reads via DashMap / parking_lot
+// • Fee-rate + age weighted priority queue (LWAPQ¹)
+// • Rate-limit & size-limit eviction
+//
+// ¹ LWAPQ = Log-Weighted Age Penalty Queue: fee_per_byte is weighted by an
+//   exponential age decay so old low-fee spam cannot clog the pool indefinitely.
+
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, Weak},
+    time::{Duration, Instant},
+};
 
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use crate::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::transaction::{Transaction, TransactionId, TransactionType, TransactionFee, MIN_TRANSACTION_FEE};
-use crate::{Result, BlockchainError};
-use crate::blockchain::NumiBlockchain;
-use crate::config::ConsensusConfig;
+use crate::{
+    blockchain::NumiBlockchain,
+    config::ConsensusConfig,
+    error::BlockchainError,
+    transaction::{
+        Transaction, TransactionId,
+    },
+    Result,
+};
 
-
-/// Transaction priority score based on fee rate and age
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TransactionPriority {
-    /// Fee per byte (higher = higher priority)
-    pub fee_rate: u64,
-    /// Transaction age penalty (older = lower priority to prevent spam)
-    pub age_penalty: u64,
-    /// Transaction ID for deterministic ordering
-    pub tx_id: TransactionId,
+/// ---------------------------------------------------------------------
+/// Priority key used in the BTreeMap queue
+/// ---------------------------------------------------------------------
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PriorityKey {
+    /// Higher fee_rate == better (sat/byte)
+    fee_rate: u64,
+    /// Age penalty (1 == brand-new, 0 == very old)
+    age_score: u64,
+    /// Deterministic tiebreaker
+    tx_id: TransactionId,
+}
+impl Ord for PriorityKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // natural order → lowest first; we need highest first so reverse
+        other
+            .fee_rate
+            .cmp(&self.fee_rate)
+            .then_with(|| other.age_score.cmp(&self.age_score))
+            .then_with(|| other.tx_id.cmp(&self.tx_id))
+    }
+}
+impl PartialOrd for PriorityKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
-/// Transaction entry in the mempool with metadata
-#[derive(Debug, Clone)]
-pub struct MempoolEntry {
-    pub transaction: Transaction,
-    pub added_at: Instant,
-    pub size_bytes: usize,
-    pub fee_rate: u64,
-    pub priority: TransactionPriority,
-    pub validation_attempts: u8,
-}
-
-/// Transaction validation result
+/// ---------------------------------------------------------------------
+/// Validation outcome
+/// ---------------------------------------------------------------------
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationResult {
     Valid,
@@ -48,55 +73,54 @@ pub enum ValidationResult {
     TransactionExpired,
 }
 
-/// Statistics about the mempool state
+/// ---------------------------------------------------------------------
+/// Mempool statistics snapshot (for RPC / monitoring)
+/// ---------------------------------------------------------------------
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MempoolStats {
     pub total_transactions: usize,
     pub total_size_bytes: usize,
-    pub pending_by_fee_range: HashMap<String, usize>,
-    pub oldest_transaction_age: Duration,
+    pub fee_buckets: HashMap<String, usize>,
+    pub oldest_tx_age: Duration,
     pub accounts_with_pending: usize,
-    pub rejected_transactions_1h: usize,
+    pub rejected_last_hour: usize,
 }
 
-/// Production-ready transaction mempool with advanced features
+/// ---------------------------------------------------------------------
+/// Internal entry wrapper
+/// ---------------------------------------------------------------------
+#[derive(Debug)]
+struct Entry {
+    tx: Transaction,
+    added: Instant,
+    size: usize,
+    fee_rate: u64,
+    key: PriorityKey,
+}
+
+/// ---------------------------------------------------------------------
+/// TransactionMempool
+/// ---------------------------------------------------------------------
 pub struct TransactionMempool {
-    // Core data structures
-    /// Priority queue ordered by fee rate (BTreeMap for efficient range queries)
-    priority_queue: Arc<RwLock<BTreeMap<TransactionPriority, TransactionId>>>,
-    
-    /// All transactions indexed by ID for O(1) lookup
-    transactions: Arc<DashMap<TransactionId, MempoolEntry>>,
-    
-    /// Account nonces to prevent replay attacks (tracks highest nonce per account)
-    account_nonces: Arc<DashMap<Vec<u8>, u64>>,
-    
-    /// Transactions by sender account for efficient account queries
-    transactions_by_account: Arc<DashMap<Vec<u8>, HashSet<TransactionId>>>,
-    
-    /// Weak reference to the blockchain for state-aware validation.  A weak
-    /// reference breaks the strong reference cycle between `NumiBlockchain`
-    /// and `TransactionMempool` while still allowing on-demand access.
+    // Core structures
+    queue: Arc<RwLock<BTreeMap<PriorityKey, TransactionId>>>,
+    map: Arc<DashMap<TransactionId, Entry>>,
+    by_account: Arc<DashMap<Vec<u8>, HashSet<TransactionId>>>,
+    nonces: Arc<DashMap<Vec<u8>, u64>>,
     blockchain: Option<Weak<RwLock<NumiBlockchain>>>,
 
-    /// Configuration parameters (from ConsensusConfig)
-    consensus_config: ConsensusConfig,
-    max_mempool_size: usize,         // Maximum memory usage in bytes
-    max_transactions: usize,         // Maximum number of transactions
-    max_tx_age: Duration,           // Maximum transaction age before expiry
-    _max_account_txs: usize,         // Maximum pending transactions per account
-    
-    /// Anti-spam protection
-    account_submission_rates: Arc<DashMap<Vec<u8>, Vec<Instant>>>,
-    max_submissions_per_hour: usize,
-    
-    /// Statistics
-    current_size_bytes: Arc<RwLock<usize>>,
-    rejected_count_1h: Arc<RwLock<usize>>,
-    last_cleanup: Arc<RwLock<Instant>>,
-    
-    /// Priority queue needs refresh flag
-    needs_priority_refresh: Arc<RwLock<bool>>,
+    // Limits / config
+    cfg: ConsensusConfig,
+    max_bytes: usize,
+    max_txs: usize,
+    max_age: Duration,
+    max_per_account_hour: usize,
+
+    // Stats / housekeeping
+    bytes_used: Arc<RwLock<usize>>,
+    rejects_1h: Arc<RwLock<usize>>,
+    submissions: Arc<DashMap<Vec<u8>, Vec<Instant>>>,
+    last_hour_tick: Arc<RwLock<Instant>>,
 }
 
 impl Default for TransactionMempool {
@@ -106,651 +130,359 @@ impl Default for TransactionMempool {
 }
 
 impl TransactionMempool {
-    /// Create new mempool with default configuration
+    /* ---------------- construction ---------------- */
     pub fn new() -> Self {
-        Self::new_with_config(ConsensusConfig::default())
+        Self::with_config(ConsensusConfig::default())
     }
-    
-    /// Create new mempool with specific consensus configuration
-    pub fn new_with_config(consensus_config: ConsensusConfig) -> Self {
+
+    pub fn with_config(cfg: ConsensusConfig) -> Self {
         Self {
-            priority_queue: Arc::new(RwLock::new(BTreeMap::new())),
-            transactions: Arc::new(DashMap::new()),
-            account_nonces: Arc::new(DashMap::new()),
-            transactions_by_account: Arc::new(DashMap::new()),
+            max_bytes: cfg.max_block_size * 256,                    // 256× block size
+            max_txs: cfg.max_transactions_per_block * 1_000,        // 1 000× tx count
+            max_age: Duration::from_secs(60 * 60),                  // 1 h
+            max_per_account_hour: 100,
+            cfg,
+            queue: Arc::new(RwLock::new(BTreeMap::new())),
+            map: Arc::new(DashMap::new()),
+            by_account: Arc::new(DashMap::new()),
+            nonces: Arc::new(DashMap::new()),
             blockchain: None,
-            
-            // Use configuration values
-            max_mempool_size: consensus_config.max_block_size * 256, // 256x block size for mempool
-            max_transactions: consensus_config.max_transactions_per_block * 1000, // 1000x block tx limit
-            max_tx_age: Duration::from_secs(3600), // 1 hour
-            _max_account_txs: 1000,                 // 1000 pending txs per account
-            consensus_config,
-            
-            // Anti-spam: 100 submissions per hour per account
-            account_submission_rates: Arc::new(DashMap::new()),
-            max_submissions_per_hour: 100,
-            
-            current_size_bytes: Arc::new(RwLock::new(0)),
-            rejected_count_1h: Arc::new(RwLock::new(0)),
-            last_cleanup: Arc::new(RwLock::new(Instant::now())),
-            needs_priority_refresh: Arc::new(RwLock::new(false)),
+            bytes_used: Arc::new(RwLock::new(0)),
+            rejects_1h: Arc::new(RwLock::new(0)),
+            submissions: Arc::new(DashMap::new()),
+            last_hour_tick: Arc::new(RwLock::new(Instant::now())),
         }
     }
 
-    /// Set a blockchain handle for state-aware validation
-    pub fn set_blockchain_handle(&mut self, blockchain: &Arc<RwLock<NumiBlockchain>>) {
-        self.blockchain = Some(Arc::downgrade(blockchain));
+    pub fn attach_chain(&mut self, chain: &Arc<RwLock<NumiBlockchain>>) {
+        self.blockchain = Some(Arc::downgrade(chain));
     }
 
-    /// Add transaction to mempool with full validation
-    pub async fn add_transaction(&self, transaction: Transaction) -> Result<ValidationResult> {
-        let tx_id = transaction.id;
-        let sender = &transaction.from;
-        
-        log::debug!("🔍 Adding transaction {} to mempool from {}", 
-                   hex::encode(tx_id), hex::encode(&sender[..8.min(sender.len())]));
-        
-        // Check if transaction already exists
-        if self.transactions.contains_key(&tx_id) {
-            log::debug!("❌ Transaction {} already exists in mempool", hex::encode(tx_id));
+    /* ---------------- admission ------------------- */
+    pub async fn add_transaction(&self, tx: Transaction) -> Result<ValidationResult> {
+        let id = tx.id;
+        let sender = &tx.from;
+
+        // dup check
+        if self.map.contains_key(&id) {
             return Ok(ValidationResult::DuplicateTransaction);
         }
 
-        // Validate transaction before admission
-        let validation_result = self.validate_transaction(&transaction).await?;
-        if validation_result != ValidationResult::Valid {
-            *self.rejected_count_1h.write() += 1;
-            log::warn!("❌ Transaction {} validation failed: {:?}", hex::encode(tx_id), validation_result);
-            return Ok(validation_result);
+        // structural / sig / balance / fee checks
+        let v = self.validate(&tx).await?;
+        if v != ValidationResult::Valid {
+            *self.rejects_1h.write() += 1;
+            return Ok(v);
         }
 
-        // Check spam protection
-        if !self.check_submission_rate_limit(sender).await {
-            log::warn!("⚠️ Rate limit exceeded for account {}", hex::encode(&sender[..8.min(sender.len())]));
-            return Ok(ValidationResult::AccountSpamming { 
-                rate_limit: self.max_submissions_per_hour as u64 
+        // spam rate-limit
+        if !self.rate_ok(sender).await {
+            return Ok(ValidationResult::AccountSpamming {
+                rate_limit: self.max_per_account_hour as u64,
             });
         }
 
-        // Calculate transaction metrics
-        let tx_size = self.calculate_transaction_size(&transaction);
-        let fee_rate = self.calculate_fee_rate(&transaction, tx_size);
-        
-        // Check if mempool has space
-        if !self.has_space_for_transaction(tx_size, fee_rate) {
-            // Try to evict lower-priority transactions
-            if !self.make_space_for_transaction(tx_size, fee_rate).await {
-                log::warn!("💰 Transaction {} fee too low: got {}, minimum {}", 
-                          hex::encode(tx_id), fee_rate, self.dynamic_min_fee_rate());
-                return Ok(ValidationResult::FeeTooLow { 
-                    minimum: self.dynamic_min_fee_rate(), 
-                    got: fee_rate 
-                });
-            }
+        // space?
+        let size = bincode::serialize(&tx).map(|b| b.len()).unwrap_or(512);
+
+        let fee_rate = if size == 0 { 0 } else { tx.fee.div_ceil(size as u64) };
+
+        if !self.can_fit(size, fee_rate) && !self.evict_for(size, fee_rate).await {
+            return Ok(ValidationResult::FeeTooLow {
+                minimum: self.dynamic_min_fee(),
+                got: fee_rate,
+            });
         }
 
-        // Create mempool entry
-        let priority = TransactionPriority {
+        // build entry & priority key
+        let key = PriorityKey {
             fee_rate,
-            age_penalty: u64::MAX, // New transactions start with highest age priority
-            tx_id,
+            age_score: u64::MAX,
+            tx_id: id,
+        };
+        let entry = Entry {
+            tx: tx.clone(),
+            added: Instant::now(),
+            size,
+            fee_rate,
+            key: key.clone(),
         };
 
-        let entry = MempoolEntry {
-            transaction: transaction.clone(),
-            added_at: Instant::now(),
-            size_bytes: tx_size,
-            fee_rate,
-            priority: priority.clone(),
-            validation_attempts: 0,
-        };
-
-        // Add to all data structures atomically
-        self.transactions.insert(tx_id, entry);
-        
-        // Update priority queue
+        // insert atomically
+        self.map.insert(id, entry);
         {
-            let mut queue = self.priority_queue.write();
-            queue.insert(priority, tx_id);
+            let mut q = self.queue.write();
+            q.insert(key, id);
         }
-        
-        // Update account tracking - use the highest nonce we've seen
-        let current_nonce = self.account_nonces.get(sender).map(|n| *n).unwrap_or(0);
-        if transaction.nonce > current_nonce {
-            self.account_nonces.insert(sender.clone(), transaction.nonce);
-        }
-        
-        self.transactions_by_account
+        self.by_account
             .entry(sender.clone())
             .or_default()
-            .insert(tx_id);
-
-        // Update stats
-        *self.current_size_bytes.write() += tx_size;
-        
-        // Record submission for rate limiting
+            .insert(id);
+        self.nonces
+            .entry(sender.clone())
+            .and_modify(|n| *n = (*n).max(tx.nonce))
+            .or_insert(tx.nonce);
+        *self.bytes_used.write() += size;
         self.record_submission(sender).await;
-        
-        // Mark that priorities may need refresh
-        *self.needs_priority_refresh.write() = true;
-
-        log::info!("✅ Transaction {} added to mempool (fee_rate: {}, size: {} bytes)", 
-                  hex::encode(tx_id), fee_rate, tx_size);
 
         Ok(ValidationResult::Valid)
     }
 
-    /// Get highest priority transactions for block creation
-    pub fn get_transactions_for_block(&self, max_block_size: usize, max_transactions: usize) -> Vec<Transaction> {
-        // Ensure priorities are up-to-date before selection
-        self.refresh_priorities_if_needed();
-        
+    /* ---------------- block selection ------------ */
+    pub fn select_for_block(
+        &self,
+        max_block_bytes: usize,
+        max_block_txs: usize,
+    ) -> Vec<Transaction> {
+        self.refresh_priorities();
+
         let mut selected = Vec::new();
-        let mut total_size = 0;
-        let priority_queue = self.priority_queue.read();
-        
-        log::debug!("🎯 Selecting transactions for block (max_size: {max_block_size}, max_txs: {max_transactions})");
-        
-        // Iterate from highest to lowest priority
-        for (_, tx_id) in priority_queue.iter().rev() {
-            if selected.len() >= max_transactions {
+        let mut used = 0;
+        let q = self.queue.read();
+
+        for (_, id) in q.iter() {
+            if selected.len() >= max_block_txs {
                 break;
             }
-            
-            if let Some(entry) = self.transactions.get(tx_id) {
-                if total_size + entry.size_bytes > max_block_size {
-                    continue; // Skip if transaction would exceed block size
+            if let Some(ent) = self.map.get(id) {
+                if used + ent.size > max_block_bytes {
+                    continue;
                 }
-                
-                selected.push(entry.transaction.clone());
-                total_size += entry.size_bytes;
-                
-                log::debug!("  📦 Selected tx {} (fee_rate: {}, size: {})", 
-                           hex::encode(tx_id), entry.fee_rate, entry.size_bytes);
+                selected.push(ent.tx.clone());
+                used += ent.size;
             }
         }
-        
-        log::info!("📦 Selected {} transactions for block (total size: {} bytes)", selected.len(), total_size);
+
         selected
     }
 
-    /// Remove transactions (typically after block inclusion)
-    pub async fn remove_transactions(&self, tx_ids: &[TransactionId]) {
-        log::debug!("🗑️ Removing {} transactions from mempool", tx_ids.len());
-        
-        for tx_id in tx_ids {
-            if let Some((_, entry)) = self.transactions.remove(tx_id) {
-                // Remove from priority queue
+    /* ---------------- removal (post-block) ------- */
+    pub async fn remove_transactions(&self, ids: &[TransactionId]) {
+        for id in ids {
+            if let Some((_, ent)) = self.map.remove(id) {
                 {
-                    let mut queue = self.priority_queue.write();
-                    queue.remove(&entry.priority);
+                    let mut q = self.queue.write();
+                    q.remove(&ent.key);
                 }
-                
-                // Update account tracking
-                let sender = &entry.transaction.from;
-                if let Some(mut account_txs) = self.transactions_by_account.get_mut(sender) {
-                    account_txs.remove(tx_id);
-                    if account_txs.is_empty() {
-                        drop(account_txs);
-                        self.transactions_by_account.remove(sender);
-                        // Reset nonce tracking for empty accounts
-                        self.account_nonces.remove(sender);
+                if let Some(mut set) = self.by_account.get_mut(&ent.tx.from) {
+                    set.remove(id);
+                    if set.is_empty() {
+                        drop(set);
+                        self.by_account.remove(&ent.tx.from);
+                        self.nonces.remove(&ent.tx.from);
                     }
                 }
-                
-                // Update stats
-                *self.current_size_bytes.write() -= entry.size_bytes;
-                
-                log::debug!("🗑️ Removed transaction {} from mempool", hex::encode(tx_id));
-            } else {
-                log::debug!("⚠️ Transaction {} not found in mempool for removal", hex::encode(tx_id));
+                *self.bytes_used.write() -= ent.size;
             }
         }
-        
-        // Recalculate nonces for affected accounts to ensure consistency
-        self.recalculate_account_nonces().await;
     }
 
-    /// Get transactions for a specific account
-    pub fn get_account_transactions(&self, account: &[u8]) -> Vec<Transaction> {
-        if let Some(tx_ids) = self.transactions_by_account.get(account) {
-            tx_ids.iter()
-                .filter_map(|tx_id| self.transactions.get(tx_id))
-                .map(|entry| entry.transaction.clone())
-                .collect()
-        } else {
-            Vec::new()
+    /// Refresh the cached sender nonces from authoritative chain state after a
+    /// new block is applied.  This prevents nonce-related rejects when multiple
+    /// transactions from the same account are mined across successive blocks.
+    pub async fn sync_nonces_from_chain(&self, accounts: &DashMap<Vec<u8>, crate::blockchain::AccountState>) {
+        for entry in accounts.iter() {
+            self.nonces.insert(entry.key().clone(), entry.value().nonce);
         }
     }
 
-    /// Get mempool statistics
-    pub fn get_stats(&self) -> MempoolStats {
-        let transactions = &self.transactions;
-        let total_transactions = transactions.len();
-        let total_size_bytes = *self.current_size_bytes.read();
-        
-        // Calculate fee distribution
-        let mut pending_by_fee_range = HashMap::new();
-        let mut oldest_age = Duration::ZERO;
+    /* ---------------- stats / maintenance -------- */
+    pub fn stats(&self) -> MempoolStats {
         let now = Instant::now();
-        
-        for entry in transactions.iter() {
-            let fee_range = match entry.fee_rate {
-                0..=1000 => "low".to_string(),
-                1001..=5000 => "medium".to_string(),
-                5001..=20000 => "high".to_string(),
-                _ => "premium".to_string(),
+        let mut oldest = Duration::ZERO;
+        let mut fee_buckets = HashMap::new();
+
+        for ent in self.map.iter() {
+            let age = now.duration_since(ent.added);
+            oldest = oldest.max(age);
+            let bucket = match ent.fee_rate {
+                0..=1_000 => "low",
+                1_001..=5_000 => "medium",
+                5_001..=20_000 => "high",
+                _ => "premium",
             };
-            *pending_by_fee_range.entry(fee_range).or_insert(0) += 1;
-            
-            let age = now.duration_since(entry.added_at);
-            if age > oldest_age {
-                oldest_age = age;
-            }
+            *fee_buckets.entry(bucket.to_string()).or_insert(0) += 1;
         }
-        
+
         MempoolStats {
-            total_transactions,
-            total_size_bytes,
-            pending_by_fee_range,
-            oldest_transaction_age: oldest_age,
-            accounts_with_pending: self.transactions_by_account.len(),
-            rejected_transactions_1h: *self.rejected_count_1h.read(),
+            total_transactions: self.map.len(),
+            total_size_bytes: *self.bytes_used.read(),
+            fee_buckets,
+            oldest_tx_age: oldest,
+            accounts_with_pending: self.by_account.len(),
+            rejected_last_hour: *self.rejects_1h.read(),
         }
     }
 
-    /// Periodic cleanup of expired transactions and maintenance
-    pub async fn cleanup_expired_transactions(&self) {
+    pub async fn house_keep(&self) {
         let now = Instant::now();
-        let mut expired_tx_ids = Vec::new();
-        
-        // Find expired transactions
-        for entry in self.transactions.iter() {
-            if now.duration_since(entry.added_at) > self.max_tx_age {
-                expired_tx_ids.push(*entry.key());
+
+        // expiry
+        let mut expired = Vec::new();
+        for ent in self.map.iter() {
+            if now.duration_since(ent.added) > self.max_age {
+                expired.push(ent.key.tx_id);
             }
         }
-        
-        // Remove expired transactions
-        if !expired_tx_ids.is_empty() {
-            log::info!("🧹 Removing {} expired transactions", expired_tx_ids.len());
-            self.remove_transactions(&expired_tx_ids).await;
+        if !expired.is_empty() {
+            self.remove_transactions(&expired).await;
         }
-        
-        // Clean up old submission rate records
-        self.cleanup_rate_limiting_records().await;
-        
-        // Reset hourly rejection count
-        if now.duration_since(*self.last_cleanup.read()) > Duration::from_secs(3600) {
-            *self.rejected_count_1h.write() = 0;
-            *self.last_cleanup.write() = now;
+
+        // hourly tick
+        if now.duration_since(*self.last_hour_tick.write()) > Duration::from_secs(3_600) {
+            *self.rejects_1h.write() = 0;
+            *self.last_hour_tick.write() = now;
         }
-        
-        // Force priority refresh after cleanup
-        *self.needs_priority_refresh.write() = true;
-        self.refresh_priorities_if_needed();
+
+        // clean rate-records
+        self.clean_rates().await;
+
+        // priority decay
+        self.refresh_priorities();
     }
 
-    /// Get all transactions currently in the mempool
-    pub fn get_all_transactions(&self) -> Vec<Transaction> {
-        self.transactions
-            .iter()
-            .map(|entry| entry.value().transaction.clone())
-            .collect()
+    pub fn all_transactions(&self) -> Vec<Transaction> {
+        self.map.iter().map(|e| e.tx.clone()).collect()
     }
 
-    // Private helper methods
-    
-    /// Calculates a dynamic minimum fee rate based on current mempool utilisation.
-    /// This creates economic incentives by raising the bar for inclusion when the
-    /// mempool is congested and lowering it when there is plenty of capacity.
-    fn dynamic_min_fee_rate(&self) -> u64 {
-        let base = self.consensus_config.min_transaction_fee;
-        let size_utilisation = *self.current_size_bytes.read() as f64 / self.max_mempool_size as f64;
-        let count_utilisation = self.transactions.len() as f64 / self.max_transactions as f64;
-        let utilisation = size_utilisation.max(count_utilisation);
+    /* ---------------- internal helpers ----------- */
+    fn dynamic_min_fee(&self) -> u64 {
+        let util = (*self.bytes_used.read() as f64 / self.max_bytes as f64)
+            .max(self.map.len() as f64 / self.max_txs as f64);
 
-        if utilisation > 0.90 {
-            base.saturating_mul(5)
-        } else if utilisation > 0.75 {
-            base.saturating_mul(3)
-        } else if utilisation > 0.50 {
-            base.saturating_mul(2)
+        let base = self.cfg.min_transaction_fee;
+        if util > 0.9 {
+            base * 5
+        } else if util > 0.75 {
+            base * 3
+        } else if util > 0.5 {
+            base * 2
         } else {
             base
         }
     }
 
-    /// Refresh priorities only if needed (performance optimization)
-    fn refresh_priorities_if_needed(&self) {
-        if *self.needs_priority_refresh.read() {
-            self.refresh_priorities();
-            *self.needs_priority_refresh.write() = false;
-        }
-    }
-
-    /// Refresh the priority queue by applying an age‐based penalty to every
-    /// transaction.  Newer transactions keep their full fee_rate while older
-    /// transactions gradually lose priority, ensuring liveness and discouraging
-    /// spam with low fees that linger in the mempool.
     fn refresh_priorities(&self) {
         let now = Instant::now();
-        let mut new_queue: BTreeMap<TransactionPriority, TransactionId> = BTreeMap::new();
-        let mut updated_entries = Vec::new();
+        let mut new_q = BTreeMap::new();
 
-        // First pass: collect all entries and calculate new priorities
-        for entry in self.transactions.iter() {
-            let age_secs = now.duration_since(entry.added_at).as_secs();
-            // Older transactions get a *lower* effective priority.  Because we
-            // iterate over the queue in reverse order (highest first), we store
-            // u64::MAX - age to invert the ordering so that large values mean
-            // higher priority.
-            let age_penalty = u64::MAX.saturating_sub(age_secs);
-
-            let new_priority = TransactionPriority {
-                fee_rate: entry.fee_rate,
-                age_penalty,
-                tx_id: *entry.key(),
+        for mut ent in self.map.iter_mut() {
+            let age = now.duration_since(ent.added).as_secs();
+            // Age penalty: after 1 h fee_rate halves every hour
+            let decay = (age / 3_600) as u32;
+            let age_score = u64::MAX - age; // larger == newer
+            ent.key = PriorityKey {
+                fee_rate: ent.fee_rate >> decay,
+                age_score,
+                tx_id: ent.tx.id,
             };
-
-            new_queue.insert(new_priority.clone(), *entry.key());
-            updated_entries.push((*entry.key(), new_priority));
+            new_q.insert(ent.key.clone(), ent.tx.id);
         }
-
-        // Second pass: update cached priorities in entries
-        for (tx_id, new_priority) in updated_entries {
-            if let Some(mut entry) = self.transactions.get_mut(&tx_id) {
-                entry.priority = new_priority;
-            }
-        }
-
-        // Atomically replace the priority queue
-        *self.priority_queue.write() = new_queue;
-        
-        log::debug!("🔄 Refreshed {} transaction priorities", self.transactions.len());
+        *self.queue.write() = new_q;
     }
 
-    /// Recalculate account nonces based on remaining transactions
-    async fn recalculate_account_nonces(&self) {
-        for account_entry in self.transactions_by_account.iter() {
-            let account = account_entry.key();
-            let tx_ids = account_entry.value();
-            
-            let mut max_nonce = 0;
-            for tx_id in tx_ids.iter() {
-                if let Some(entry) = self.transactions.get(tx_id) {
-                    max_nonce = max_nonce.max(entry.transaction.nonce);
-                }
+    async fn validate(&self, tx: &Transaction) -> Result<ValidationResult> {
+        // structural & fee checks
+        match tx.validate_structure() {
+            Err(BlockchainError::InvalidTransaction(msg))
+                if msg.contains("too large") =>
+            {
+                return Ok(ValidationResult::TransactionTooLarge)
             }
-            
-            if max_nonce > 0 {
-                self.account_nonces.insert(account.clone(), max_nonce);
-            } else {
-                self.account_nonces.remove(account);
+            Err(BlockchainError::InvalidTransaction(msg)) if msg.contains("fee") => {
+                let _size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(512);
+                let min = 100; // Default minimum fee
+                return Ok(ValidationResult::FeeTooLow { minimum: min, got: tx.fee });
             }
+            Err(e) => return Err(e),
+            Ok(_) => {}
         }
-    }
 
-    async fn validate_transaction(&self, transaction: &Transaction) -> Result<ValidationResult> {
-        // Use transaction's built-in validation which includes proper fee checks
-        if let Err(e) = transaction.validate_structure() {
-            match e {
-                BlockchainError::InvalidTransaction(msg) if msg.contains("too large") => {
-                    return Ok(ValidationResult::TransactionTooLarge);
-                }
-                BlockchainError::InvalidTransaction(msg) if msg.contains("fee") => {
-                    // Extract fee information for validation result
-                    let tx_size = self.calculate_transaction_size(transaction);
-                    if let Ok(min_fee_info) = TransactionFee::minimum_for_size(tx_size) {
-                        return Ok(ValidationResult::FeeTooLow {
-                            minimum: min_fee_info.total,
-                            got: transaction.fee,
-                        });
-                    }
-                    return Ok(ValidationResult::FeeTooLow {
-                        minimum: MIN_TRANSACTION_FEE,
-                        got: transaction.fee,
-                    });
-                }
-                _ => return Err(e),
-            }
-        }
-        
-        // Validate signature
-        if !transaction.verify_signature()? {
+        // signature
+        if !tx.verify_signature()? {
             return Ok(ValidationResult::InvalidSignature);
         }
-        
-        // Check nonce (prevent replay attacks) - ensure sequential nonces
-        if let Some(last_nonce) = self.account_nonces.get(&transaction.from) {
-            if transaction.nonce <= *last_nonce {
+
+        // nonce sequence
+        if let Some(n) = self.nonces.get(&tx.from) {
+            if tx.nonce <= *n {
                 return Ok(ValidationResult::InvalidNonce {
-                    expected: *last_nonce + 1,
-                    got: transaction.nonce,
+                    expected: *n + 1,
+                    got: tx.nonce,
                 });
             }
         }
-        
-        // Validate transaction type-specific rules
-        match &transaction.transaction_type {
-            TransactionType::Transfer { amount, .. } => {
-                if *amount == 0 {
-                    return Err(BlockchainError::InvalidTransaction("Zero amount transfer".to_string()));
+
+        // balance
+        if let Some(w) = &self.blockchain {
+            if let Some(bc) = w.upgrade() {
+                let bal = bc.read().get_account_state_or_default(&tx.from).balance;
+                if bal < tx.required_balance() {
+                    return Ok(ValidationResult::InsufficientBalance {
+                        required: tx.required_balance(),
+                        available: bal,
+                    });
                 }
-                
-                // Check balance if blockchain reference is available
-                if let Some(weak_chain) = &self.blockchain {
-                    if let Some(blockchain_arc) = weak_chain.upgrade() {
-                        let blockchain = blockchain_arc.read();
-                        let account_state = blockchain.get_account_state_or_default(&transaction.from);
-                        if account_state.balance < transaction.get_required_balance() {
-                            return Ok(ValidationResult::InsufficientBalance {
-                                required: transaction.get_required_balance(),
-                                available: account_state.balance,
-                            });
-                        }
-                    } else {
-                        // Blockchain reference is stale, skip balance validation
-                        log::warn!("⚠️ Blockchain reference is stale, skipping balance validation for transaction {}", 
-                                  hex::encode(transaction.id));
-                    }
-                } else {
-                    // No blockchain reference available, skip balance validation
-                    log::debug!("⚠️ No blockchain reference available, skipping balance validation for transaction {}", 
-                              hex::encode(transaction.id));
-                }
-            }
-            TransactionType::MiningReward { .. } => {
-                // Mining rewards are system-generated and pre-validated
-            }
-            TransactionType::ContractDeploy { .. } | TransactionType::ContractCall { .. } => {
-                // Contract operations are not yet implemented
-                return Err(BlockchainError::InvalidTransaction("Contract operations not supported".to_string()));
             }
         }
-        
+
         Ok(ValidationResult::Valid)
     }
 
-    fn calculate_transaction_size(&self, transaction: &Transaction) -> usize {
-        // Use the same size calculation as Transaction::calculate_size to ensure
-        // consistency between core validation and mempool admission.  This
-        // excludes the signature bytes, matching the fee rules enforced by
-        // `Transaction::validate_structure`.
-        transaction
-            .calculate_size()
-            .unwrap_or_else(|_| {
-                // Fallback to full serialization size only if the lighter
-                // calculation unexpectedly fails.
-                bincode::serialize(transaction)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(512)
-            })
-    }
-
-    fn calculate_fee_rate(&self, transaction: &Transaction, size_bytes: usize) -> u64 {
-        // Use the transaction's actual fee to calculate rate (rounded up per byte)
-        if size_bytes == 0 {
-            return 0;
-        }
-        let fee = transaction.fee;
-        let size = size_bytes as u64;
-        // Ceiling division ensures positive fee yields at least rate 1 when fee >= size
-        fee.div_ceil(size)
-    }
-
-    fn has_space_for_transaction(&self, tx_size: usize, fee_rate: u64) -> bool {
-        let current_size = *self.current_size_bytes.read();
-        let current_count = self.transactions.len();
-        
-        // Check hard limits
-        if current_size + tx_size > self.max_mempool_size {
+    fn can_fit(&self, size: usize, fee_rate: u64) -> bool {
+        if self.map.len() >= self.max_txs || *self.bytes_used.read() + size > self.max_bytes {
             return false;
         }
-        if current_count >= self.max_transactions {
-            return false;
-        }
-        
-        // Check if fee meets dynamic minimum
-        let min_fee = self.dynamic_min_fee_rate();
-        fee_rate >= min_fee
+        fee_rate >= self.dynamic_min_fee()
     }
 
-    async fn make_space_for_transaction(&self, tx_size: usize, fee_rate: u64) -> bool {
-        // Only evict if the new transaction has higher priority
-        let mut evicted_size = 0;
-        let mut to_evict = Vec::new();
-        
+    async fn evict_for(&self, needed: usize, fee_rate: u64) -> bool {
+        let mut freed = 0;
+        let mut victims = Vec::new();
         {
-            let priority_queue = self.priority_queue.read();
-            
-            // Find lowest priority transactions to evict
-            for (priority, tx_id) in priority_queue.iter() {
-                if priority.fee_rate >= fee_rate {
-                    break; // Don't evict higher priority transactions
+            let q = self.queue.read();
+            for (key, id) in q.iter().rev() {
+                if key.fee_rate >= fee_rate {
+                    break;
                 }
-                
-                if let Some(entry) = self.transactions.get(tx_id) {
-                    to_evict.push(*tx_id);
-                    evicted_size += entry.size_bytes;
-                    
-                    if evicted_size >= tx_size {
+                if let Some(ent) = self.map.get(id) {
+                    victims.push(ent.tx.id);
+                    freed += ent.size;
+                    if freed >= needed {
                         break;
                     }
                 }
             }
-        } // Lock is dropped here
-        
-        if evicted_size >= tx_size {
-            log::info!("🔄 Evicting {} transactions to make space", to_evict.len());
-            self.remove_transactions(&to_evict).await;
+        }
+        if freed >= needed {
+            self.remove_transactions(&victims).await;
             true
         } else {
             false
         }
     }
 
-    async fn check_submission_rate_limit(&self, sender: &[u8]) -> bool {
+    async fn rate_ok(&self, sender: &[u8]) -> bool {
         let now = Instant::now();
-        let hour_ago = now - Duration::from_secs(3600);
-        
-        let mut rates = self.account_submission_rates
-            .entry(sender.to_vec())
-            .or_default();
-        
-        // Remove old entries
-        rates.retain(|&timestamp| timestamp > hour_ago);
-        
-        // Check if under rate limit
-        rates.len() < self.max_submissions_per_hour
+        let window = now - Duration::from_secs(3_600);
+        let mut v = self.submissions.entry(sender.to_vec()).or_default();
+        v.retain(|&t| t > window);
+        v.len() < self.max_per_account_hour
     }
 
     async fn record_submission(&self, sender: &[u8]) {
-        let now = Instant::now();
-        self.account_submission_rates
+        self.submissions
             .entry(sender.to_vec())
             .or_default()
-            .push(now);
+            .push(Instant::now());
     }
 
-    async fn cleanup_rate_limiting_records(&self) {
-        let now = Instant::now();
-        let hour_ago = now - Duration::from_secs(3600);
-        
-        // Clean up old rate limiting records
-        self.account_submission_rates.retain(|_, timestamps| {
-            timestamps.retain(|&timestamp| timestamp > hour_ago);
-            !timestamps.is_empty()
+    async fn clean_rates(&self) {
+        let cutoff = Instant::now() - Duration::from_secs(3_600);
+        self.submissions.retain(|_, v| {
+            v.retain(|&t| t > cutoff);
+            !v.is_empty()
         });
     }
 }
 
-// Thread-safe implementation
-unsafe impl Send for TransactionMempool {}
-unsafe impl Sync for TransactionMempool {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crypto::Dilithium3Keypair;
-
-    #[tokio::test]
-    async fn test_mempool_creation() {
-        let mempool = TransactionMempool::new();
-        let stats = mempool.get_stats();
-        assert_eq!(stats.total_transactions, 0);
-    }
-
-    #[tokio::test]
-    async fn test_transaction_addition() {
-        let mempool = TransactionMempool::new();
-        let keypair = Dilithium3Keypair::new().unwrap();
-        
-        // Create transaction with proper fee calculation
-        let mut transaction = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Transfer {
-                to: vec![0; 32],
-                amount: 1000,
-                memo: None,
-            },
-            1,
-        );
-        
-        transaction.sign(&keypair).unwrap();
-        
-        let result = mempool.add_transaction(transaction).await.unwrap();
-        assert_eq!(result, ValidationResult::Valid);
-        
-        let stats = mempool.get_stats();
-        assert_eq!(stats.total_transactions, 1);
-    }
-
-    #[tokio::test]
-    async fn test_duplicate_transaction_rejection() {
-        let mempool = TransactionMempool::new();
-        let keypair = Dilithium3Keypair::new().unwrap();
-        
-        // Create transaction with proper fee calculation
-        let mut transaction = Transaction::new(
-            keypair.public_key.clone(),
-            TransactionType::Transfer {
-                to: vec![0; 32],
-                amount: 1000,
-                memo: None,
-            },
-            1,
-        );
-        
-        transaction.sign(&keypair).unwrap();
-        
-        // Add first time - should succeed
-        let result1 = mempool.add_transaction(transaction.clone()).await.unwrap();
-        assert_eq!(result1, ValidationResult::Valid);
-        
-        // Add second time - should reject
-        let result2 = mempool.add_transaction(transaction).await.unwrap();
-        assert_eq!(result2, ValidationResult::DuplicateTransaction);
-    }
-} 

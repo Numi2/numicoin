@@ -156,11 +156,10 @@ impl Block {
             }
         }
         
-        // Verify timestamp is reasonable
+        // allow 1 h in the past, but no future timestamps
         let now = Utc::now();
         let earliest = now - Duration::hours(1);
-        let latest = now + Duration::minutes(10);
-        if self.header.timestamp < earliest || self.header.timestamp > latest {
+        if self.header.timestamp < earliest || self.header.timestamp > now {
             return Err(BlockchainError::InvalidBlock("Block timestamp outside allowed range".to_string()));
         }
         
@@ -177,22 +176,23 @@ impl Block {
     
     pub fn get_total_fees(&self) -> u64 {
         self.transactions.iter()
-            .filter(|tx| !tx.is_reward())
+            .filter(|tx| !matches!(tx.kind, crate::transaction::TransactionType::MiningReward { .. }))
             .map(|tx| tx.fee)
             .sum()
     }
     
     pub fn get_mining_reward(&self) -> u64 {
-        // Use the centralized, halving-schedule-aware reward calculation so that
-        // the reward embedded in a block is always consistent with what the
-        // miner and wallet logic expect.  This eliminates inconsistencies
-        // between auditing utilities (which may inspect blocks directly) and
-        // mining code (which already relies on `WalletManager::calculate_mining_reward`).
-        //
-        // NOTE: `get_total_fees()` can be added on the caller side if the full
-        // reward including transaction fees is required.
-
         crate::miner::WalletManager::calculate_mining_reward(self.header.height)
+    }
+
+    /// Calculate the block subsidy based on the provided consensus settings.
+    pub fn calculate_block_reward(&self, consensus: &crate::config::ConsensusConfig) -> u64 {
+        let halvings = self.header.height / consensus.mining_reward_halving_interval;
+        if halvings >= 64 {
+            0
+        } else {
+            consensus.initial_mining_reward >> halvings
+        }
     }
     
     pub fn serialize_header_for_hashing(&self) -> Result<Vec<u8>> {

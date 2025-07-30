@@ -4,19 +4,22 @@ pub mod auth;
 pub mod rate_limit;
 pub mod middleware;
 pub mod handlers;
+pub mod client;
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::RwLock;
+use crate::RwLock;
 use warp::{Filter, Reply, http::StatusCode};
 
-use crate::blockchain::NumiBlockchain;
-use crate::storage::BlockchainStorage;
-use crate::network::{NetworkManager, NetworkManagerHandle};
-use crate::miner::Miner;
-use crate::config::RpcConfig;
-use crate::Result;
+use crate::{
+    blockchain::NumiBlockchain,
+    config::{RpcConfig, NetworkConfig},
+    storage::BlockchainStorage,
+    network::{NetworkManager, NetworkHandle},
+    miner::Miner,
+    Result,
+};
 
 pub use types::*;
 pub use error::handle_rejection;
@@ -28,22 +31,27 @@ use handlers::*;
 
 /// Production-ready RPC server with comprehensive security
 pub struct RpcServer {
-    pub blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>,
+    pub blockchain: Arc<RwLock<NumiBlockchain>>,
     pub _storage: Arc<BlockchainStorage>,
     pub rate_limiter: Arc<RateLimiter>,
     pub auth_manager: Arc<AuthManager>,
     pub rpc_config: RpcConfig,
     pub stats: Arc<RwLock<RpcStats>>,
     pub start_time: Instant,
-    pub network_manager: Option<NetworkManagerHandle>,
+    pub network_manager: Option<NetworkHandle>,
     pub miner: Arc<RwLock<Miner>>,
 }
 
 impl RpcServer {
     /// Create new RPC server with security configuration
     pub fn new(blockchain: NumiBlockchain, storage: BlockchainStorage) -> Result<Self> {
-        let blockchain_arc = Arc::new(parking_lot::RwLock::new(blockchain));
-        let network_manager = NetworkManager::new(blockchain_arc.clone())?;
+        let blockchain_arc = Arc::new(RwLock::new(blockchain));
+        
+        // Create network manager with proper configuration and channel
+        let (in_tx, _in_rx) = futures::channel::mpsc::unbounded();
+        let network_config = NetworkConfig::default();
+        let (network_manager, network_handle) = NetworkManager::new(&network_config, in_tx)?;
+        
         let miner = Miner::new()?;
         
         Self::with_config_and_components(
@@ -53,6 +61,7 @@ impl RpcServer {
             AuthConfig::default(),
             RpcConfig::default(),
             network_manager,
+            network_handle,
             miner,
         )
     }
@@ -64,10 +73,10 @@ impl RpcServer {
         rate_limit_config: RateLimitConfig,
         auth_config: AuthConfig,
         rpc_config: RpcConfig,
-        network_manager: NetworkManager,
+        _network_manager: NetworkManager,
+        network_handle: NetworkHandle,
         miner: Miner,
     ) -> Result<Self> {
-        let network_handle = network_manager.create_handle();
         
         let stats = RpcStats {
             total_requests: 0,
@@ -95,12 +104,12 @@ impl RpcServer {
     
     /// Create RPC server using shared blockchain and storage (no DB reopen)
     pub fn with_shared_components(
-        blockchain: Arc<parking_lot::RwLock<NumiBlockchain>>,
+        blockchain: Arc<RwLock<NumiBlockchain>>,
         storage: Arc<BlockchainStorage>,
         rate_limit_config: RateLimitConfig,
         auth_config: AuthConfig,
         rpc_config: RpcConfig,
-        network_manager: NetworkManagerHandle,
+        network_manager: NetworkHandle,
         miner: Arc<RwLock<Miner>>,
     ) -> Result<Self> {
         let stats = RpcStats {
@@ -210,11 +219,9 @@ impl RpcServer {
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_transaction);
         
-        // Public routes (no authentication required) - making mining open to the people
+        // Public routes (no authentication required) - mining now via Stratum V2
         let mine_route = warp::path("mine")
             .and(warp::post())
-            .and(warp::body::content_length_limit(1024))
-            .and(warp::body::json())
             .and(rate_limit.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_mine);
@@ -282,20 +289,43 @@ impl RpcServer {
 
     /// Get peer count from network manager
     pub async fn get_peer_count(&self) -> usize {
-        if let Some(ref network) = self.network_manager {
-            network.get_peer_count().await
+        if let Some(network) = &self.network_manager {
+            network.peer_count()
         } else {
             0
         }
     }
-    
+
     /// Check if node is syncing
+    /// 
+    /// Syncing occurs when:
+    /// - Node has peers AND our blockchain height < network consensus height
+    /// - Node is downloading/validating blocks from other nodes
+    /// - Node just started and is catching up to the network
+    /// 
+    /// Not syncing when:
+    /// - No peers (single node network or isolated node)
+    /// - Already at network consensus height
+    /// - Network is idle (no new blocks being produced)
     pub async fn is_syncing(&self) -> bool {
-        if let Some(ref network) = self.network_manager {
-            network.is_syncing().await
-        } else {
-            false
+        let peer_count = self.network_manager.as_ref().map_or(0, |network| network.peer_count());
+        
+        // If we have no peers, we're not syncing (single node or isolated)
+        if peer_count == 0 {
+            return false;
         }
+        
+        // : Implement proper peer height comparison
+        // In a real multi-node scenario, we would:
+        // 1. Query peer heights via custom protocol
+        // 2. Compare with our current height
+        // 3. Return true if we're behind the network consensus
+        
+        let _current_height = self.blockchain.read().get_current_height();
+        
+        // For now, always return false since we don't have peer height comparison
+        // This will be enhanced when we add the sync protocol
+        false
     }
 }
 

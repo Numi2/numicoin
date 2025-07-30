@@ -1,0 +1,5 @@
+[env]
+# Ensure the compiler creates temporary files inside the project’s `target` directory
+# instead of the system default (e.g. /var/folders on macOS) which may be
+# restricted inside some sandboxed build environments.
+TMPDIR = { value = "target" }

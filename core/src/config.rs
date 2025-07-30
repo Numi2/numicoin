@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use crate::crypto::Argon2Config;
 
 /// Main configuration for the NumiCoin blockchain node
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,12 +83,8 @@ impl Config {
             self.network.listen_address = addr;
         }
 
-        // Mining overrides
-        if let Ok(threads) = std::env::var("NUMI_MINING_THREADS") {
-            if let Ok(thread_count) = threads.parse::<usize>() {
-                self.mining.thread_count = thread_count;
-            }
-        }
+        // Mining overrides - thread_count no longer relevant with Stratum V2
+        // External miners handle their own threading
 
         // RPC overrides
         if let Ok(port) = std::env::var("NUMI_RPC_PORT") {
@@ -222,35 +217,43 @@ impl NetworkConfig {
     }
 }
 
-/// Mining configuration
+/// Mining configuration for Stratum V2 server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiningConfig {
     pub enabled: bool,
-    pub thread_count: usize,
-    pub nonce_chunk_size: u64,
-    pub stats_update_interval_secs: u64,
     /// Path to the miner's wallet file (relative to data_directory)
     pub wallet_path: PathBuf,
-    pub argon2_config: Argon2Config,
-    pub mining_pool_url: Option<String>,
-    pub mining_pool_worker: Option<String>,
     pub target_block_time_secs: u64,
     pub difficulty_adjustment_interval: u64,
+    /// Stratum V2 mining server bind address (e.g. "0.0.0.0")
+    #[serde(default)]
+    pub stratum_bind_address: String,
+    /// Stratum V2 mining server bind port (e.g. 3333)
+    #[serde(default)]
+    pub stratum_bind_port: u16,
+    /// Enable local CPU mining as fallback when no Stratum miners connected
+    #[serde(default)]
+    pub local_mining_enabled: bool,
+    /// Number of CPU threads for local mining (defaults to 2 for development)
+    #[serde(default = "default_cpu_threads")]
+    pub cpu_threads: usize,
+}
+
+fn default_cpu_threads() -> usize {
+    2
 }
 
 impl Default for MiningConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            thread_count: num_cpus::get(),
-            nonce_chunk_size: 1_000_000,
-            stats_update_interval_secs: 5,
             wallet_path: PathBuf::from("wallet.key"),
-            argon2_config: Argon2Config::default(),
-            mining_pool_url: None,
-            mining_pool_worker: None,
             target_block_time_secs: 60,
             difficulty_adjustment_interval: 2016,
+            stratum_bind_address: "0.0.0.0".to_string(),
+            stratum_bind_port: 3333,
+            local_mining_enabled: false, // Off by default in production
+            cpu_threads: 2,
         }
     }
 }
@@ -260,12 +263,13 @@ impl MiningConfig {
     pub fn production() -> Self {
         Self {
             enabled: true,
-            thread_count: num_cpus::get(),
-            nonce_chunk_size: 50_000,
-            stats_update_interval_secs: 2,
             wallet_path: PathBuf::from("miner-wallet.json"),
-            argon2_config: Argon2Config::production(),
-            ..Default::default()
+            target_block_time_secs: 60,
+            difficulty_adjustment_interval: 2016,
+            stratum_bind_address: "0.0.0.0".to_string(),
+            stratum_bind_port: 3333,
+            local_mining_enabled: false, // Off by default in production
+            cpu_threads: num_cpus::get().max(1),
         }
     }
 
@@ -273,14 +277,13 @@ impl MiningConfig {
     pub fn development() -> Self {
         Self {
             enabled: true,
-            thread_count: (num_cpus::get() / 2).max(1),
-            nonce_chunk_size: 1_000,
-            stats_update_interval_secs: 10,
             wallet_path: PathBuf::from("miner-wallet.json"),
-            argon2_config: Argon2Config::development(),
             target_block_time_secs: 10, // Faster blocks for development
             difficulty_adjustment_interval: 20,
-            ..Default::default()
+            stratum_bind_address: "0.0.0.0".to_string(),
+            stratum_bind_port: 3333,
+            local_mining_enabled: true, // Enabled for development
+            cpu_threads: 2,
         }
     }
 
@@ -288,28 +291,30 @@ impl MiningConfig {
     pub fn testnet() -> Self {
         Self {
             enabled: true,
-            thread_count: num_cpus::get_physical(),
-            nonce_chunk_size: 5_000,
-            stats_update_interval_secs: 5,
             wallet_path: PathBuf::from("miner-wallet.json"),
-            argon2_config: Argon2Config::development(),
             target_block_time_secs: 15, // Slightly slower than development
             difficulty_adjustment_interval: 30,
-            ..Default::default()
+            stratum_bind_address: "0.0.0.0".to_string(),
+            stratum_bind_port: 3333,
+            local_mining_enabled: true, // Enabled for testnet
+            cpu_threads: 2,
         }
     }
 
 
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.thread_count == 0 {
-            return Err("Thread count must be greater than 0".to_string());
-        }
-        if self.nonce_chunk_size == 0 {
-            return Err("Nonce chunk size must be greater than 0".to_string());
-        }
         if self.target_block_time_secs == 0 {
             return Err("Target block time must be greater than 0".to_string());
+        }
+        if self.difficulty_adjustment_interval == 0 {
+            return Err("Difficulty adjustment interval must be greater than 0".to_string());
+        }
+        if self.stratum_bind_address.is_empty() {
+            return Err("Stratum bind address cannot be empty".into());
+        }
+        if self.stratum_bind_port == 0 {
+            return Err("Stratum bind port must be greater than 0".into());
         }
         Ok(())
     }
@@ -677,11 +682,11 @@ impl Default for ConsensusConfig {
             max_transactions_per_block: 10000,
             min_transaction_fee: 1, // 1 NANO (aligned with transaction.rs constants)
             max_reorg_depth: 144,
-            checkpoint_interval: 1000,
+            checkpoint_interval: 1111,
             finality_depth: 2016,
-            genesis_supply: 1000, // 10 NUMI (1000 NANO units) 
-            mining_reward_halving_interval: 210_000, // Bitcoin-like halving every 210k blocks
-            initial_mining_reward: 1000, // 10 NUMI (1000 NANO units)
+            genesis_supply: 8888, // 88.88 NUMI (8888 NANO units) 
+            mining_reward_halving_interval: 111_000, //  halving every 111k blocks
+            initial_mining_reward: 8888, // 88.88 NUMI (8888 NANO units)
         }
     }
 }
@@ -813,7 +818,9 @@ mod tests {
         config.save_to_file(&config_path).unwrap();
         
         let loaded_config = Config::load_from_file(&config_path).unwrap();
-        assert_eq!(config.mining.thread_count, loaded_config.mining.thread_count);
+        assert_eq!(config.mining.enabled, loaded_config.mining.enabled);
+        assert_eq!(config.mining.stratum_bind_address, loaded_config.mining.stratum_bind_address);
+        assert_eq!(config.mining.stratum_bind_port, loaded_config.mining.stratum_bind_port);
     }
 
     #[test]

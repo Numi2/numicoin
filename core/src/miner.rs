@@ -1,6 +1,7 @@
 use crate::{
     crypto::Dilithium3Keypair,
     Result,
+    config::Config,
 };
 use std::path::Path;
 
@@ -28,52 +29,32 @@ impl WalletManager {
     /// Load or create miner wallet with consistent logic
     pub fn load_or_create_miner_wallet(data_directory: &Path) -> Result<Dilithium3Keypair> {
         let wallet_path = data_directory.join("miner-wallet.json");
-        
-        match Dilithium3Keypair::load_from_file(&wallet_path) {
-            Ok(kp) => {
-                log::info!("🔑 Loaded existing miner wallet from {wallet_path:?}");
-                Ok(kp)
-            }
-            Err(_) => {
-                log::info!("🔑 Creating new miner keypair (no existing wallet found at {wallet_path:?})");
-                let kp = Dilithium3Keypair::new()?;
-                
-                // Ensure parent directory exists
-                if let Some(parent) = wallet_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                
-                if let Err(e) = kp.save_to_file(&wallet_path) {
-                    log::warn!("⚠️ Failed to save new keypair to {wallet_path:?}: {e}");
-                } else {
-                    log::info!("✅ New miner wallet saved to {wallet_path:?}");
-                }
-                Ok(kp)
-            }
-        }
+        Self::load_or_create_miner_wallet_at_path(&wallet_path)
     }
     
     /// Load or create miner wallet with custom path
     pub fn load_or_create_miner_wallet_at_path(wallet_path: &Path) -> Result<Dilithium3Keypair> {
         match Dilithium3Keypair::load_from_file(wallet_path) {
             Ok(kp) => {
-                log::warn!("🔑 Loaded existing miner wallet from {wallet_path:?}");
+                log::info!("🔑 Loaded existing miner wallet from {:?}.", wallet_path);
                 Ok(kp)
             }
             Err(_) => {
-                log::warn!("🔑 Creating new miner keypair (no wallet found at {wallet_path:?})");
+                log::info!("🔑 Creating new miner keypair at {:?} (no existing wallet found).", wallet_path);
                 let kp = Dilithium3Keypair::new()?;
                 
                 // Ensure parent directory exists
                 if let Some(parent) = wallet_path.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        log::warn!("⚠️ Failed to create parent directory for wallet: {e}");
+                    }
                 }
                 
                 // Save the new keypair
                 if let Err(e) = kp.save_to_file(wallet_path) {
-                    log::warn!("⚠️ Failed to save new keypair to {wallet_path:?}: {e}");
+                    log::warn!("⚠️ Failed to save new keypair to disk: {e}");
                 } else {
-                    log::info!("✅ New miner wallet saved to {wallet_path:?}");
+                    log::info!("✅ New miner wallet saved to {:?}.", wallet_path);
                 }
                 Ok(kp)
             }
@@ -89,9 +70,10 @@ pub struct Miner {
 
 impl Miner {
     /// Create new miner: only initializes the keypair
-    pub fn new() -> Result<Self> {
-        let kp = Dilithium3Keypair::new()?;
-        Ok(Self { keypair: kp })
+    pub fn new(config: &Config) -> Result<Self> {
+        let wallet_path = config.storage.data_directory.join("wallet.json");
+        let keypair = WalletManager::load_or_create_miner_wallet_at_path(&wallet_path)?;
+        Ok(Self { keypair })
     }
     
     /// Create miner from existing keypair file

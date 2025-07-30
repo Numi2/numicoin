@@ -1,9 +1,44 @@
 use thiserror::Error;
+use sled::transaction::UnabortableTransactionError;
+
+#[derive(Debug, Clone, Error)]
+pub enum InvalidBlockError {
+    #[error("Block signature verification failed")]
+    SignatureVerificationFailed,
+    #[error("Previous block hash mismatch")]
+    PreviousBlockHashMismatch,
+    #[error("Invalid block height")]
+    InvalidBlockHeight,
+    #[error("Genesis block must have height 0")]
+    GenesisBlockHeightNotZero,
+    #[error("Genesis block previous_hash must be zero")]
+    GenesisBlockHashNotZero,
+    #[error("Genesis block must have exactly one transaction")]
+    GenesisBlockInvalidTransactionCount,
+    #[error("Genesis block's only transaction must be a mining reward")]
+    GenesisBlockTransactionNotReward,
+    #[error("Invalid number of mining reward transactions in block")]
+    InvalidRewardTransactionCount,
+    #[error("Incorrect mining reward amount")]
+    InvalidRewardAmount,
+    #[error("Mining reward transaction must be first in the block")]
+    RewardTransactionNotFirst,
+    #[error("Invalid Merkle root")]
+    InvalidMerkleRoot,
+    #[error("Block timestamp is outside the allowed range: {0}")]
+    TimestampOutOfRange(String),
+    #[error("Invalid PoW")]
+    InvalidPoW,
+    #[error("The block is stale and does not connect to the main chain")]
+    StaleChain,
+    #[error("Invalid transaction in block: {0}")]
+    InvalidTransaction(String),
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum BlockchainError {
     #[error("Invalid block: {0}")]
-    InvalidBlock(String),
+    InvalidBlock(#[from] InvalidBlockError),
 
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
@@ -51,6 +86,15 @@ pub enum BlockchainError {
 
     #[error("Task join error: {0}")]
     TaskJoinError(String),
+
+    #[error("Missing genesis block")]
+    MissingGenesisBlock,
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum RpcError {
+    #[error("API key verification failed")]
+    ApiKeyVerificationFailed,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -121,4 +165,10 @@ impl From<tokio::task::JoinError> for BlockchainError {
     fn from(err: tokio::task::JoinError) -> Self {
         BlockchainError::TaskJoinError(err.to_string())
     }
-} 
+}
+
+impl From<UnabortableTransactionError> for BlockchainError {
+    fn from(err: UnabortableTransactionError) -> Self {
+        BlockchainError::StorageError(err.to_string())
+    }
+}

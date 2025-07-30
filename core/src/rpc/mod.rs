@@ -14,7 +14,7 @@ use warp::{Filter, Reply, http::StatusCode};
 
 use crate::{
     blockchain::NumiBlockchain,
-    config::{RpcConfig, NetworkConfig},
+    config::RpcConfig,
     storage::BlockchainStorage,
     network::{NetworkManager, NetworkHandle},
     miner::Miner,
@@ -43,29 +43,6 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
-    /// Create new RPC server with security configuration
-    pub fn new(blockchain: NumiBlockchain, storage: BlockchainStorage) -> Result<Self> {
-        let blockchain_arc = Arc::new(RwLock::new(blockchain));
-        
-        // Create network manager with proper configuration and channel
-        let (in_tx, _in_rx) = futures::channel::mpsc::unbounded();
-        let network_config = NetworkConfig::default();
-        let (network_manager, network_handle) = NetworkManager::new(&network_config, in_tx)?;
-        
-        let miner = Miner::new()?;
-        
-        Self::with_config_and_components(
-            Arc::try_unwrap(blockchain_arc).map_err(|_| crate::BlockchainError::StorageError("Failed to unwrap blockchain".to_string()))?.into_inner(),
-            storage,
-            RateLimitConfig::default(),
-            AuthConfig::default(),
-            RpcConfig::default(),
-            network_manager,
-            network_handle,
-            miner,
-        )
-    }
-
     /// Create RPC server with custom configuration and components
     pub fn with_config_and_components(
         blockchain: NumiBlockchain,
@@ -152,10 +129,11 @@ impl RpcServer {
         let cors = if rpc_server.rpc_config.enable_cors {
             let mut cors_builder = warp::cors()
                 .allow_methods(&[warp::http::Method::GET, warp::http::Method::POST])
-                .allow_headers(vec!["content-type"]);
+                .allow_headers(vec!["content-type", "authorization"]);
             
             for origin in &rpc_server.rpc_config.allowed_origins {
                 if origin == "*" {
+                    log::warn!("CORS is configured to allow any origin. This is insecure for production.");
                     cors_builder = cors_builder.allow_any_origin();
                     break;
                 } else {
@@ -218,14 +196,14 @@ impl RpcServer {
             .and(rate_limit.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
             .and_then(handle_transaction);
-        
-        // Public routes (no authentication required) - mining now via Stratum V2
+
         let mine_route = warp::path("mine")
             .and(warp::post())
+            .and(warp::body::json())
             .and(rate_limit.clone())
             .and(with_rpc_server(Arc::clone(&rpc_server)))
-            .and_then(handle_mine);
-            
+            .and_then(handle_mine_block);
+        
         let stats_route = warp::path("stats")
             .and(warp::get())
             .and(rate_limit.clone())
@@ -309,22 +287,21 @@ impl RpcServer {
     /// - Network is idle (no new blocks being produced)
     pub async fn is_syncing(&self) -> bool {
         let peer_count = self.network_manager.as_ref().map_or(0, |network| network.peer_count());
-        
+
         // If we have no peers, we're not syncing (single node or isolated)
         if peer_count == 0 {
             return false;
         }
-        
-        // : Implement proper peer height comparison
-        // In a real multi-node scenario, we would:
-        // 1. Query peer heights via custom protocol
-        // 2. Compare with our current height
-        // 3. Return true if we're behind the network consensus
-        
-        let _current_height = self.blockchain.read().get_current_height();
-        
-        // For now, always return false since we don't have peer height comparison
-        // This will be enhanced when we add the sync protocol
+
+        // Heuristic: if the last block is older than 2x the target block time, we are likely syncing
+        let last_block_timestamp = self.blockchain.read().get_block_by_height(self.blockchain.read().get_current_height()).map(|b| b.header.timestamp);
+        if let Some(timestamp) = last_block_timestamp {
+            let time_since_last_block = chrono::Utc::now().signed_duration_since(timestamp).to_std().unwrap_or_default();
+            if time_since_last_block > self.blockchain.read().consensus_params().target_block_time * 2 {
+                return true;
+            }
+        }
+
         false
     }
 }
@@ -334,4 +311,4 @@ fn with_auth_manager(
     auth_manager: Arc<AuthManager>,
 ) -> impl Filter<Extract = (Arc<AuthManager>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || auth_manager.clone())
-} 
+}

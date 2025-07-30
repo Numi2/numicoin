@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use crate::block::Block;
+use tokio::time::timeout;
+use std::time::Duration;
 
 use warp::Rejection;
 
@@ -34,7 +37,7 @@ pub async fn handle_status(
     
     let response = StatusResponse {
         total_blocks,
-        total_supply: total_supply as f64 / 100.0,
+        total_supply,
         current_difficulty,
         best_block_hash: hex::encode(best_block_hash),
         mempool_transactions,
@@ -54,27 +57,26 @@ pub async fn handle_balance(
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
     // Get balance and account state without holding lock across await
-    let (balance, nonce, transaction_count) = {
+    let account_state = {
         let blockchain = rpc_server.blockchain.read();
-        let balance = blockchain.get_balance(&address);
-        
-        // For get_account_state, we need to convert address to public key
-        // But since this function expects public key, let's skip it for now
-        let (nonce, transaction_count) = (0, 0);
-        
-        (balance, nonce, transaction_count)
+        blockchain.get_account_state_by_address(&address)
     };
-    
-    let response = BalanceResponse {
-        address,
-        balance: balance as f64 / 100.0,
-        nonce,
-        staked_amount: 0.0, // Removed staking functionality
-        transaction_count,
-    };
-    
-    rpc_server.increment_stat("successful_requests").await;
-    Ok(warp::reply::json(&ApiResponse::success(response)))
+
+    if let Some(state) = account_state {
+        let response = BalanceResponse {
+            address,
+            balance: state.balance,
+            nonce: state.nonce,
+            transaction_count: state.transaction_count,
+        };
+        rpc_server.increment_stat("successful_requests").await;
+        Ok(warp::reply::json(&ApiResponse::success(response)))
+    } else {
+        rpc_server.increment_stat("failed_requests").await;
+        Ok(warp::reply::json(&ApiResponse::<()>::error(
+            "Account not found".to_string()
+        )))
+    }
 }
 
 /// Block endpoint handler - fixed to avoid holding locks across await
@@ -128,14 +130,14 @@ pub async fn handle_block(
 
             let response = BlockResponse {
                 height: block.header.height,
-                hash: hex::encode(block.calculate_hash().unwrap_or([0u8; 32])),
+                hash: hex::encode(block.calculate_hash(None).unwrap_or([0u8; 32])),
                 previous_hash: hex::encode(block.header.previous_hash),
                 timestamp: block.header.timestamp,
                 transactions: transaction_summaries,
                 transaction_count: block.transactions.len(),
                 difficulty: block.header.difficulty,
                 nonce: block.header.nonce,
-                size_bytes: std::mem::size_of_val(&block),
+                size_bytes: bincode::serialized_size(&block).unwrap_or(0) as usize,
             };
 
             rpc_server.increment_stat("successful_requests").await;
@@ -181,7 +183,7 @@ pub async fn handle_transaction(
     };
 
     // Determine fee: use provided fee or calculate minimum
-    let fee = tx_request.fee.unwrap_or(100); // Default fee of 1 NUMI
+    let fee = tx_request.fee.unwrap_or(rpc_server.blockchain.read().consensus_params().min_transaction_fee);
 
     // Create transaction with proper fee
     let mut transaction = Transaction::new(
@@ -229,7 +231,15 @@ pub async fn handle_transaction(
         let mut tx_clone = transaction.clone();
         tx_clone.signature = None;
         tx_clone.id = [0u8; 32];
-        bincode::serialize(&tx_clone).unwrap_or_default()
+        match bincode::serialize(&tx_clone) {
+            Ok(payload) => payload,
+            Err(e) => {
+                rpc_server.increment_stat("failed_requests").await;
+                return Ok(warp::reply::json(&ApiResponse::<()>::error(
+                    format!("Failed to serialize transaction for signing: {}", e)
+                )));
+            }
+        }
     };
 
     let sig_struct = Dilithium3Signature {
@@ -238,6 +248,23 @@ pub async fn handle_transaction(
         message_hash: blake3_hash(&signing_payload),
         created_at: chrono::Utc::now().timestamp() as u64,
     };
+
+    // Before adding to the mempool, perform a standalone signature verification.
+    match crate::crypto::Dilithium3Keypair::verify(&signing_payload, &sig_struct, &from_pubkey) {
+        Ok(true) => (), // Signature is valid
+        Ok(false) => {
+            rpc_server.increment_stat("failed_requests").await;
+            return Ok(warp::reply::json(&ApiResponse::<()>::error(
+                "Transaction signature verification failed".to_string()
+            )));
+        }
+        Err(e) => {
+            rpc_server.increment_stat("failed_requests").await;
+            return Ok(warp::reply::json(&ApiResponse::<()>::error(
+                format!("Error during signature verification: {}", e)
+            )));
+        }
+    }
 
     transaction.signature = Some(sig_struct);
     // Recalculate transaction ID now that the signature is populated so that the
@@ -275,16 +302,78 @@ pub async fn handle_transaction(
     Ok(warp::reply::json(&ApiResponse::success(response)))
 }
 
-/// Mining endpoint handler - now directs users to Stratum V2
-pub async fn handle_mine(
+pub async fn handle_mine_block(
+    _body: MineBlockRequest,
     rpc_server: Arc<RpcServer>,
 ) -> std::result::Result<warp::reply::Json, Rejection> {
-    // CPU mining is no longer supported - use external Stratum V2 miners
-    rpc_server.increment_stat("failed_requests").await;
-    Ok(warp::reply::json(&ApiResponse::<()>::error(
-        "CPU mining no longer supported. Use external Stratum V2 miners to connect to this node. Stratum server running on port 3333.".to_string()
-    )))
+    let (height, previous_hash, difficulty, transactions, consensus) = {
+        let blockchain = rpc_server.blockchain.read();
+        (
+            blockchain.get_current_height() + 1,
+            blockchain.get_latest_block_hash(),
+            blockchain.get_current_difficulty(),
+            blockchain.get_transactions_for_block(1024 * 1024, 100),
+            blockchain.consensus_params(),
+        )
+    };
+
+    let miner_keypair = rpc_server.miner.read().get_keypair().clone();
+
+    let mut block_to_mine = Block::new(
+        height,
+        previous_hash,
+        transactions,
+        difficulty,
+        miner_keypair.public_key.clone(),
+    );
+
+    let mining_result = timeout(
+        Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || {
+            block_to_mine.mine(&miner_keypair, &consensus).map(|_| block_to_mine)
+        }),
+    )
+    .await;
+
+    match mining_result {
+        Ok(Ok(Ok(mined_block))) => {
+            let hash = mined_block.calculate_hash(None).unwrap_or_default();
+            let nonce = mined_block.header.nonce;
+            let transactions_count = mined_block.transactions.len();
+            
+            let blockchain_write = rpc_server.blockchain.write();
+            match blockchain_write.add_block(mined_block).await {
+                Ok(_) => {
+                    let response = MineBlockResponse {
+                        height,
+                        hash: hex::encode(hash),
+                        transactions: transactions_count,
+                        nonce,
+                    };
+                    rpc_server.increment_stat("successful_requests").await;
+                    Ok(warp::reply::json(&ApiResponse::success(response)))
+                }
+                Err(e) => {
+                    rpc_server.increment_stat("failed_requests").await;
+                    Err(warp::reject::custom(RpcError(format!("Failed to add block to chain: {}", e))))
+                }
+            }
+        }
+        Ok(Ok(Err(e))) => {
+            rpc_server.increment_stat("failed_requests").await;
+            Err(warp::reject::custom(RpcError(format!("Mining failed: {}", e))))
+        }
+        Ok(Err(e)) => {
+            rpc_server.increment_stat("failed_requests").await;
+Err(warp::reject::custom(RpcError(format!("Mining task panicked: {}", e))))
+        }
+        Err(_) => {
+            rpc_server.increment_stat("failed_requests").await;
+            Err(warp::reject::custom(RpcError("Mining timed out after 120 seconds".to_string())))
+        }
+    }
 }
+
 
 /// Statistics endpoint handler (admin only)
 pub async fn handle_stats(
@@ -315,4 +404,4 @@ pub async fn handle_login(
     } else {
         Err(warp::reject::custom(RpcError("Invalid credentials".to_string())))
     }
-} 
+}

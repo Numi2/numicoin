@@ -390,9 +390,10 @@ impl TransactionMempool {
                 return Ok(ValidationResult::TransactionTooLarge)
             }
             Err(BlockchainError::InvalidTransaction(msg)) if msg.contains("fee") => {
-                let _size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(512);
-                let min = 100; // Default minimum fee
-                return Ok(ValidationResult::FeeTooLow { minimum: min, got: tx.fee });
+                let min_fee = self.dynamic_min_fee();
+                if tx.fee < min_fee {
+                    return Ok(ValidationResult::FeeTooLow { minimum: min_fee, got: tx.fee });
+                }
             }
             Err(e) => return Err(e),
             Ok(_) => {}

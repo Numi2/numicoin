@@ -80,7 +80,7 @@ dns-lookup = "2.0"
 hickory-resolver = "0.24" # Updated from trust-dns-resolver
 num-bigint = "0.4.6"
 num-traits = "0.2"
-jsonwebtoken = "8"
+jsonwebtoken = "9.3"
 serde_yaml = "0.9.34"
 snow = "0.9" # Noise protocol for Stratum V2 encryption
 

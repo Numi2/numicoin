@@ -53,6 +53,7 @@ pub enum OutEvent {
 struct NetBehaviour {
     mdns: Mdns,
     gossipsub: Gossipsub,
+    // TODO: Implement peer scoring and reputation management to mitigate Sybil attacks.
 }
 
 #[derive(Debug)]
@@ -215,11 +216,20 @@ impl NetworkManager {
                                 message_id: _,
                                 message,
                             } => {
+                                // Security: Validate message size before deserializing to prevent DoS.
                                 if message.topic == self.topic_blocks.hash() {
+                                    if message.data.len() > 10 * 1024 * 1024 { // 10MB limit
+                                        log::warn!("Received block message larger than 10MB, discarding.");
+                                        continue;
+                                    }
                                     if let Ok(b) = bincode::deserialize::<Block>(&message.data) {
                                         let _ = self._in_tx.unbounded_send(InEvent::Block(b));
                                     }
                                 } else if message.topic == self.topic_txs.hash() {
+                                    if message.data.len() > 1024 * 1024 { // 1MB limit
+                                        log::warn!("Received transaction message larger than 1MB, discarding.");
+                                        continue;
+                                    }
                                     if let Ok(tx) = bincode::deserialize::<Transaction>(&message.data) {
                                         let _ = self._in_tx.unbounded_send(InEvent::Tx(tx));
                                     }

@@ -40,10 +40,10 @@ impl RateLimitEntry {
             
             // Progressive blocking duration
             let block_duration = Duration::from_secs(match self.violations {
-                1 => 60,
-                2 => 300,
-                3 => 900,
-                _ => 3600,
+                1 => config.block_duration_tier1,
+                2 => config.block_duration_tier2,
+                3 => config.block_duration_tier3,
+                _ => config.block_duration_tier4,
             });
             
             self.blocked_until = Some(now + block_duration);

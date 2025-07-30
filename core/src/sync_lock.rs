@@ -5,6 +5,7 @@
 //! starvation caused by `parking_lot`’s non-async aware locks.
 
 use tokio::sync::{RwLock as TokioRwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::ops::{Deref, DerefMut};
 
 /// Tokio-based read-write lock with blocking + async accessors.
 pub struct RwLock<T>(TokioRwLock<T>);
@@ -19,7 +20,7 @@ impl<T> RwLock<T> {
     /// thread we first call `tokio::task::block_in_place` to avoid the runtime
     /// panic that occurs when using *blocking* APIs directly on a worker
     /// thread.
-    pub fn read(&self) -> RwLockReadGuard<'_, T> {
+    pub fn read(&self) -> impl Deref<Target = T> + '_ {
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::task::block_in_place(|| self.0.blocking_read())
         } else {
@@ -28,7 +29,7 @@ impl<T> RwLock<T> {
     }
 
     /// Acquire a blocking write guard.  See `read` for rationale.
-    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+    pub fn write(&self) -> impl DerefMut<Target = T> + '_ {
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::task::block_in_place(|| self.0.blocking_write())
         } else {

@@ -9,6 +9,10 @@ pub struct RateLimitConfig {
     pub requests_per_minute: u32,
     pub burst_size: u32,
     pub cleanup_interval: Duration,
+    pub block_duration_tier1: u64,
+    pub block_duration_tier2: u64,
+    pub block_duration_tier3: u64,
+    pub block_duration_tier4: u64,
 }
 
 impl Default for RateLimitConfig {
@@ -17,6 +21,10 @@ impl Default for RateLimitConfig {
             requests_per_minute: 60,    // 60 requests per minute
             burst_size: 10,             // Allow bursts of 10 requests
             cleanup_interval: Duration::from_secs(300), // Cleanup every 5 minutes
+            block_duration_tier1: 60,   // 1 minute
+            block_duration_tier2: 300,  // 5 minutes
+            block_duration_tier3: 900,  // 15 minutes
+            block_duration_tier4: 3600, // 1 hour
         }
     }
 }
@@ -27,6 +35,10 @@ impl RateLimitConfig {
             requests_per_minute: 100,
             burst_size: 20,
             cleanup_interval: Duration::from_secs(300),
+            block_duration_tier1: 60,
+            block_duration_tier2: 300,
+            block_duration_tier3: 900,
+            block_duration_tier4: 3600,
         }
     }
     
@@ -35,6 +47,10 @@ impl RateLimitConfig {
             requests_per_minute: 1000,  // More lenient for development
             burst_size: 100,
             cleanup_interval: Duration::from_secs(60),
+            block_duration_tier1: 60,
+            block_duration_tier2: 300,
+            block_duration_tier3: 900,
+            block_duration_tier4: 3600,
         }
     }
 }
@@ -50,19 +66,25 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
-        let generate_secret = || {
-            use rand::RngCore;
-            let mut rng = rand::rngs::OsRng;
-            let mut bytes = [0u8; 32];
-            rng.fill_bytes(&mut bytes);
-            hex::encode(bytes)
+        let require_auth = std::env::var("NUMI_REQUIRE_AUTH").map_or(false, |v| v == "true");
+
+        let jwt_secret = if require_auth {
+            std::env::var("NUMI_JWT_SECRET").expect("CRITICAL: NUMI_JWT_SECRET must be set when auth is required")
+        } else {
+            String::new()
+        };
+
+        let admin_api_key = if require_auth {
+            std::env::var("NUMI_ADMIN_KEY").expect("CRITICAL: NUMI_ADMIN_KEY must be set when auth is required")
+        } else {
+            String::new()
         };
 
         Self {
-            jwt_secret: std::env::var("NUMI_JWT_SECRET").unwrap_or_else(|_| generate_secret()),
+            jwt_secret,
             token_expiry: Duration::from_secs(3600),
-            require_auth: true,
-            admin_api_key: std::env::var("NUMI_ADMIN_KEY").unwrap_or_else(|_| generate_secret()),
+            require_auth,
+            admin_api_key,
         }
     }
 }
@@ -124,7 +146,7 @@ impl<T> ApiResponse<T> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub total_blocks: u64,
-    pub total_supply: f64,
+    pub total_supply: u64, // in NANO units
     pub current_difficulty: u32,
     pub best_block_hash: String,
     pub mempool_transactions: usize,
@@ -138,9 +160,8 @@ pub struct StatusResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BalanceResponse {
     pub address: String,
-    pub balance: f64,
+    pub balance: u64, // in NANO units
     pub nonce: u64,
-    pub staked_amount: f64,
     pub transaction_count: u64,
 }
 
@@ -156,6 +177,17 @@ pub struct BlockResponse {
     pub difficulty: u32,
     pub nonce: u64,
     pub size_bytes: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MineBlockRequest {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MineBlockResponse {
+    pub height: u64,
+    pub hash: String,
+    pub transactions: usize,
+    pub nonce: u64,
 }
 
 /// Transaction summary for block responses
@@ -246,4 +278,4 @@ pub fn validation_result_to_status(result: &ValidationResult) -> String {
         }
         ValidationResult::TransactionExpired => "rejected: transaction expired".to_string(),
     }
-} 
+}

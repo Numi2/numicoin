@@ -49,11 +49,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 use crate::RwLock;
 use snow::{Builder, TransportState};
 use crossbeam::channel::Sender;
 
-use crate::mining_service::MiningService;
+use crate::mining_service::{MiningService, JobTemplate};
 use crate::crypto::{blake3_hash, generate_difficulty_target, Dilithium3Signature};
 use crate::error::MiningServiceError;
 
@@ -450,6 +451,7 @@ pub struct MinerConnection {
     pub connected_at: SystemTime,
     pub shares_submitted: u64,
     pub shares_accepted: u64,
+    pub job_tx: mpsc::Sender<ExtendedMiningJob>,
 }
 
 impl MinerConnection {
@@ -485,7 +487,7 @@ pub struct StratumV2Server {
     mining_service: Arc<MiningService>,
     active_connections: Arc<RwLock<HashMap<String, MinerConnection>>>,
     current_job_id: Arc<RwLock<u32>>,
-    noise_keypair: Vec<u8>, // Static key for Noise protocol
+    noise_keypair: snow::Keypair, // Use a persistent keypair object.
     connections_tx: Option<Sender<bool>>, // Channel to signal connection state changes
 }
 
@@ -495,11 +497,11 @@ impl StratumV2Server {
     }
     
     pub fn with_connection_tracking(mining_service: Arc<MiningService>, connections_tx: Option<Sender<bool>>) -> Self {
-        // Generate static key for Noise protocol
+        // Generate or load a persistent static key for the Noise protocol.
+        // For production, this should be loaded from a secure file.
         let noise_keypair = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
             .generate_keypair()
-            .unwrap()
-            .private;
+            .unwrap();
         
         Self {
             mining_service,
@@ -567,9 +569,8 @@ impl StratumV2Server {
     /// Perform Noise XX handshake as responder
     async fn perform_noise_handshake(&self, socket: &mut TcpStream) -> Result<TransportState, Box<dyn std::error::Error + Send + Sync>> {
         let builder = Builder::new(NOISE_PATTERN.parse().unwrap());
-        let static_key = builder.generate_keypair().unwrap().private;
         let mut noise = builder
-            .local_private_key(&static_key)
+            .local_private_key(&self.noise_keypair.private)
             .build_responder()?;
         
         // Stage 1: Receive initiator's message
@@ -598,18 +599,34 @@ impl StratumV2Server {
     async fn handle_sv2_session(&self, mut socket: TcpStream, mut transport: TransportState, peer_addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut connection_established = false;
         let mut miner_id = String::new();
+        let (job_tx, mut job_rx) = mpsc::channel::<ExtendedMiningJob>(16);
 
-        let result = async {
+        let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
             loop {
-                // Read encrypted frame
-                let frame = self.read_encrypted_frame(&mut socket, &mut transport).await?;
-                
-                // Process SV2 message
-                let response = self.process_sv2_message(frame, &peer_addr, &mut connection_established, &mut miner_id).await;
-                
-                // Send encrypted response if needed
-                if let Some(resp_frame) = response {
-                    self.send_encrypted_frame(&mut socket, &mut transport, resp_frame).await?;
+                tokio::select! {
+                    // Read from socket
+                    frame_result = self.read_encrypted_frame(&mut socket, &mut transport) => {
+                        let frame = frame_result?;
+                        
+                        // Process SV2 message
+                        let response = self.process_sv2_message(frame, &peer_addr, &mut connection_established, &mut miner_id, &job_tx).await;
+                        
+                        // Send encrypted response if needed
+                        if let Some(resp_frame) = response {
+                            self.send_encrypted_frame(&mut socket, &mut transport, resp_frame).await?;
+                        }
+                    },
+                    // Receive new job from broadcaster
+                    Some(job) = job_rx.recv() => {
+                        let payload = job.encode();
+                        let frame = Sv2Frame {
+                            extension_type: 0,
+                            msg_type: Sv2MessageType::NewMiningJob as u8,
+                            msg_length: payload.len() as u32,
+                            payload,
+                        };
+                        self.send_encrypted_frame(&mut socket, &mut transport, frame).await?;
+                    }
                 }
             }
         }.await;
@@ -658,7 +675,7 @@ impl StratumV2Server {
     }
     
     /// Process SV2 messages with proper binary protocol
-    async fn process_sv2_message(&self, frame: Sv2Frame, peer_addr: &str, connection_established: &mut bool, miner_id: &mut String) -> Option<Sv2Frame> {
+    async fn process_sv2_message(&self, frame: Sv2Frame, peer_addr: &str, connection_established: &mut bool, miner_id: &mut String, job_tx: &mpsc::Sender<ExtendedMiningJob>) -> Option<Sv2Frame> {
         match frame.msg_type {
             msg_type if msg_type == Sv2MessageType::SetupConnection as u8 => {
                 log::info!("📋 Setup connection from {}", peer_addr);
@@ -722,6 +739,7 @@ impl StratumV2Server {
                     connected_at: SystemTime::now(),
                     shares_submitted: 0,
                     shares_accepted: 0,
+                    job_tx: job_tx.clone(),
                 };
                 
                 *miner_id = user_id.clone();
@@ -809,9 +827,10 @@ impl StratumV2Server {
     }
 
     /// Validate mining share using BLAKE3 target check
-    async fn validate_share_blake3(&self, _job_id: u32, nonce: u64, ntime: u32, version: u32, channel_id: u32) -> Result<bool, MiningServiceError> {
-        // Get current job template
-        let job_template = self.mining_service.get_job()?;
+    async fn validate_share_blake3(&self, job_id: u32, nonce: u64, ntime: u32, version: u32, channel_id: u32) -> Result<bool, MiningServiceError> {
+        // Get the specific job template this share is for.
+        let job_template = self.mining_service.get_job_by_id(job_id).await
+            .ok_or(MiningServiceError::MiningError("Job not found or expired".into()))?;
         
         // Reconstruct block header for validation
         let mut header_data = Vec::new();
@@ -868,7 +887,7 @@ impl StratumV2Server {
     }
 
     /// Broadcast new mining job to all connected miners with SV2 format
-    async fn broadcast_new_job(&self, job_template: crate::mining_service::JobTemplate) {
+    async fn broadcast_new_job(&self, job_template: JobTemplate) {
         let job_id = {
             let mut current_id = self.current_job_id.write();
             *current_id += 1;
@@ -881,10 +900,12 @@ impl StratumV2Server {
             job_id,
             future_job: false,
             version: 1,
-            coinbase_tx_prefix: vec![], // Simplified for now - in production would include proper coinbase
+            // TODO: Construct a real coinbase transaction with miner-specific output.
+            coinbase_tx_prefix: vec![],
             coinbase_tx_suffix: vec![],
-            merkle_path: vec![], // Would include actual merkle path in production
-            prev_hash: [0u8; 32], // Would be filled from blockchain
+            // TODO: Provide the actual merkle path for the coinbase tx.
+            merkle_path: vec![],
+            prev_hash: job_template.block.header.previous_hash,
             ntime: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32,
             nbits: job_template.target.iter().take(4).fold(0u32, |acc, &b| (acc << 8) | b as u32),
             target: job_template.target,
@@ -898,44 +919,33 @@ impl StratumV2Server {
         if connection_count > 0 {
             log::info!("📡 Broadcasting SV2 job {} to {} miners", job_id, connection_count);
             
-            // In a real implementation, you'd send encrypted frames to each connection's socket
-            // This requires storing socket handles in the connection state
-            for (user_id, _connection) in connections.iter() {
-                log::debug!("📤 Sending SV2 job {} to miner {}", job_id, user_id);
+            for (user_id, connection) in connections.iter() {
+                log::debug!("📤 Sending SV2 job {} to miner {}", user_id, job_id);
                 
                 // Create frame for this specific connection
                 let mut connection_job = mining_job.clone();
-                connection_job.channel_id = _connection.channel_id;
+                connection_job.channel_id = connection.channel_id;
                 
-                let payload = connection_job.encode();
-                let _frame = Sv2Frame {
-                    extension_type: 0,
-                    msg_type: Sv2MessageType::NewMiningJob as u8,
-                    msg_length: payload.len() as u32,
-                    payload,
-                };
-                
-                // Would send encrypted frame here: send_encrypted_frame(&mut socket, &mut transport, frame)
+                if let Err(e) = connection.job_tx.try_send(connection_job) {
+                    log::warn!("Failed to send job to miner {}: {}. Channel might be full or closed.", user_id, e);
+                }
             }
         }
     }
 
     /// Sign job template with mining service's Dilithium3 key
-    fn sign_job_template(&self, job_template: &crate::mining_service::JobTemplate) -> Result<Dilithium3Signature, MiningServiceError> {
+    fn sign_job_template(&self, job_template: &JobTemplate) -> Result<Dilithium3Signature, MiningServiceError> {
         // Create message to sign (job template without signature)
         let mut message = Vec::new();
         message.extend_from_slice(&job_template.height.to_le_bytes());
         message.extend_from_slice(&job_template.header_blob);
         message.extend_from_slice(&job_template.target);
         
-        // Sign with the mining service's keypair (this would use the node's signing key)
-        // For now, we create a mock signature that miners can skip if they don't support Dilithium3
-        Ok(Dilithium3Signature {
-            signature: vec![0u8; 3293], // Dilithium3 signature size - in production would be actual signature
-            public_key: vec![0u8; 1952], // Dilithium3 public key size - in production would be actual public key
-            message_hash: blake3_hash(&message),
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        })
+        let miner_arc = self.mining_service.get_miner();
+        let miner_lock = miner_arc.read();
+        let keypair = miner_lock.get_keypair();
+        keypair.sign(&message)
+            .map_err(|e| MiningServiceError::MiningError(format!("Failed to sign job template: {}", e)))
     }
 
     /// Generate unique channel ID
@@ -1059,8 +1069,11 @@ impl Clone for StratumV2Server {
             mining_service: self.mining_service.clone(),
             active_connections: self.active_connections.clone(),
             current_job_id: self.current_job_id.clone(),
-            noise_keypair: self.noise_keypair.clone(), // Clone the static key
-            connections_tx: self.connections_tx.clone(), // Clone the channel
+            noise_keypair: snow::Keypair {
+                public: self.noise_keypair.public.clone(),
+                private: self.noise_keypair.private.clone(),
+            },
+            connections_tx: self.connections_tx.clone(),
         }
     }
 }

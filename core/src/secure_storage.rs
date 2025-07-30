@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -236,11 +238,11 @@ impl SecureKeyStore {
         self.password_salt = password_salt;
         
         log::info!("🔐 Secure key store initialized");
-        
+
         if self.auto_save {
-            self.save_to_disk()?;
+            self.save_to_disk(password)?;
         }
-        
+
         Ok(())
     }
     
@@ -250,83 +252,50 @@ impl SecureKeyStore {
             return Err(BlockchainError::StorageError(
                 "Key store file does not exist".to_string()));
         }
-        
+
         // Read encrypted data
         let encrypted_data = fs::read(&self.storage_path)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to read key store: {e}")))?;
-        
-        if encrypted_data.len() < 64 {
+
+        if encrypted_data.len() < 44 { // 32 salt + 12 nonce
             return Err(BlockchainError::StorageError(
                 "Invalid key store file format".to_string()));
         }
-        
-        // Extract components: encryption_salt (32) | nonce (12) | password_salt (kdf_config.salt_length) | ciphertext
-        let enc_salt_end = 32;
-        let nonce_end = enc_salt_end + 12;
-        let psalt_end = nonce_end + self.kdf_config.salt_length;
 
-        if encrypted_data.len() < psalt_end + 16 { // must have at least tag bytes
-            return Err(BlockchainError::StorageError("Invalid key store file format".to_string()));
-        }
-        let salt = &encrypted_data[0..enc_salt_end];
-        let nonce = &encrypted_data[enc_salt_end..nonce_end];
-        let file_password_salt = &encrypted_data[nonce_end..psalt_end];
-        let encrypted_content = &encrypted_data[psalt_end..];
-        // Temporarily set self.password_salt for key derivation
-        self.password_salt = file_password_salt.to_vec();
-        
-        // Derive the temporary hash using password salt read from file header
-        let seed = blake3_hash(password.as_bytes());
-        let temp_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
-        
-        let derived_password = format!("keystore_{}", hex::encode(temp_hash));
-        
+        // Extract components: encryption_salt (32) | nonce (12) | ciphertext
+        let (salt, rest) = encrypted_data.split_at(32);
+        let (nonce, encrypted_content) = rest.split_at(12);
+
         // Derive key from password
-        let key = self.derive_key_from_password(&derived_password, salt)?;
-        
+        let key = self.derive_key_from_password(password, salt)?;
+
         // Decrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
-        
+
         let nonce_slice = Nonce::from_slice(nonce);
         let decrypted_data = cipher.decrypt(nonce_slice, encrypted_content)
             .map_err(|_| BlockchainError::CryptographyError("Decryption failed - invalid password or corrupted data".to_string()))?;
-        
+
         // Deserialize key store data
         let store_data: StorageFormat = bincode::deserialize(&decrypted_data)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to deserialize key store: {e}")))?;
-        
+
         // Load data
         self.keys = store_data.keys;
         self.password_hash = Some(store_data.password_hash);
-        // use value read earlier; but if store_data has salt field populated (new version) ensure consistency
-        if !store_data.password_salt.is_empty() {
-            self.password_salt = store_data.password_salt;
-        }
+        self.password_salt = store_data.password_salt;
         self.kdf_config = store_data.kdf_config;
-        
-        // Migrate legacy keystores without salt
-        if self.password_salt.is_empty() {
-            let new_salt = generate_random_bytes(self.kdf_config.salt_length)?;
-            let seed = blake3_hash(password.as_bytes());
-            let new_hash = derive_key(&seed, &String::from_utf8_lossy(&new_salt), b"keystore-auth")?;
-            self.password_hash = Some(new_hash);
-            self.password_salt = new_salt.clone();
-            log::warn!("🔄 Migrated keystore to use random master password salt");
-            if self.auto_save {
-                self.save_to_disk()?;
-            }
-        }
-        
+
         log::info!("🔓 Secure key store loaded with {} keys", self.keys.len());
         Ok(())
     }
     
     /// Save key store to disk with encryption
-    pub fn save_to_disk(&self) -> Result<()> {
+    pub fn save_to_disk(&self, password: &str) -> Result<()> {
         let password_hash = self.password_hash
             .ok_or_else(|| BlockchainError::CryptographyError("Key store not initialized".to_string()))?;
-        
+
         // Create storage data
         let store_data = StorageFormat {
             version: 2,
@@ -336,44 +305,45 @@ impl SecureKeyStore {
             kdf_config: self.kdf_config.clone(),
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         };
-        
+
         // Serialize data
         let serialized_data = bincode::serialize(&store_data)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to serialize key store: {e}")))?;
-        
+
         // Generate encryption parameters
         let salt = generate_random_bytes(32)?;
         let nonce = generate_random_bytes(12)?;
-        
-        // For persistence, we need to use a consistent encryption method
-        // Since we don't have the original password here, we'll use a derived key from the password hash
-        // This is a simplified approach - in production, you'd want to store the password securely
-        let derived_password = format!("keystore_{}", hex::encode(password_hash));
-        let key = self.derive_key_from_password(&derived_password, &salt)?;
-        
+
+        // Derive key from the provided password and the new salt
+        let key = self.derive_key_from_password(password, &salt)?;
+
         // Encrypt data
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| BlockchainError::CryptographyError(format!("Cipher creation failed: {e}")))?;
-        
+
         let nonce_slice = Nonce::from_slice(&nonce);
         let encrypted_data = cipher.encrypt(nonce_slice, serialized_data.as_ref())
             .map_err(|e| BlockchainError::CryptographyError(format!("Encryption failed: {e}")))?;
-        
-        // Combine components: encryption_salt(32) + nonce(12) + password_salt(kdf_config.salt_length) + encrypted_data
+
+        // Combine components: encryption_salt(32) + nonce(12) + encrypted_data
         let mut file_data = Vec::new();
         file_data.extend_from_slice(&salt);
         file_data.extend_from_slice(&nonce);
-        file_data.extend_from_slice(&self.password_salt);
         file_data.extend_from_slice(&encrypted_data);
-        
+
         // Write to temporary file first, then move (atomic operation)
         let temp_path = self.storage_path.with_extension("tmp");
         fs::write(&temp_path, &file_data)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to write temp file: {e}")))?;
-        
+
+        // Set strict file permissions (owner read/write only)
+        #[cfg(unix)]
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to set permissions: {e}")))?;
+
         fs::rename(&temp_path, &self.storage_path)
             .map_err(|e| BlockchainError::StorageError(format!("Failed to move temp file: {e}")))?;
-        
+
         log::debug!("💾 Key store saved to disk with {} keys", self.keys.len());
         Ok(())
     }
@@ -428,11 +398,11 @@ impl SecureKeyStore {
         };
         
         self.keys.insert(id.to_string(), entry);
-        
+
         if self.auto_save {
-            self.save_to_disk()?;
+            self.save_to_disk(password)?;
         }
-        
+
         log::info!("🔑 Keypair '{id}' stored securely");
         Ok(())
     }
@@ -483,7 +453,7 @@ impl SecureKeyStore {
             .map_err(|e| BlockchainError::CryptographyError(format!("Failed to deserialize keypair: {e}")))?;
         
         if self.auto_save {
-            self.save_to_disk()?;
+            self.save_to_disk(password)?;
         }
         
         log::debug!("🔓 Keypair '{id}' retrieved successfully");
@@ -502,10 +472,6 @@ impl SecureKeyStore {
         self.keys.remove(id)
             .ok_or_else(|| BlockchainError::StorageError(format!("Key '{id}' not found")))?;
         
-        if self.auto_save {
-            self.save_to_disk()?;
-        }
-        
         log::info!("🗑️ Key '{id}' removed from secure storage");
         Ok(())
     }
@@ -518,10 +484,6 @@ impl SecureKeyStore {
         entry.expires_at = expiry.duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
-        if self.auto_save {
-            self.save_to_disk()?;
-        }
         
         Ok(())
     }
@@ -537,10 +499,6 @@ impl SecureKeyStore {
         for id in expired_keys {
             self.keys.remove(&id);
             log::debug!("🧹 Removed expired key: {id}");
-        }
-        
-        if count > 0 && self.auto_save {
-            self.save_to_disk()?;
         }
         
         Ok(count)
@@ -593,7 +551,7 @@ impl SecureKeyStore {
             last_backup: self.last_backup,
         };
         
-        backup_store.save_to_disk()?;
+        backup_store.save_to_disk(password)?;
         
         log::info!("💾 Key store backup created: {:?}", backup_path.as_ref());
         Ok(())
@@ -664,11 +622,10 @@ impl SecureKeyStore {
         let stored_hash = self.password_hash
             .ok_or_else(|| BlockchainError::CryptographyError("Key store not initialized".to_string()))?;
         
-        // Derive a fixed-length seed from the password using stored salt
-        let seed = blake3_hash(password.as_bytes());
-        let test_hash = derive_key(&seed, &String::from_utf8_lossy(&self.password_salt), b"keystore-auth")?;
+        // Use Argon2 for master password verification, consistent with key derivation.
+        let key = self.derive_key_from_password(password, &self.password_salt)?;
+        let test_hash = blake3_hash(&key);
         
-        // Note: This is simplified - proper implementation would use constant-time comparison
         if !crate::crypto::constant_time_eq(&test_hash, &stored_hash) {
             return Err(BlockchainError::CryptographyError("Invalid password".to_string()));
         }

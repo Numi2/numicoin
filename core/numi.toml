@@ -7,7 +7,7 @@ connection_timeout_secs = 10
 bootstrap_nodes = [
     "/ip4/127.0.0.1/tcp/8334"
 ]
-enable_upnp = false
+enable_upnp = true
 enable_mdns = true
 peer_discovery_interval_secs = 30
 max_message_size = 10485760
@@ -19,13 +19,13 @@ enabled = true
 stratum_bind_address = "0.0.0.0"
 stratum_bind_port = 3333
 wallet_path = "miner-wallet.json"
-thread_count = 8
+thread_count = 2
 nonce_chunk_size = 10000
 stats_update_interval_secs = 5
 enable_cpu_affinity = false
-thermal_throttle_temp = 70.0
+thermal_throttle_temp = 50.0
 power_limit_watts = 50.0
-target_block_time_secs = 10
+target_block_time_secs = 1337
 difficulty_adjustment_interval = 20
 
 [mining.argon2_config]
@@ -74,8 +74,8 @@ max_database_size_mb = 1024
 cache_size_mb = 128
 enable_compression = false
 enable_encryption = false
-auto_backup = false
-backup_interval_hours = 24
+auto_backup = true
+backup_interval_hours = 1
 retention_days = 30
 sync_mode = "Fast"
 
@@ -98,5 +98,5 @@ initial_mining_reward = 8888
 # - Max fee: 100 NANO (0.1 NUMI)
 
 [consensus.target_block_time]
-secs = 1
-nanos = 500000000
+secs = 1337
+nanos = 0

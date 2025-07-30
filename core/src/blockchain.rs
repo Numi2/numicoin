@@ -12,18 +12,19 @@ use bs58;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use crate::RwLock;
-use ripemd::{Digest, Ripemd160};
+
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use std::io::Write;
 use std::collections::BTreeMap;
 use bincode;
+use tokio::fs;
 
 use crate::{
     block::{Block, BlockHash, BlockHeader},
     config::ConsensusConfig,
-    crypto::{blake3_hash, generate_difficulty_target, Dilithium3Keypair},
-    error::BlockchainError,
+    crypto::{blake3_hash, Dilithium3Keypair},
+    error::{BlockchainError, InvalidBlockError},
     mempool::{MempoolStats, TransactionMempool, ValidationResult},
     miner::WalletManager,
     storage::BlockchainStorage,
@@ -32,7 +33,7 @@ use crate::{
 };
 
 /// Compare two little-endian 256-bit integers.  Return `true` if `hash` < `target`.
-fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+pub fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     for (h, t) in hash.iter().zip(target.iter()).rev() {
         match h.cmp(t) {
             std::cmp::Ordering::Less => return true,
@@ -134,7 +135,7 @@ impl NumiBlockchain {
             {
                 let mut st = chain_guard.state.write();
                 st.total_blocks = 1; // Genesis is block 1
-                st.best_block_hash = genesis.calculate_hash()?;
+                st.best_block_hash = genesis.calculate_hash(None)?;
                 st.cumulative_difficulty = genesis.header.difficulty as u128;
                 
                 // Add genesis mining reward to total supply
@@ -153,50 +154,90 @@ impl NumiBlockchain {
 
         Arc::try_unwrap(chain_arc)
             .map(|rw| rw.into_inner())
-            .map_err(|_| BlockchainError::ConsensusError("Failed to unwrap Arc".into()))
+            .map_err(|_| BlockchainError::ConsensusError("Failed to unwrap Arc during blockchain initialization".into()))
     }
 
-    pub fn new() -> Result<Self> {
+    pub fn new(consensus: ConsensusConfig) -> Result<Self> {
         let kp = WalletManager::load_or_create_miner_wallet(&std::path::PathBuf::from("./core-data"))?;
-        Self::build(kp, ConsensusConfig::default(), None)
+        Self::build(kp, consensus, None)
     }
 
-    pub fn new_with_keypair(kp: Dilithium3Keypair) -> Result<Self> {
-        Self::build(kp, ConsensusConfig::default(), None)
+    pub fn new_with_keypair(kp: Dilithium3Keypair, consensus: ConsensusConfig) -> Result<Self> {
+        Self::build(kp, consensus, None)
     }
 
-    pub fn new_with_config(cfg: Option<ConsensusConfig>, kp: Option<Dilithium3Keypair>, storage: Option<Arc<BlockchainStorage>>) -> Result<Self> {
+    pub fn new_with_config(cfg: ConsensusConfig, kp: Option<Dilithium3Keypair>, storage: Option<Arc<BlockchainStorage>>) -> Result<Self> {
         let keypair = kp.unwrap_or(WalletManager::load_or_create_miner_wallet(&std::path::PathBuf::from("./core-data"))?);
-        Self::build(keypair, cfg.unwrap_or_default(), storage)
+        Self::build(keypair, cfg, storage)
     }
 
-    pub async fn load_from_storage(storage: &Arc<BlockchainStorage>) -> Result<Self> {
+    pub async fn load_from_storage(storage: &Arc<BlockchainStorage>, consensus: ConsensusConfig) -> Result<Self> {
         let dir = storage.blocks_dir();
 
         if !dir.exists() {
-            return Self::new(); // No prior data – start fresh
+            // No prior data – start fresh, ensuring consensus config is passed.
+            return Self::new_with_config(consensus, None, Some(storage.clone()));
         }
 
         // Build a map height → path so we replay in numeric order
         let mut file_map: BTreeMap<u64, std::path::PathBuf> = BTreeMap::new();
-        for entry_res in std::fs::read_dir(&dir)? {
-            let entry = entry_res?;
-            if !entry.file_type()?.is_file() { continue; }
+        let mut read_dir = fs::read_dir(&dir).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            if !entry.file_type().await?.is_file() { continue; }
             let fname = entry.file_name().into_string().unwrap_or_default();
             if !fname.starts_with("block_") { continue; }
             if let Ok(height) = fname.trim_start_matches("block_").trim_end_matches(".bin").parse::<u64>() {
                 file_map.insert(height, entry.path());
             }
         }
+        
+        if file_map.is_empty() || !file_map.contains_key(&0) {
+            // If no blocks or no genesis block, start fresh.
+            return Self::new_with_config(consensus, None, Some(storage.clone()));
+        }
 
-        // Start with a fresh chain (genesis applied)
-        let chain = Self::new_with_config(Some(ConsensusConfig::default()), None, Some(storage.clone()))?;
 
-        for (height, path) in file_map {
-            if height == 0 { continue; }
-            let data = std::fs::read(path)?;
+        // Load genesis block first to correctly initialize the chain state
+        let genesis_path = file_map.remove(&0).unwrap(); // Already checked with contains_key
+        let genesis_data = fs::read(genesis_path).await?;
+        let genesis_block: Block = bincode::deserialize(&genesis_data)
+            .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
+
+        // Manually build the chain with the loaded genesis block
+        let keypair = WalletManager::load_or_create_miner_wallet(&std::path::PathBuf::from("./core-data"))?;
+        let chain = Self::build(keypair, consensus, Some(storage.clone()))?;
+        
+        // This is a bit of a hack. `build` creates its own genesis. We need to replace it.
+        chain.blocks.write().clear();
+        chain.accounts.clear();
+        chain.state.write().total_blocks = 0;
+
+        chain.apply_block(&genesis_block)?;
+        chain.blocks.write().push(genesis_block.clone());
+        
+        {
+            let mut st = chain.state.write();
+            st.total_blocks = 1;
+            st.best_block_hash = genesis_block.calculate_hash(None)?;
+            st.cumulative_difficulty = genesis_block.header.difficulty as u128;
+            if let Some(reward) = genesis_block.transactions.iter().find_map(|tx| {
+                if let TransactionType::MiningReward { amount, .. } = tx.kind { Some(amount) } else { None }
+            }) {
+                st.total_supply = reward;
+            }
+            st.current_difficulty = genesis_block.header.difficulty;
+        }
+
+
+        for (_height, path) in file_map {
+            let data = fs::read(path).await?;
             let block: Block = bincode::deserialize(&data)
                 .map_err(|e| BlockchainError::SerializationError(e.to_string()))?;
+            
+            // Perform a full validation of the block against the current chain state
+            let consensus = &chain.consensus;
+            block.validate(chain.blocks.read().last(), consensus)?;
+
             chain.add_block(block).await?;
         }
         Ok(chain)
@@ -236,7 +277,7 @@ impl NumiBlockchain {
         self.blocks
             .read()
             .iter()
-            .find(|b| b.calculate_hash().ok().map_or(false, |h| &h == hash))
+            .find(|b| b.calculate_hash(None).ok().map_or(false, |h| &h == hash))
             .cloned()
     }
     /// Return up to `count` headers starting after `start_hash` (empty = genesis)
@@ -251,7 +292,7 @@ impl NumiBlockchain {
             arr.copy_from_slice(&start_hash);
             blocks
                 .iter()
-                .position(|b| b.calculate_hash().ok().filter(|h| h == &arr).is_some())
+                .position(|b| b.calculate_hash(None).ok().filter(|h| h == &arr).is_some())
                 .unwrap_or(blocks.len())
         } else {
             blocks.len()
@@ -263,16 +304,16 @@ impl NumiBlockchain {
     pub fn get_balance_by_pubkey(&self, pk: &[u8]) -> u64 {
         self.accounts.get(pk).map(|a| a.balance).unwrap_or(0)
     }
-    pub fn get_balance(&self, address: &str) -> u64 {
+    pub fn get_account_state_by_address(&self, address: &str) -> Option<AccountState> {
         if !Self::is_valid_address(address) {
-            return 0;
+            return None;
         }
         for entry in self.accounts.iter() {
             if self.derive_address(entry.key()) == address {
-                return entry.value().balance;
+                return Some(entry.value().clone());
             }
         }
-        0
+        None
     }
     pub fn get_address_from_public_key(&self, pk: &[u8]) -> String {
         self.derive_address(pk)
@@ -295,12 +336,24 @@ impl NumiBlockchain {
         Arc::clone(&self.mempool)
     }
 
+    pub fn consensus_params(&self) -> ConsensusConfig {
+        self.consensus.clone()
+    }
+
     pub async fn add_transaction(&self, tx: Transaction) -> Result<ValidationResult> {
         self.mempool.add_transaction(tx).await
     }
 
     /* ----------------------- block handling ------------------------- */
     pub async fn add_block(&self, block: Block) -> Result<bool> {
+        if self.get_block_by_hash(&block.calculate_hash(Some(&self.consensus))?).is_some() {
+            return Ok(false);
+        }
+
+        if block.header.previous_hash != self.get_latest_block_hash() {
+            return Err(InvalidBlockError::StaleChain.into());
+        }
+
         self.apply_block(&block)?;
         self.blocks.write().push(block.clone());
 
@@ -308,7 +361,7 @@ impl NumiBlockchain {
         {
             let mut st = self.state.write();
             st.total_blocks += 1;
-            st.best_block_hash = block.calculate_hash()?;
+            st.best_block_hash = block.calculate_hash(None)?;
             st.cumulative_difficulty += block.header.difficulty as u128;
             // mint
             if let Some(reward) = block.transactions.iter().find_map(|tx| {
@@ -337,14 +390,12 @@ impl NumiBlockchain {
         // Persistence: write block file & periodic checkpoint (async)
         // ------------------------------------------------------------------
         if let Some(storage) = self.storage.clone() {
+            let dir = storage.blocks_dir();
             let block_clone = block.clone();
-            let consensus = self.consensus.clone();
-            let chain_state = self.get_chain_state();
             tokio::task::spawn_blocking(move || {
                 // Write block file crash-safely
-                let dir = storage.blocks_dir();
                 if let Err(e) = std::fs::create_dir_all(&dir) {
-                    log::error!("storage mkdir failed: {e}");
+                    log::error!("CRITICAL: Failed to create blocks directory '{}': {}", dir.display(), e);
                     return;
                 }
                 let path = dir.join(format!("block_{:08}.bin", block_clone.header.height));
@@ -359,32 +410,39 @@ impl NumiBlockchain {
                                     Err(pe) => Err(pe.error),
                                 }
                             })() {
-                                log::error!("persist block file failed: {e}");
+                                log::error!("CRITICAL: Failed to persist block file '{}': {}", path.display(), e);
                             }
                         }
-                        Err(e) => log::error!("serialize block failed: {e}"),
-                    }
-                }
-
-                // Checkpoint logic
-                if block_clone.header.height % consensus.checkpoint_interval == 0 {
-                    let checkpoint = SecurityCheckpoint {
-                        block_height: block_clone.header.height,
-                        block_hash: match block_clone.calculate_hash() { Ok(h) => h, Err(_) => [0u8;32] },
-                        cumulative_difficulty: chain_state.cumulative_difficulty,
-                        timestamp: Utc::now(),
-                        total_supply: chain_state.total_supply,
-                        state_root: [0u8;32],
-                    };
-                    let mut tx = storage.transaction();
-                    if let Err(e) = (|| {
-                        tx.save_checkpoint(&checkpoint)?;
-                        tx.commit()
-                    })() {
-                        log::error!("failed to save checkpoint: {e}");
+                        Err(e) => log::error!("CRITICAL: Failed to serialize block {}: {}", block_clone.header.height, e),
                     }
                 }
             });
+        }
+
+        // Checkpoint logic
+        if block.header.height % self.consensus.checkpoint_interval == 0 {
+            if let Some(storage) = self.storage.clone() {
+                let chain_state = self.get_chain_state();
+                let state_root = self.calculate_state_root();
+                let block_clone = block.clone();
+
+                let checkpoint = SecurityCheckpoint {
+                    block_height: block_clone.header.height,
+                    block_hash: block_clone.calculate_hash(None).unwrap_or_default(),
+                    cumulative_difficulty: chain_state.cumulative_difficulty,
+                    timestamp: Utc::now(),
+                    total_supply: chain_state.total_supply,
+                    state_root,
+                };
+
+                let result = storage.transaction(|tx| {
+                    tx.save_checkpoint(&checkpoint)
+                });
+
+                if let Err(e) = result {
+                    log::error!("Failed to save checkpoint: {}", e);
+                }
+            }
         }
         Ok(true)
     }
@@ -436,7 +494,7 @@ impl NumiBlockchain {
             self.miner_keypair.public_key.clone(),
             TransactionType::MiningReward {
                 block_height: 0,
-                amount: 1_000, // 10 NUMI (2-decimals)
+                amount: self.consensus.initial_mining_reward,
             },
             0,
         );
@@ -453,27 +511,8 @@ impl NumiBlockchain {
     }
 
     fn apply_block(&self, block: &Block) -> Result<()> {
-        if !block.is_genesis() {
-            // linkage
-            if block.header.height != self.get_current_height() + 1 {
-                return Err(BlockchainError::InvalidBlock("Incorrect height".into()));
-            }
-            if block.header.previous_hash != self.get_latest_block_hash() {
-                return Err(BlockchainError::InvalidBlock("Incorrect previous hash".into()));
-            }
-
-            // -------- PoW: BLAKE3 --------
-            let header_bytes = block.serialize_header_for_hashing()?; // includes nonce
-            let hash_arr: [u8; 32] = blake3_hash(&header_bytes).try_into().unwrap();
-
-            let target = generate_difficulty_target(block.header.difficulty);
-            if !meets_target(&hash_arr, &target) {
-                return Err(BlockchainError::InvalidBlock("Invalid PoW".into()));
-            }
-        }
-
         // structural validation
-        block.validate(self.blocks.read().last())?;
+        block.validate(self.blocks.read().last(), &self.consensus)?;
 
         // state transition
         for tx in &block.transactions {
@@ -497,6 +536,9 @@ impl NumiBlockchain {
                         // No net amount change, nothing else to do.
                     } else {
                         // 1. Debit sender
+                        // NOTE: This logic relies on DashMap's shard locking. Operations
+                        // on different keys that hash to the same shard will block.
+                        // For high-contention accounts, this could become a bottleneck.
                         {
                             let mut sender = self.accounts.entry(tx.from.clone()).or_default();
                             if sender.balance < amount + tx.fee {
@@ -524,13 +566,9 @@ impl NumiBlockchain {
 
     fn derive_address(&self, pk: &[u8]) -> String {
         let h1 = blake3_hash(pk);
-        let mut h2 = Ripemd160::new();
-        h2.update(h1);
-        let h3 = h2.finalize();
-
         let mut payload = vec![0u8; 21];
-        payload[0] = 0x00;              // version byte
-        payload[1..].copy_from_slice(&h3);
+        payload[0] = 0x00; // version byte
+        payload[1..].copy_from_slice(&h1[..20]); // Using BLAKE3-160 for the address
 
         let checksum = &blake3_hash(&blake3_hash(&payload))[..4];
         let mut full = vec![0u8; 25];
@@ -548,32 +586,40 @@ impl NumiBlockchain {
             checksum == hash
         } else { false }
     }
-}
 
-/* --------------------------------------------------------------------------
-   LWMA difficulty adjustment (simple, length-60 window)
-   ------------------------------------------------------------------------*/
-   fn lwma_next_difficulty(blocks: &[Block], target_time: u64, window: usize) -> u32 {
-    if blocks.len() < window + 1 { return 1; }
-    let mut sum_inverse   = 0.0;
-    let mut weighted_time = 0.0;
+    fn calculate_state_root(&self) -> [u8; 32] {
+        if self.accounts.is_empty() {
+            return [0u8; 32];
+        }
 
-    for i in 0..window {
-        let b_i    = &blocks[blocks.len() - 1 - i];
-        let b_prev = &blocks[blocks.len() - 2 - i];
-        let t_i    = b_i.header.timestamp.timestamp();
-        let t_prev = b_prev.header.timestamp.timestamp();
-        let solvetime = (t_i - t_prev).max(1) as f64;
+        let mut hashes: Vec<[u8; 32]> = self.accounts.iter()
+            .map(|entry| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(entry.key());
+                if let Ok(value_bytes) = bincode::serialize(entry.value()) {
+                    hasher.update(&value_bytes);
+                }
+                *hasher.finalize().as_bytes()
+            })
+            .collect();
 
-        let weight = (window - i) as f64;
-        weighted_time += solvetime * weight;
-        sum_inverse   += weight;
+        while hashes.len() > 1 {
+            if hashes.len() % 2 != 0 {
+                hashes.push(hashes.last().unwrap().clone());
+            }
+
+            hashes = hashes.chunks(2)
+                .map(|chunk| {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(&chunk[0]);
+                    hasher.update(&chunk[1]);
+                    *hasher.finalize().as_bytes()
+                })
+                .collect();
+        }
+
+        hashes.get(0).cloned().unwrap_or([0u8; 32])
     }
-
-    let avg        = weighted_time / sum_inverse;
-    let last_diff  = blocks.last().unwrap().header.difficulty as f64;
-    let new_diff   = (last_diff * target_time as f64 / avg).max(1.0);
-    new_diff.round() as u32
 }
 
 /* --------------------------------------------------------------------------
@@ -634,7 +680,7 @@ fn next_difficulty(blocks: &[Block], consensus: &ConsensusConfig) -> u32 {
     // ---- anti-oscillation clamp -----------------------------------------
     let clamp_factor = 4.0; // can be made configurable
     let min_diff = (last_diff / clamp_factor).max(1.0);
-    let max_diff = last_diff * clamp_factor;
+    let max_diff = (last_diff * clamp_factor).min(std::u32::MAX as f64);
     new_diff = new_diff.clamp(min_diff, max_diff);
 
     new_diff.round().max(1.0) as u32

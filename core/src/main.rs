@@ -42,9 +42,9 @@ enum Commands {
     /// Start the blockchain node with optional Stratum V2 mining server
     Node {
         #[arg(long, help = "Enable Stratum V2 mining server")]
+        stratum: bool,
+        #[arg(long, help = "Enable local CPU mining")]
         mining: bool,
-        #[arg(long, help = "Enable local CPU mining as fallback")]
-        mine: bool,
         #[arg(long, help = "Number of CPU threads for local mining")]
         threads: Option<usize>,
     },
@@ -90,34 +90,6 @@ enum WalletCommands {
 }
 
 // CLI subcommand handlers
-async fn handle_node(mining: bool, mine: bool, threads: Option<usize>, mut config: Config) -> Result<()> {
-    config.mining.enabled = mining;
-    config.mining.local_mining_enabled = mine;
-    if let Some(t) = threads {
-        config.mining.cpu_threads = t;
-    }
-    
-    if mining {
-        println!("🚀 Starting NumiCoin node with Stratum V2 mining server");
-        println!("   Miners can connect to: {}:{}", 
-            config.mining.stratum_bind_address, 
-            config.mining.stratum_bind_port
-        );
-    } else {
-        println!("🚀 Starting NumiCoin node (mining server disabled)");
-    }
-    
-    if mine {
-        println!("🖥️  Local CPU mining enabled ({} threads)", config.mining.cpu_threads);
-    }
-    
-    start_node(config).await
-}
-
-async fn handle_status(config: Config) -> Result<()> {
-    show_status(config).await
-}
-
 async fn handle_wallet_create(output: PathBuf) -> Result<()> {
     println!("🔑 Creating new wallet...");
     let keypair = Dilithium3Keypair::new()?;
@@ -211,8 +183,8 @@ async fn main() -> Result<()> {
     }
     
     match cli.command {
-        Commands::Node { mining, mine, threads } => handle_node(mining, mine, threads, config).await?,
-        Commands::Status => handle_status(config).await?,
+        Commands::Node { stratum, mining, threads } => start_node(stratum, mining, threads, config).await?,
+        Commands::Status => show_status(config).await?,
         Commands::Wallet { wallet_cmd } => {
             match wallet_cmd {
                 WalletCommands::Create { output } => handle_wallet_create(output).await?,
@@ -231,21 +203,43 @@ async fn load_config(cli: &Cli) -> Result<Config> {
         Ok(Config::load_from_file(&cli.config)
             .map_err(|e| BlockchainError::IoError(e.to_string()))?)
     } else {
-        log::info!("Creating default configuration at {}", cli.config.display());
-        let config = Config::production();
+        // In a production environment, we should fail if the config is missing.
+        // For this audit, we'll retain the dev-friendly auto-creation.
+        log::warn!("Configuration file not found at {}. Creating a default development configuration.", cli.config.display());
+        let config = Config::development();
         config.save_to_file(&cli.config)
             .map_err(|e| BlockchainError::IoError(e.to_string()))?;
         Ok(config)
     }
 }
 
-async fn start_node(config: Config) -> Result<()> {
+async fn start_node(stratum: bool, mining: bool, threads: Option<usize>, mut config: Config) -> Result<()> {
+    config.mining.enabled = stratum;
+    config.mining.local_mining_enabled = mining;
+    if let Some(t) = threads {
+        config.mining.cpu_threads = t;
+    }
+    
+    if stratum {
+        println!("🚀 Starting NumiCoin node with Stratum V2 mining server");
+        println!("   Miners can connect to: {}:{}", 
+            config.mining.stratum_bind_address, 
+            config.mining.stratum_bind_port
+        );
+    } else {
+        println!("🚀 Starting NumiCoin node (mining server disabled)");
+    }
+    
+    if mining {
+        println!("🖥️  Local CPU mining enabled ({} threads)", config.mining.cpu_threads);
+    }
+
     log::info!("Starting NumiCoin node...");
     
     // Initialize storage and load blockchain
     let storage = Arc::new(BlockchainStorage::new(&config.storage.data_directory)?);
     let blockchain = Arc::new(RwLock::new(
-        NumiBlockchain::load_from_storage(&storage).await?
+        NumiBlockchain::load_from_storage(&storage, config.consensus.clone()).await?
     ));
     
     // Initialize network manager
@@ -258,7 +252,7 @@ async fn start_node(config: Config) -> Result<()> {
     });
     
     // Initialize miner
-    let miner = Arc::new(RwLock::new(Miner::new()?));
+    let miner = Arc::new(RwLock::new(Miner::new(&config)?));
     
     // Create channel for Stratum connection tracking
     let (stratum_signal_tx, stratum_signal_rx) = bounded::<bool>(1);
@@ -282,6 +276,10 @@ async fn start_node(config: Config) -> Result<()> {
         requests_per_minute: config.rpc.rate_limit_requests_per_minute,
         burst_size: config.rpc.rate_limit_burst_size,
         cleanup_interval: std::time::Duration::from_secs(300),
+        block_duration_tier1: 60,
+        block_duration_tier2: 300,
+        block_duration_tier3: 900,
+        block_duration_tier4: 3600,
     };
     
     // Create auth config from security config
@@ -355,9 +353,3 @@ async fn start_node(config: Config) -> Result<()> {
     
     Ok(())
 }
-
-
-
-
-
-

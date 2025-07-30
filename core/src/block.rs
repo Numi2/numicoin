@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc, Duration};
-use crate::crypto::{Hash, blake3_hash, Dilithium3Signature};
+use crate::crypto::{Hash, blake3_hash, blake3_hash_block, Dilithium3Signature, generate_difficulty_target, argon2d_pow};
+use crate::config::ConsensusConfig;
 use crate::transaction::Transaction;
-use crate::error::BlockchainError;
+use crate::error::{BlockchainError, InvalidBlockError};
 use crate::Result;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub type BlockHash = [u8; 32];
 
@@ -54,13 +58,19 @@ impl Block {
         }
     }
     
-    pub fn calculate_hash(&self) -> Result<BlockHash> {
+    pub fn calculate_hash(&self, consensus: Option<&ConsensusConfig>) -> Result<BlockHash> {
         let header_data = self.serialize_header_for_hashing()?;
-        Ok(crate::crypto::blake3_hash_block(&header_data))
+        if let Some(cfg) = consensus {
+            let salt = &blake3_hash(&header_data)[..16];
+            let pow_hash = argon2d_pow(&header_data, salt, &cfg.argon2_config)?;
+            Ok(blake3_hash_block(&pow_hash))
+        } else {
+            Ok(blake3_hash_block(&header_data))
+        }
     }
     
     pub fn get_hash_hex(&self) -> Result<String> {
-        Ok(crate::crypto::blake3_hash_hex(&self.calculate_hash()?))
+        Ok(crate::crypto::blake3_hash_hex(&self.calculate_hash(None)?))
     }
     
     pub fn sign(&mut self, keypair: &crate::crypto::Dilithium3Keypair, coinbase_tx: Option<&mut Transaction>) -> Result<()> {
@@ -119,48 +129,116 @@ impl Block {
         calculated_root == self.header.merkle_root
     }
     
-    pub fn validate(&self, previous_block: Option<&Block>) -> Result<()> {
+    pub fn validate(&self, previous_block: Option<&Block>, consensus: &crate::config::ConsensusConfig) -> Result<()> {
+        // Skip PoW check for genesis
+        if !self.is_genesis() {
+            let target = generate_difficulty_target(self.header.difficulty);
+            if !crate::crypto::verify_pow(&self.serialize_header_for_hashing()?, self.header.nonce, &target, consensus)? {
+                return Err(InvalidBlockError::InvalidPoW.into());
+            }
+        }
+
         // Verify block signature
         if !self.verify_signature()? {
-            return Err(BlockchainError::InvalidBlock("Block signature verification failed".to_string()));
+            return Err(InvalidBlockError::SignatureVerificationFailed.into());
         }
         
         // Verify previous block hash
         if let Some(prev_block) = previous_block {
-            if self.header.previous_hash != prev_block.calculate_hash()? {
-                return Err(BlockchainError::InvalidBlock("Previous block hash mismatch".to_string()));
+            if self.header.previous_hash != prev_block.calculate_hash(None)? {
+                return Err(InvalidBlockError::PreviousBlockHashMismatch.into());
             }
             
             if self.header.height != prev_block.header.height + 1 {
-                return Err(BlockchainError::InvalidBlock("Invalid block height".to_string()));
+                return Err(InvalidBlockError::InvalidBlockHeight.into());
+            }
+            // Timestamp validation against the previous block
+            let max_future_drift = Duration::minutes(5);
+            if self.header.timestamp <= prev_block.header.timestamp {
+                return Err(InvalidBlockError::TimestampOutOfRange(
+                    "Block timestamp must be greater than the previous block's timestamp".to_string()
+                ).into());
+            }
+            if self.header.timestamp > Utc::now() + max_future_drift {
+                return Err(InvalidBlockError::TimestampOutOfRange(
+                    "Block timestamp is too far in the future".to_string()
+                ).into());
             }
         } else {
-            // Genesis block
             if self.header.height != 0 {
-                return Err(BlockchainError::InvalidBlock("Genesis block must have height 0".to_string()));
+                return Err(InvalidBlockError::GenesisBlockHeightNotZero.into());
             }
             if self.header.previous_hash != [0u8; 32] {
-                return Err(BlockchainError::InvalidBlock("Genesis block previous_hash must be zero".to_string()));
+                return Err(InvalidBlockError::GenesisBlockHashNotZero.into());
+            }
+            // Additional genesis block validation
+            if self.transactions.len() != 1 {
+                return Err(InvalidBlockError::GenesisBlockInvalidTransactionCount.into());
+            }
+            if !matches!(self.transactions[0].kind, crate::transaction::TransactionType::MiningReward { .. }) {
+                return Err(InvalidBlockError::GenesisBlockTransactionNotReward.into());
             }
         }
         
         // Verify Merkle root
         if !self.verify_merkle_root() {
-            return Err(BlockchainError::InvalidBlock("Invalid Merkle root".to_string()));
+            return Err(InvalidBlockError::InvalidMerkleRoot.into());
         }
         
         // Verify transactions
         for tx in &self.transactions {
             if !tx.verify_signature()? {
-                return Err(BlockchainError::InvalidTransaction("Transaction signature verification failed".to_string()));
+                return Err(InvalidBlockError::InvalidTransaction("Transaction signature verification failed".to_string()).into());
             }
         }
-        
-        // allow 1 h in the past, but no future timestamps
-        let now = Utc::now();
-        let earliest = now - Duration::hours(1);
-        if self.header.timestamp < earliest || self.header.timestamp > now {
-            return Err(BlockchainError::InvalidBlock("Block timestamp outside allowed range".to_string()));
+
+        // ---------------- Mining-reward checks --------------------
+        use crate::transaction::TransactionType;
+
+        // Gather reward transactions
+        let reward_txs: Vec<&crate::transaction::Transaction> = self
+            .transactions
+            .iter()
+            .filter(|tx| matches!(tx.kind, TransactionType::MiningReward { .. }))
+            .collect();
+
+        if self.is_genesis() {
+            // Already ensured there is exactly one tx and it is a MiningReward.
+            let reward_tx = reward_txs[0];
+            if let TransactionType::MiningReward { block_height, amount } = reward_tx.kind {
+                if block_height != 0 {
+                    return Err(InvalidBlockError::InvalidBlockHeight.into());
+                }
+                if amount != consensus.initial_mining_reward {
+                    return Err(InvalidBlockError::InvalidRewardAmount.into());
+                }
+            }
+        } else {
+            // Non-genesis: must contain exactly one MiningReward
+            if reward_txs.len() != 1 {
+                return Err(InvalidBlockError::InvalidRewardTransactionCount.into());
+            }
+
+            let reward_tx = reward_txs[0];
+            let subsidy = crate::miner::WalletManager::calculate_mining_reward_with_config(
+                self.header.height,
+                consensus,
+            );
+            let expected = subsidy + self.get_total_fees();
+
+            if let TransactionType::MiningReward { block_height, amount } = reward_tx.kind {
+                if block_height != self.header.height {
+                    return Err(InvalidBlockError::InvalidBlockHeight.into());
+                }
+                if amount != expected {
+                    return Err(InvalidBlockError::InvalidRewardAmount.into());
+                }
+            }
+
+            // Ensure reward tx is first
+            if !matches!(self.transactions.first().map(|tx| &tx.kind), Some(TransactionType::MiningReward { .. })) {
+                return Err(InvalidBlockError::RewardTransactionNotFirst.into());
+            }
         }
         
         Ok(())
@@ -179,10 +257,6 @@ impl Block {
             .filter(|tx| !matches!(tx.kind, crate::transaction::TransactionType::MiningReward { .. }))
             .map(|tx| tx.fee)
             .sum()
-    }
-    
-    pub fn get_mining_reward(&self) -> u64 {
-        crate::miner::WalletManager::calculate_mining_reward(self.header.height)
     }
 
     /// Calculate the block subsidy based on the provided consensus settings.
@@ -208,6 +282,56 @@ impl Block {
             miner_public_key: self.header.miner_public_key.clone(),
         };
         bincode::serialize(&header_data).map_err(|e| BlockchainError::SerializationError(e.to_string()))
+    }
+
+    pub fn mine(&mut self, keypair: &crate::crypto::Dilithium3Keypair, consensus: &ConsensusConfig) -> Result<()> {
+        let target = generate_difficulty_target(self.header.difficulty);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let found_nonce = (0..u64::MAX)
+            .into_par_iter()
+            .find_any(|&nonce| {
+                if stop_flag.load(Ordering::Relaxed) {
+                    return true;
+                }
+                let mut block_header = self.header.clone();
+                block_header.nonce = nonce;
+                
+                let header_data = HeaderForHashing {
+                    version: block_header.version,
+                    height: block_header.height,
+                    timestamp: block_header.timestamp,
+                    previous_hash: block_header.previous_hash,
+                    merkle_root: block_header.merkle_root,
+                    difficulty: block_header.difficulty,
+                    nonce: block_header.nonce,
+                    miner_public_key: block_header.miner_public_key.clone(),
+                };
+                
+                if let Ok(serialized_header) = bincode::serialize(&header_data) {
+                    if let Ok(hash) = self.calculate_hash_with_header(&serialized_header, consensus) {
+                        if crate::blockchain::meets_target(&hash, &target) {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            return true;
+                        }
+                    }
+                }
+                false
+            });
+
+        if let Some(nonce) = found_nonce {
+            self.header.nonce = nonce;
+            self.sign(keypair, None)?;
+            Ok(())
+        } else {
+            Err(BlockchainError::MiningError("Failed to find a valid nonce".to_string()))
+        }
+    }
+
+    fn calculate_hash_with_header(&self, header_data: &[u8], consensus: &ConsensusConfig) -> Result<BlockHash> {
+        let salt = &blake3_hash(header_data)[..16];
+        let pow_hash = argon2d_pow(header_data, salt, &consensus.argon2_config)?;
+        Ok(blake3_hash_block(&pow_hash))
     }
 }
 
@@ -280,7 +404,7 @@ mod tests {
         assert_eq!(block.header.height, 1);
         assert_eq!(block.header.difficulty, 2);
         assert_eq!(block.get_transaction_count(), 1);
-        let _ = block.calculate_hash().unwrap();
+        let _ = block.calculate_hash(None).unwrap();
     }
     
     #[test]
@@ -316,7 +440,7 @@ mod tests {
             2,
             keypair.public_key.clone(),
         );
-        let _ = block.calculate_hash().unwrap();
+        let _ = block.calculate_hash(None).unwrap();
     }
     
     #[test]
@@ -332,16 +456,31 @@ mod tests {
         
         block.sign(&keypair, None).unwrap();
         assert!(block.verify_signature().unwrap());
-        let _ = block.calculate_hash().unwrap();
+        let _ = block.calculate_hash(None).unwrap();
     }
     
     #[test]
     fn test_genesis_block() {
         let keypair = Dilithium3Keypair::new().unwrap();
+        use crate::transaction::{Transaction, TransactionType};
+        use crate::config::ConsensusConfig;
+
+        let consensus = ConsensusConfig::default();
+
+        let mut reward_tx = Transaction::new(
+            keypair.public_key.clone(),
+            TransactionType::MiningReward {
+                block_height: 0,
+                amount: consensus.initial_mining_reward,
+            },
+            0,
+        );
+        reward_tx.sign(&keypair).unwrap();
+
         let mut block = Block::new(
             0,
             [0u8; 32],
-            vec![],
+            vec![reward_tx],
             1,
             keypair.public_key.clone(),
         );
@@ -350,7 +489,8 @@ mod tests {
         block.sign(&keypair, None).unwrap();
         
         assert!(block.is_genesis());
-        assert!(block.validate(None).is_ok());
-        let _ = block.calculate_hash().unwrap();
+        let consensus = crate::config::ConsensusConfig::default();
+        assert!(block.validate(None, &consensus).is_ok());
+        let _ = block.calculate_hash(None).unwrap();
     }
-} 
+}

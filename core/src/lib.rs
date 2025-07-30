@@ -19,7 +19,7 @@ pub use block::{Block, BlockHeader};
 pub use transaction::{Transaction, TransactionType};
 pub use crypto::{Dilithium3Keypair, Dilithium3Signature, Hash};
 pub use blockchain::NumiBlockchain;
-pub use error::BlockchainError;
+pub use error::{BlockchainError, RpcError};
 pub use rpc::RpcServer;
 pub use mempool::TransactionMempool;
 pub use secure_storage::SecureKeyStore;
@@ -29,4 +29,4 @@ pub use mining_service::MiningService;
 // Re-export the Tokio-backed RwLock so downstream crates can `use numi_core::RwLock`.
 pub use sync_lock::RwLock;
 
-pub type Result<T> = std::result::Result<T, BlockchainError>; 
+pub type Result<T> = std::result::Result<T, BlockchainError>;

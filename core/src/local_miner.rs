@@ -8,29 +8,24 @@ use std::{
 };
 
 use crossbeam::channel::{tick, unbounded, Receiver, Sender};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{rngs::SmallRng, SeedableRng};
 use crate::RwLock;
 
 use crate::{
     blockchain::NumiBlockchain,
     block::Block,
-    crypto::blake3_hash,
     miner::Miner,
     config::ConsensusConfig,
 };
 
 pub struct LocalMiner {
     stop: Arc<AtomicBool>,
-    block_tx: Sender<Block>,
-    stats: Arc<MiningStats>,
-    consensus: ConsensusConfig,
 }
 
 #[derive(Debug)]
 struct MiningStats {
     hashes_attempted: AtomicU64,
     blocks_found: AtomicU64,
-    last_status_report: parking_lot::Mutex<Instant>,
 }
 
 impl LocalMiner {
@@ -46,7 +41,6 @@ impl LocalMiner {
         let stats = Arc::new(MiningStats {
             hashes_attempted: AtomicU64::new(0),
             blocks_found: AtomicU64::new(0),
-            last_status_report: parking_lot::Mutex::new(Instant::now()),
         });
         
         // Spawn block processor task
@@ -77,7 +71,7 @@ impl LocalMiner {
             Self::status_reporter_task(stats_clone, stop_clone).await;
         });
 
-        Self { stop, block_tx, stats, consensus }
+        Self { stop }
     }
 
     pub fn shutdown(&self) {
@@ -93,30 +87,28 @@ impl LocalMiner {
         while let Ok(block) = block_rx.recv() {
             let height = block.header.height;
             
-            // Use spawn_blocking to handle the parking_lot RwLock which is not Send
             let chain_clone = chain.clone();
             let block_clone = block.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                futures::executor::block_on(async {
-                    chain_clone.write().add_block(block_clone).await
-                })
-            }).await;
-            
-            match result {
-                Ok(Ok(true)) => {
-                    stats.blocks_found.fetch_add(1, Ordering::Relaxed);
-                    log::info!("🎉 CPU-miner found valid block #{height}!");
+            let stats_clone = stats.clone();
+            tokio::spawn(async move {
+                let result = chain_clone.write().add_block(block_clone).await;
+                match result {
+                    Ok(true) => {
+                        stats_clone.blocks_found.fetch_add(1, Ordering::Relaxed);
+                        log::info!("🎉 CPU-miner found valid block #{}!", height);
+                    }
+                    Ok(false) => {
+                        log::warn!("⚠️  CPU-miner block #{} was already known", height);
+                    }
+                    Err(e) => {
+                        if e.to_string().contains("The block is stale and does not connect to the main chain") {
+                            log::debug!("CPU-miner block #{} was stale", height);
+                            return;
+                        }
+                        log::warn!("❌ CPU-miner block #{} rejected: {}", height, e);
+                    }
                 }
-                Ok(Ok(false)) => {
-                    log::warn!("⚠️  CPU-miner block #{height} was already known");
-                }
-                Ok(Err(e)) => {
-                    log::warn!("❌ CPU-miner block #{height} rejected: {e}");
-                }
-                Err(e) => {
-                    log::error!("❌ CPU-miner task error for block #{height}: {e}");
-                }
-            }
+            });
         }
     }
     
@@ -150,18 +142,17 @@ impl LocalMiner {
         stop: Arc<AtomicBool>,
         stratum_rx: Receiver<bool>,
         block_tx: Sender<Block>,
-        stats: Arc<MiningStats>,
+        _stats: Arc<MiningStats>,
         consensus: ConsensusConfig,
     ) {
-        let mut rng = SmallRng::from_entropy();
-        let tick = tick(Duration::from_millis(500));
+        let _rng = SmallRng::from_entropy();
+        let _tick = tick(Duration::from_millis(500));
         let mut local_hash_count = 0u64;
-        let mut status_counter = 0u32;
+        let mut last_mempool_tx_count = 0;
+        let mut last_template_time = Instant::now();
 
-        // Track when we last constructed a new block template so we don't
-        // stamp successive blocks with sub-second timestamps (which wreaks
-        // havoc on the LWMA difficulty algorithm).
-        let mut last_template_time = Instant::now() - Duration::from_secs(1);
+        // Initialize with a value that won't match any real hash
+        let mut current_tip_hash = [1u8; 32];
 
         while !stop.load(Ordering::Relaxed) {
             // Pause if stratum miners present
@@ -179,22 +170,34 @@ impl LocalMiner {
                 log::info!("▶️  CPU miner active - searching for blocks...");
             }
 
-            // Throttle template creation to at most once per second to keep
-            // header.timestamp monotonic and ≥ 1 s apart.
+            let (new_tip_hash, new_mempool_count) = {
+                let bc = chain.read();
+                (bc.get_latest_block_hash(), bc.get_pending_transaction_count())
+            };
+            
             let now = Instant::now();
-            if now.duration_since(last_template_time) < Duration::from_secs(1) {
+            let elapsed_since_last_template = now.duration_since(last_template_time);
+
+            // Create a new block template if:
+            // 1. The chain tip has changed (a new block was accepted).
+            // 2. The mempool contents have changed.
+            // 3. It's been a few seconds (to update the block timestamp).
+            if new_tip_hash == current_tip_hash 
+                && new_mempool_count == last_mempool_tx_count 
+                && elapsed_since_last_template < Duration::from_secs(2) {
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
-
+            
             last_template_time = now;
+            current_tip_hash = new_tip_hash;
+            last_mempool_tx_count = new_mempool_count;
 
             // Build candidate block with proper miner public key
-            let (prev_hash, height, difficulty, txs, miner_public_key) = {
+            let (height, difficulty, txs, miner_public_key) = {
                 let bc = chain.read();
                 let miner_pk = miner.read().get_public_key();
                 (
-                    bc.get_latest_block_hash(),
                     bc.get_current_height() + 1,
                     bc.get_current_difficulty(),
                     bc.get_transactions_for_block(256 * 1024, 10_000),
@@ -233,50 +236,18 @@ impl LocalMiner {
             full_txs.push(reward_tx);
             full_txs.extend(txs);
 
-            let mut block = Block::new(height, prev_hash, full_txs, difficulty, miner_public_key);
+            let mut block = Block::new(height, new_tip_hash, full_txs, difficulty, miner_public_key);
             // Ensure Merkle root includes reward tx
             block.header.merkle_root = Block::calculate_merkle_root(&block.transactions);
-            let target = crate::crypto::generate_difficulty_target(difficulty);
 
-            loop {
-                if stop.load(Ordering::Relaxed) { return; }
-                if let Ok(signal) = stratum_rx.try_recv() {
-                    if signal { break; } // external miner appeared
-                }
-
-                block.header.nonce = rng.gen();
-                let hash = blake3_hash(&block.serialize_header_for_hashing().unwrap());
-                local_hash_count += 1;
-                status_counter += 1;
-                
-                // Update global stats every 1000 hashes to reduce contention
-                if status_counter >= 1000 {
-                    stats.hashes_attempted.fetch_add(status_counter as u64, Ordering::Relaxed);
-                    status_counter = 0;
-                }
-                
-                if hash < target {
-                    // Found a block! Sign it properly before sending for processing
-                    let mut signed_block = block.clone();
-                    if let Err(e) = signed_block.sign(&miner.read().get_keypair(), None) {
-                        log::error!("❌ Failed to sign found block: {}", e);
-                        break;
-                    }
-                    
-                    if let Err(_) = block_tx.send(signed_block) {
-                        log::error!("Failed to send found block to processor");
-                    }
-                    break;
-                }
-
-                // Yield periodically
-                if tick.recv().is_ok() { }
+            if let Err(e) = block.mine(&miner.read().get_keypair(), &consensus) {
+                log::error!("❌ Failed to mine block: {e}");
+                continue;
             }
-        }
-        
-        // Update final stats before thread exits
-        if status_counter > 0 {
-            stats.hashes_attempted.fetch_add(status_counter as u64, Ordering::Relaxed);
+
+            if let Err(_) = block_tx.send(block) {
+                log::error!("Failed to send found block to processor");
+            }
         }
     }
 }

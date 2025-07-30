@@ -1,5 +1,7 @@
 use std::path::Path;
-use sled;
+use std::fs::File;
+use fs2::FileExt;
+use sled::{self, transaction::TransactionalTree, Transactional};
 use serde::{Serialize, Deserialize};
 
 use aes_gcm::{
@@ -25,9 +27,11 @@ pub struct EncryptionKey {
 impl EncryptionKey {
     /// Derive key from password + salt via Argon2
     pub fn from_password(password: &str, salt: &[u8; 32]) -> Self {
-        use argon2::{Argon2, PasswordHasher};
+        use argon2::{Argon2, PasswordHasher, Params};
         let salt_str = argon2::password_hash::SaltString::encode_b64(salt).unwrap();
-        let argon2 = Argon2::default();
+        // Use production-grade Argon2 parameters for database key derivation.
+        let params = Params::new(131072, 4, 2, Some(32)).unwrap();
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let hash = argon2.hash_password(password.as_bytes(), &salt_str).unwrap().hash.unwrap();
         let mut key = [0u8; 32];
         key.copy_from_slice(&hash.as_bytes()[..32]);
@@ -142,7 +146,7 @@ fn deserialize_with_encryption<T: for<'de> Deserialize<'de>>(buf: &[u8], key: Op
         return Err(BlockchainError::SerializationError("Checksum failed".into()));
     }
     let data = if flag == 1 {
-        let k = key.ok_or_else(|| BlockchainError::SerializationError("Encrypted but no key".into()))?;
+        let k = key.ok_or_else(|| BlockchainError::SerializationError("Data is encrypted, but no decryption key was provided.".into()))?;
         k.decrypt(payload)?
     } else {
         payload.to_vec()
@@ -152,6 +156,7 @@ fn deserialize_with_encryption<T: for<'de> Deserialize<'de>>(buf: &[u8], key: Op
 }
 
 pub struct BlockchainStorage {
+    _db: sled::Db,
     blocks: sled::Tree,
     transactions: sled::Tree,
     accounts: sled::Tree,
@@ -160,27 +165,35 @@ pub struct BlockchainStorage {
     metadata: sled::Tree, // For version and other metadata
     encryption_key: Option<EncryptionKey>, // Optional encryption for sensitive data
     base_path: std::path::PathBuf, // root directory of the database – used for auxiliary files
+    _lock: File,
 }
 
 /// Transaction for atomic storage operations
 pub struct StorageTransaction<'a> {
     storage: &'a BlockchainStorage,
-    blocks_batch: sled::Batch,
-    transactions_batch: sled::Batch,
-    accounts_batch: sled::Batch,
-    state_batch: sled::Batch,
-    checkpoints_batch: sled::Batch,
+    blocks: &'a TransactionalTree,
+    transactions: &'a TransactionalTree,
+    accounts: &'a TransactionalTree,
+    state: &'a TransactionalTree,
+    checkpoints: &'a TransactionalTree,
 }
 
 impl<'a> StorageTransaction<'a> {
-    pub fn new(storage: &'a BlockchainStorage) -> Self {
+    pub fn new(
+        storage: &'a BlockchainStorage,
+        blocks: &'a TransactionalTree,
+        transactions: &'a TransactionalTree,
+        accounts: &'a TransactionalTree,
+        state: &'a TransactionalTree,
+        checkpoints: &'a TransactionalTree,
+    ) -> Self {
         Self {
             storage,
-            blocks_batch: sled::Batch::default(),
-            transactions_batch: sled::Batch::default(),
-            accounts_batch: sled::Batch::default(),
-            state_batch: sled::Batch::default(),
-            checkpoints_batch: sled::Batch::default(),
+            blocks,
+            transactions,
+            accounts,
+            state,
+            checkpoints,
         }
     }
     
@@ -188,28 +201,28 @@ impl<'a> StorageTransaction<'a> {
     pub fn save_block(&mut self, block: &Block) -> Result<()> {
         let key = self.storage.block_key(block.header.height);
         let value = serialize_with_encryption(block, self.storage.encryption_key.as_ref())?;
-        self.blocks_batch.insert(key, value);
+        self.blocks.insert(key, value)?;
         Ok(())
     }
     
     /// Add transaction to batch
     pub fn save_transaction(&mut self, tx_id: &[u8; 32], transaction: &Transaction) -> Result<()> {
         let value = serialize_with_encryption(transaction, self.storage.encryption_key.as_ref())?;
-        self.transactions_batch.insert(tx_id.as_slice(), value);
+        self.transactions.insert(tx_id.as_slice(), value)?;
         Ok(())
     }
     
     /// Add account to batch
     pub fn save_account(&mut self, public_key: &[u8], account: &AccountState) -> Result<()> {
         let value = serialize_with_encryption(account, self.storage.encryption_key.as_ref())?;
-        self.accounts_batch.insert(public_key, value);
+        self.accounts.insert(public_key, value)?;
         Ok(())
     }
     
     /// Add chain state to batch
     pub fn save_chain_state(&mut self, state: &ChainState) -> Result<()> {
         let value = serialize_with_encryption(state, self.storage.encryption_key.as_ref())?;
-        self.state_batch.insert(b"current", value);
+        self.state.insert(b"current", value)?;
         Ok(())
     }
     
@@ -217,23 +230,7 @@ impl<'a> StorageTransaction<'a> {
     pub fn save_checkpoint(&mut self, checkpoint: &SecurityCheckpoint) -> Result<()> {
         let key = self.storage.checkpoint_key(checkpoint.block_height);
         let value = serialize_with_encryption(checkpoint, self.storage.encryption_key.as_ref())?;
-        self.checkpoints_batch.insert(key, value);
-        Ok(())
-    }
-    
-    /// Commit all changes atomically
-    pub fn commit(self) -> Result<()> {
-        // Apply batches to all trees
-        self.storage.blocks.apply_batch(self.blocks_batch)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to commit blocks: {e}")))?;
-        self.storage.transactions.apply_batch(self.transactions_batch)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to commit transactions: {e}")))?;
-        self.storage.accounts.apply_batch(self.accounts_batch)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to commit accounts: {e}")))?;
-        self.storage.state.apply_batch(self.state_batch)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to commit state: {e}")))?;
-        self.storage.checkpoints.apply_batch(self.checkpoints_batch)
-            .map_err(|e| BlockchainError::StorageError(format!("Failed to commit checkpoints: {e}")))?;
+        self.checkpoints.insert(key, value)?;
         Ok(())
     }
 }
@@ -244,6 +241,10 @@ impl BlockchainStorage {
     }
     
     pub fn new_with_encryption<P: AsRef<Path>>(path: P, encryption_key: Option<EncryptionKey>) -> Result<Self> {
+        let lock_path = path.as_ref().join(".lock");
+        let lock_file = File::create(&lock_path).map_err(|e| BlockchainError::StorageError(format!("Failed to create lock file: {e}")))?;
+        lock_file.try_lock_exclusive().map_err(|_| BlockchainError::StorageError("Database is already in use".to_string()))?;
+
         let db = sled::open(path.as_ref())
             .map_err(|e| BlockchainError::StorageError(format!("Failed to open database: {e}")))?;
         
@@ -266,6 +267,7 @@ impl BlockchainStorage {
             .map_err(|e| BlockchainError::StorageError(format!("Failed to open metadata tree: {e}")))?;
         
         let storage = Self {
+            _db: db,
             blocks,
             transactions,
             accounts,
@@ -274,6 +276,7 @@ impl BlockchainStorage {
             metadata,
             encryption_key,
             base_path: path.as_ref().to_path_buf(),
+            _lock: lock_file,
         };
         
         // Initialize database version if not exists
@@ -307,9 +310,29 @@ impl BlockchainStorage {
     }
     
     /// Create a new storage transaction
-    pub fn transaction(&self) -> StorageTransaction {
-        StorageTransaction::new(self)
+    pub fn transaction<F, R>(&self, f: F) -> Result<R>
+    where
+        F: Fn(&mut StorageTransaction) -> Result<R>,
+    {
+        let result = (&self.blocks, &self.transactions, &self.accounts, &self.state, &self.checkpoints).transaction(
+            |(blocks, transactions, accounts, state, checkpoints)| {
+                let mut storage_tx = StorageTransaction::new(
+                    self,
+                    blocks,
+                    transactions,
+                    accounts,
+                    state,
+                    checkpoints,
+                );
+                Ok(f(&mut storage_tx))
+            },
+        );
+
+        result.map_err(|e: sled::transaction::TransactionError<BlockchainError>| {
+            BlockchainError::StorageError(format!("Transaction failed: {}", e))
+        })?
     }
+
 
     /// Path for simple block file persistence (core-data/blocks)
     pub fn blocks_dir(&self) -> std::path::PathBuf {

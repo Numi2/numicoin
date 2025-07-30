@@ -27,12 +27,13 @@ use zeroize::ZeroizeOnDrop;
 
 use crate::error::BlockchainError;
 use crate::Result;
+use crate::config::ConsensusConfig;
 
 /// 256-bit hash
 pub type Hash = [u8; 32];
 
 const MAX_RANDOM_BYTES: usize = 1_000_000;
-pub const MAX_SIGNABLE_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_SIGNABLE_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // Reduced to 4MB
 
 /// Dilithium3 sizes
 pub const DILITHIUM3_SIGNATURE_SIZE: usize = pqcrypto_dilithium::dilithium3::signature_bytes();
@@ -92,13 +93,20 @@ impl Dilithium3Keypair {
 
     /// Load from JSON or PEM
     pub fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        // Enforce strict file permissions (owner read-only)
+        let perms = metadata(path.as_ref()).map_err(|e| BlockchainError::CryptographyError(e.to_string()))?.permissions();
         #[cfg(unix)]
+        if perms.mode() & 0o177 != 0 {
+            return Err(BlockchainError::CryptographyError("Insecure key file permissions: group/other access detected. Use chmod 600.".into()));
+        }
+        #[cfg(not(unix))]
         {
-            let meta = metadata(path.as_ref()).map_err(|e| BlockchainError::CryptographyError(e.to_string()))?;
-            if meta.permissions().mode() & 0o077 != 0 {
-                return Err(BlockchainError::CryptographyError("Insecure key file permissions".into()));
+            // Basic check for non-Unix systems (less precise but better than nothing)
+            if perms.readonly() == false {
+                 log::warn!("Key file is not read-only. For security, restrict write access to this file.");
             }
         }
+
         let content = read_to_string(path.as_ref()).map_err(|e| BlockchainError::CryptographyError(e.to_string()))?;
         if let Ok(kp) = serde_json::from_str::<Self>(&content) {
             kp.validate_integrity()?;
@@ -182,21 +190,25 @@ impl Dilithium3Keypair {
     /// Verify a signature against an explicit public key
     pub fn verify(msg: &[u8], sig: &Dilithium3Signature, public_key: &[u8]) -> Result<bool> {
         if msg.len() > MAX_SIGNABLE_MESSAGE_SIZE {
-            return Err(BlockchainError::InvalidArgument("Message too large".into()));
+            return Err(BlockchainError::InvalidArgument("Message too large to verify".into()));
         }
-        if blake3_hash(msg) != sig.message_hash {
+
+        let msg_hash = blake3_hash(msg);
+        if !constant_time_eq(&msg_hash, &sig.message_hash) {
             return Ok(false);
         }
-        let pk  = PqPublicKey3::from_bytes(public_key).ok();
-        let ds  = PqDetachedSignature::from_bytes(&sig.signature).ok();
-        let valid = if let (Some(pk), Some(ds)) = (pk, ds) {
-            dilithium3_verify(&ds, msg, &pk).is_ok()
-        } else {
-            // dummy hash to balance timing
-            let _ = blake3_hash(msg);
-            false
+
+        let pk = match PqPublicKey3::from_bytes(public_key) {
+            Ok(pk) => pk,
+            Err(_) => return Ok(false), // Invalid public key format
         };
-        Ok(valid)
+
+        let ds = match PqDetachedSignature::from_bytes(&sig.signature) {
+            Ok(ds) => ds,
+            Err(_) => return Ok(false), // Invalid signature format
+        };
+
+        Ok(dilithium3_verify(&ds, msg, &pk).is_ok())
     }
 
     /// Fingerprint integrity
@@ -277,7 +289,7 @@ pub fn blake3_hash_block(data: &[u8]) -> Hash {
     if data.is_empty() {
         return [0; 32];
     }
-    let mut h = Hasher::new_derive_key("block_hash");
+    let mut h = Hasher::new_derive_key("numi-block");
     h.update(data);
     let mut out = [0; 32];
     out.copy_from_slice(&h.finalize().as_bytes()[..32]);
@@ -402,8 +414,9 @@ impl Argon2Config {
     }
 }
 
-/// Argon2id‐based PoW hash
-pub fn argon2id_pow(data: &[u8], salt: &[u8], cfg: &Argon2Config) -> Result<Vec<u8>> {
+/// Argon2d‐based PoW hash
+/// Note: Argon2d is used for its ASIC resistance in PoW.
+pub fn argon2d_pow(data: &[u8], salt: &[u8], cfg: &Argon2Config) -> Result<Vec<u8>> {
     if data.is_empty() || salt.len() < cfg.salt_length {
         return Err(BlockchainError::CryptographyError("Invalid PoW inputs".into()));
     }
@@ -411,7 +424,7 @@ pub fn argon2id_pow(data: &[u8], salt: &[u8], cfg: &Argon2Config) -> Result<Vec<
     let salt_bytes = &salt[..cfg.salt_length];
     let params = Params::new(cfg.memory_cost, cfg.time_cost, cfg.parallelism, Some(cfg.output_length))
         .map_err(|e| BlockchainError::CryptographyError(e.to_string()))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let argon2 = Argon2::new(Algorithm::Argon2d, Version::V0x13, params);
     let mut out = vec![0; cfg.output_length];
     argon2.hash_password_into(data, salt_bytes, &mut out)
         .map_err(|e| BlockchainError::CryptographyError(e.to_string()))?;
@@ -419,7 +432,7 @@ pub fn argon2id_pow(data: &[u8], salt: &[u8], cfg: &Argon2Config) -> Result<Vec<
 }
 
 /// Verify PoW (adaptive default config)
-pub fn verify_pow(header: &[u8], nonce: u64, target: &[u8]) -> Result<bool> {
+pub fn verify_pow(header: &[u8], nonce: u64, target: &[u8], consensus: &ConsensusConfig) -> Result<bool> {
     if header.is_empty() || target.len() != 32 {
         return Err(BlockchainError::CryptographyError("Invalid PoW args".into()));
     }
@@ -430,14 +443,7 @@ pub fn verify_pow(header: &[u8], nonce: u64, target: &[u8]) -> Result<bool> {
     // salt = first 16 bytes of blake3(header)
     let salt = &blake3_hash(header)[..16];
 
-    // pick dev vs prod based on build
-    let cfg = if cfg!(test) || cfg!(debug_assertions) {
-        Argon2Config::development()
-    } else {
-        Argon2Config::production()
-    };
-
-    let pow = argon2id_pow(&blob, salt, &cfg)?;
+    let pow = argon2d_pow(&blob, salt, &consensus.argon2_config)?;
     let h   = blake3_hash(&pow);
     let mut tgt = [0u8; 32];
     tgt.copy_from_slice(target);

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use crate::crypto::Argon2Config;
 
 /// Main configuration for the NumiCoin blockchain node
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,22 +482,14 @@ impl SecurityConfig {
         Self {
             jwt_secret: std::env::var("NUMI_JWT_SECRET")
                 .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set in environment, using cryptographically secure random value");
-                    use rand::RngCore;
-                    let mut rng = rand::rngs::OsRng;
-                    let mut bytes = [0u8; 32];
-                    rng.fill_bytes(&mut bytes);
-                    hex::encode(bytes)
+                    log::error!("CRITICAL: NUMI_JWT_SECRET must be set in production environment. Shutting down.");
+                    std::process::exit(1);
                 }),
             jwt_expiry_hours: 24,
             admin_api_key: std::env::var("NUMI_ADMIN_KEY")
                 .unwrap_or_else(|_| {
-                    log::warn!("ADMIN_KEY not set in environment, using cryptographically secure random value");
-                    use rand::RngCore;
-                    let mut rng = rand::rngs::OsRng;
-                    let mut bytes = [0u8; 32];
-                    rng.fill_bytes(&mut bytes);
-                    hex::encode(bytes)
+                    log::error!("CRITICAL: NUMI_ADMIN_KEY must be set in production environment. Shutting down.");
+                    std::process::exit(1);
                 }),
             enable_rate_limiting: true,
             enable_ip_blocking: true,
@@ -671,6 +664,7 @@ pub struct ConsensusConfig {
     pub genesis_supply: u64,
     pub mining_reward_halving_interval: u64,
     pub initial_mining_reward: u64,
+    pub argon2_config: Argon2Config,
 }
 
 impl Default for ConsensusConfig {
@@ -687,6 +681,7 @@ impl Default for ConsensusConfig {
             genesis_supply: 8888, // 88.88 NUMI (8888 NANO units) 
             mining_reward_halving_interval: 111_000, //  halving every 111k blocks
             initial_mining_reward: 8888, // 88.88 NUMI (8888 NANO units)
+            argon2_config: Argon2Config::default(),
         }
     }
 }
@@ -696,6 +691,7 @@ impl ConsensusConfig {
         Self {
             max_block_size: 8 * 1024 * 1024, // 8MB for production
             max_transactions_per_block: 50000,
+            argon2_config: Argon2Config::production(),
             ..Default::default()
         }
     }
@@ -709,6 +705,7 @@ impl ConsensusConfig {
             max_reorg_depth: 10,
             checkpoint_interval: 50,
             finality_depth: 100,
+            argon2_config: Argon2Config::development(),
             ..Default::default()
         }
     }
@@ -723,9 +720,10 @@ impl ConsensusConfig {
             max_reorg_depth: 20,
             checkpoint_interval: 100,
             finality_depth: 200,
-            genesis_supply: 1000, // 10 NUMI (1000 NANO units) - same as mainnet 
+            genesis_supply: 8888, // 88.88 NUMI (8888 NANO units) - same as mainnet
             mining_reward_halving_interval: 1000, // 1k blocks halving for faster testing
-            initial_mining_reward: 1000, // 10 NUMI (1000 NANO units) - same as mainnet
+            initial_mining_reward: 8888, // 88.88 NUMI (8888 NANO units) - same as mainnet
+            argon2_config: Argon2Config::development(),
         }
     }
 
@@ -838,4 +836,4 @@ mod tests {
         std::env::remove_var("NUMI_NETWORK_PORT");
         std::env::remove_var("NUMI_RPC_PORT");
     }
-} 
+}

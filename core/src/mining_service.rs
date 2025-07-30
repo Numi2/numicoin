@@ -56,6 +56,10 @@ impl MiningService {
         self.blockchain.read().get_current_difficulty()
     }
 
+    pub fn get_miner(&self) -> Arc<RwLock<Miner>> {
+        self.miner.clone()
+    }
+
     /// Retrieve a new mining job template based on current blockchain state
     pub fn get_job(&self) -> std::result::Result<JobTemplate, MiningServiceError> {
         let height = self.blockchain.read().get_current_height() + 1;
@@ -120,17 +124,27 @@ impl MiningService {
         Ok(job)
     }
 
+    /// Retrieve a job by its ID
+    pub async fn get_job_by_id(&self, job_id: u32) -> Option<JobTemplate> {
+        let jobs = self.active_jobs.read();
+        // This is a simplified lookup. A production system might need a more
+        // robust way to map u32 job_id to the UUID string keys used internally.
+        jobs.values().find(|j| j.job_id == job_id.to_string()).cloned()
+    }
+
     /// Submit a share or full solution (block) for the given job
     pub async fn submit_share(&self, job_id: String, nonce: u64) -> std::result::Result<bool, MiningServiceError> {
         // Retrieve the original job template
         let job = {
             let jobs = self.active_jobs.read();
+            // TODO: In a multi-miner environment, job lookup should be more sophisticated
+            // to prevent job hijacking or replaying. This implementation assumes a trusted setup.
             jobs.get(&job_id).cloned()
-                .ok_or_else(|| MiningServiceError::MiningError("Job not found".to_string()))?
+                .ok_or_else(|| MiningServiceError::MiningError("Job not found or expired".to_string()))?
         };
 
-        // Verify PoW for the given nonce
-        let valid = verify_pow(&job.header_blob, nonce, &job.target)
+        // Verify PoW for the given nonce using the correct consensus parameters
+        let valid = verify_pow(&job.header_blob, nonce, &job.target, &self.consensus)
             .map_err(|e| MiningServiceError::MiningError(e.to_string()))?;
         if !valid {
             return Ok(false);
@@ -144,14 +158,10 @@ impl MiningService {
             None,
         ).map_err(|e| MiningServiceError::MiningError(e.to_string()))?;
         
-        // Add to blockchain using spawn_blocking to avoid Send issues with parking_lot
         let blockchain_clone = self.blockchain.clone();
         let block_clone = block.clone();
-        let added = tokio::task::spawn_blocking(move || {
-            let blockchain = blockchain_clone.write();
-            futures::executor::block_on(async {
-                blockchain.add_block(block_clone).await
-            })
+        let added = tokio::spawn(async move {
+            blockchain_clone.write().add_block(block_clone).await
         }).await
         .map_err(|e| MiningServiceError::MiningError(format!("Task error: {}", e)))?
         .map_err(|e| MiningServiceError::MiningError(e.to_string()))?;
@@ -180,7 +190,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_get_job_template() {
-        let chain = Arc::new(RwLock::new(NumiBlockchain::new().unwrap()));
+        let chain = Arc::new(RwLock::new(NumiBlockchain::new(crate::config::ConsensusConfig::default()).unwrap()));
         let storage_dir = tempdir().unwrap();
         let _storage = Arc::new(BlockchainStorage::new(storage_dir.path()).unwrap());
         
@@ -189,7 +199,8 @@ mod tests {
         let (in_tx, _in_rx) = futures::channel::mpsc::unbounded();
         let (network_mgr, network_handle) = NetworkManager::new(&network_config, in_tx).unwrap();
         
-        let miner = Arc::new(RwLock::new(Miner::new().unwrap()));
+        let cfg = crate::config::Config::default();
+        let miner = Arc::new(RwLock::new(Miner::new(&cfg).unwrap()));
 
         let default_cfg = crate::config::Config::default();
         let mining_cfg = default_cfg.mining.clone();
@@ -211,7 +222,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_submit_share_invalid_nonce() {
         // Setup as above
-        let blockchain_result = NumiBlockchain::new();
+        let blockchain_result = NumiBlockchain::new(crate::config::ConsensusConfig::default());
         if let Err(e) = &blockchain_result {
             println!("Failed to create blockchain: {:?}", e);
         }
@@ -225,7 +236,8 @@ mod tests {
         let (in_tx, _in_rx) = futures::channel::mpsc::unbounded();
         let (network_mgr, network_handle) = NetworkManager::new(&network_config, in_tx).unwrap();
         
-        let miner = Arc::new(RwLock::new(Miner::new().unwrap()));
+        let miner_cfg = crate::config::Config::default();
+        let miner = Arc::new(RwLock::new(Miner::new(&miner_cfg).unwrap()));
 
         let default_cfg = crate::config::Config::default();
         let mining_cfg = default_cfg.mining.clone();

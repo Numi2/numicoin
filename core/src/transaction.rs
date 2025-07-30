@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{blake3_hash, Dilithium3Keypair, Dilithium3Signature},
+    crypto::{blake3_hash_tx, Dilithium3Keypair, Dilithium3Signature},
     error::BlockchainError,
     Result,
 };
@@ -125,7 +125,7 @@ impl Transaction {
 
     pub fn hash(&self) -> TransactionId {
         let bytes = self.signing_bytes().unwrap_or_default();
-        blake3_hash(&bytes)
+        blake3_hash_tx(&bytes)
     }
 }
 

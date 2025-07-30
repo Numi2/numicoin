@@ -1,9 +1,9 @@
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Validation, Header};
 use serde::{Deserialize, Serialize};
 use warp::{Filter, Rejection};
-
-use super::types::{AuthConfig, AccessLevel};
-use super::error::RpcError;
+use crate::crypto::constant_time_eq;
+use crate::rpc::types::{AccessLevel, AuthConfig};
+use crate::rpc::error::RpcError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -42,7 +42,7 @@ impl AuthManager {
     }
     
     pub fn verify_api_key(&self, api_key: &str) -> bool {
-        api_key == self.config.admin_api_key
+        constant_time_eq(api_key.as_bytes(), self.config.admin_api_key.as_bytes())
     }
     
     /// Create authentication filter for a specific access level

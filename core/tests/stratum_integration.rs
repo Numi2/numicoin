@@ -20,7 +20,7 @@ async fn test_stratum_server_accepts_connection() {
     drop(listener);
 
     // Prepare supporting services
-    let chain = Arc::new(RwLock::new(NumiBlockchain::new().unwrap()));
+    let chain = Arc::new(RwLock::new(NumiBlockchain::new(numi_core::config::ConsensusConfig::default()).unwrap()));
     let storage_dir = tempdir().unwrap();
     let _storage = Arc::new(BlockchainStorage::new(storage_dir.path()).unwrap());
 
@@ -28,7 +28,8 @@ async fn test_stratum_server_accepts_connection() {
     let network_cfg = numi_core::config::NetworkConfig::default();
     let (in_tx, _in_rx) = futures::channel::mpsc::unbounded();
     let (_network_mgr, network_handle) = NetworkManager::new(&network_cfg, in_tx).unwrap();
-    let miner = Arc::new(RwLock::new(Miner::new().unwrap()));
+    let cfg_default = Config::default();
+    let miner = Arc::new(RwLock::new(Miner::new(&cfg_default).unwrap()));
 
     // Configure Stratum bind address and port
     let mut cfg = Config::default();

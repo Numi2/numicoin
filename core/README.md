@@ -1,6 +1,16 @@
-# Numi Blockchain Core
+# Numi Blockchain Core - Quantum Safe Poeples blockchain.
 1 NUMI = 100 NANO
-curl -s http://127.0.0.1:8082/status | jq .
+
+Proof of work: Argon2d
+Signature: Dilithium3
+Key Exchange: Kyber768 (KEM)
+Blake3: TransactionHashing & Data Integrity & Merkle tree
+   Every transaction needs a unique identifier (TXID), which is created by hashing the transaction's data. Furthermore, when nodes sync with the network or receive new blocks and transactions, they must verify the integrity of that data by hashing it and comparing it to a known hash.
+      Create and validate nodes MERKLE TREE: Blake3 (
+         Constructing a Merkle tree requires hashing every single transaction and then repeatedly hashing the results until one root hash remains. For a block with thousands of transactions, this is a lot of hashing. BLAKE3's ability to process data in parallel makes it exceptionally fast at building these trees. This allows nodes to create and validate blocks much more quickly)
+
+
+curl -s http://127.0.0.1:8080/status | jq .
 RUST_LOG=info cargo run --release -- node --mining
 
 # Start node with Stratum V2 mining

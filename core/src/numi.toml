@@ -2,42 +2,29 @@
 enabled = true
 listen_address = "0.0.0.0"
 listen_port = 8333
-max_peers = 100
+max_peers = 10
 connection_timeout_secs = 10
-bootstrap_nodes = [
-    "/ip4/127.0.0.1/tcp/8334"
-]
-enable_upnp = true
+bootstrap_nodes = ["/ip4/127.0.0.1/tcp/8333"]
+enable_upnp = false
 enable_mdns = true
-peer_discovery_interval_secs = 30
+peer_discovery_interval_secs = 60
 max_message_size = 10485760
 ban_duration_secs = 300
 rate_limit_per_peer = 1000
 
 [mining]
 enabled = true
+wallet_path = "miner-wallet.json"
+target_block_time_secs = 10
+difficulty_adjustment_interval = 20
 stratum_bind_address = "0.0.0.0"
 stratum_bind_port = 3333
-wallet_path = "miner-wallet.json"
-thread_count = 2
-nonce_chunk_size = 10000
-stats_update_interval_secs = 5
-enable_cpu_affinity = false
-thermal_throttle_temp = 50.0
-power_limit_watts = 50.0
-target_block_time_secs = 1337
-difficulty_adjustment_interval = 20
-
-[mining.argon2_config]
-memory_cost = 65536
-time_cost = 1
-parallelism = 4
-output_length = 32
-salt_length = 16
+local_mining_enabled = true
+cpu_threads = 2
 
 [rpc]
 enabled = true
-bind_address = "0.0.0.0"
+bind_address = "127.0.0.1"
 port = 8082
 max_connections = 100
 request_timeout_secs = 30
@@ -47,7 +34,6 @@ allowed_origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3000",
-    "*"
 ]
 rate_limit_requests_per_minute = 1000
 rate_limit_burst_size = 100
@@ -55,9 +41,9 @@ enable_authentication = false
 admin_endpoints_enabled = true
 
 [security]
-jwt_secret = "GiGC7FId5m1s75iIRYmWny1OKSmST8J2"
+jwt_secret = "4778114abc384c234d87c7308c4986b175d7a1516ca50c15527e893a4a269a0c"
 jwt_expiry_hours = 1
-admin_api_key = "OJK7DSybNYDaraV9UmQQxScEecVbhKt4"
+admin_api_key = "6fd3a3294751b8280bae09ad17802226d67b030f6b2295c5d784f04747b72450"
 enable_rate_limiting = true
 enable_ip_blocking = true
 max_failed_attempts = 10
@@ -68,42 +54,36 @@ enable_firewall = false
 trusted_proxies = []
 
 [storage]
-data_directory = "./core-data"
+data_directory = "./dev-data"
 backup_directory = "./dev-backups"
 max_database_size_mb = 1024
 cache_size_mb = 128
 enable_compression = false
 enable_encryption = false
-auto_backup = true
-backup_interval_hours = 1
+auto_backup = false
+backup_interval_hours = 24
 retention_days = 30
 sync_mode = "Fast"
 
 [consensus]
-difficulty_adjustment_interval = 1
+difficulty_adjustment_interval = 20
 max_block_size = 524288
-max_transactions_per_block = 10000
+max_transactions_per_block = 100
 min_transaction_fee = 1
-max_reorg_depth = 114
-checkpoint_interval = 1111
-finality_depth = 2016
+max_reorg_depth = 10
+checkpoint_interval = 50
+finality_depth = 100
 genesis_supply = 8888
-mining_reward_halving_interval = 111_111
+mining_reward_halving_interval = 111000
 initial_mining_reward = 8888
 
-# Transaction fee structure (aligned with transaction.rs constants)
-# - Base fee: 1 NANO per transaction
-# - Size fee: 1 NANO per 1000 bytes (0.001 NANO per byte)
-# - Min fee: 1 NANO total
-# - Max fee: 100 NANO (0.1 NUMI)
+[consensus.target_block_time]
+secs = 10
+nanos = 0
 
 [consensus.argon2_config]
-memory_cost = 65536
+memory_cost = 4096
 time_cost = 1
-parallelism = 4
+parallelism = 1
 output_length = 32
 salt_length = 16
-
-[consensus.target_block_time]
-secs = 1337
-nanos = 0

@@ -114,9 +114,9 @@ pub async fn handle_block(
         Some(block) => {
             // Calculate transaction summaries without holding lock
             let transaction_summaries: Vec<TransactionSummary> = block.transactions.iter().map(|tx| {
-                let (tx_type, amount) = match &tx.kind {
-                    TransactionType::Transfer { amount, .. } => ("transfer".to_string(), *amount),
-                    TransactionType::MiningReward { amount, .. } => ("mining_reward".to_string(), *amount),
+                let (tx_type, amount) = match tx.kind {
+                    TransactionType::Transfer { amount, .. } => ("transfer".to_string(), amount),
+                    TransactionType::MiningReward { amount, .. } => ("mining_reward".to_string(), amount),
                 };
                 
                 TransactionSummary {

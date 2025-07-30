@@ -7,7 +7,11 @@ use crate::error::{BlockchainError, InvalidBlockError};
 use crate::Result;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+lazy_static::lazy_static! {
+    static ref MINING_LOCK: Mutex<()> = Mutex::new(());
+}
 
 pub type BlockHash = [u8; 32];
 
@@ -145,7 +149,7 @@ impl Block {
         
         // Verify previous block hash
         if let Some(prev_block) = previous_block {
-            if self.header.previous_hash != prev_block.calculate_hash(None)? {
+            if self.header.previous_hash != prev_block.calculate_hash(Some(consensus))? {
                 return Err(InvalidBlockError::PreviousBlockHashMismatch.into());
             }
             
@@ -285,18 +289,23 @@ impl Block {
     }
 
     pub fn mine(&mut self, keypair: &crate::crypto::Dilithium3Keypair, consensus: &ConsensusConfig) -> Result<()> {
+        let _guard = MINING_LOCK.lock().map_err(|_| {
+            BlockchainError::MiningError("Failed to acquire mining lock".to_string())
+        })?;
+    
         let target = generate_difficulty_target(self.header.difficulty);
         let stop_flag = Arc::new(AtomicBool::new(false));
-
+    
         let found_nonce = (0..u64::MAX)
             .into_par_iter()
             .find_any(|&nonce| {
                 if stop_flag.load(Ordering::Relaxed) {
                     return true;
                 }
+    
                 let mut block_header = self.header.clone();
                 block_header.nonce = nonce;
-                
+    
                 let header_data = HeaderForHashing {
                     version: block_header.version,
                     height: block_header.height,
@@ -307,7 +316,7 @@ impl Block {
                     nonce: block_header.nonce,
                     miner_public_key: block_header.miner_public_key.clone(),
                 };
-                
+    
                 if let Ok(serialized_header) = bincode::serialize(&header_data) {
                     if let Ok(hash) = self.calculate_hash_with_header(&serialized_header, consensus) {
                         if crate::blockchain::meets_target(&hash, &target) {
@@ -318,7 +327,7 @@ impl Block {
                 }
                 false
             });
-
+    
         if let Some(nonce) = found_nonce {
             self.header.nonce = nonce;
             self.sign(keypair, None)?;

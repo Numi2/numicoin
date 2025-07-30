@@ -62,6 +62,7 @@ tower-http = { version = "0.4", features = ["cors", "trace", "timeout", "limit"]
 # Performance and concurrency
 rayon = "1.7" # For parallel mining
 parking_lot = "0.12" # Faster RwLock
+lazy_static = "1.4.0"
 dashmap = "5.4" # Concurrent HashMap
 crossbeam = "0.8" # Channel communication for local miner
 tempfile = "3.8"

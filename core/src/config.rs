@@ -343,7 +343,7 @@ impl Default for RpcConfig {
         Self {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 8082,
             max_connections: 100,
             request_timeout_secs: 30,
             max_request_size: 1024 * 1024, // 1MB
@@ -755,7 +755,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.network.enabled);
         assert_eq!(config.network.listen_port, 8333);
-        assert_eq!(config.rpc.port, 8080);
+        assert_eq!(config.rpc.port, 8082);
     }
 
     #[test]

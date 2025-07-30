@@ -3110,6 +3110,7 @@ dependencies = [
  "hex",
  "hickory-resolver 0.24.4",
  "jsonwebtoken",
+ "lazy_static",
  "libp2p",
  "log",
  "num-bigint",

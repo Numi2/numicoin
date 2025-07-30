@@ -432,22 +432,19 @@ pub fn argon2d_pow(data: &[u8], salt: &[u8], cfg: &Argon2Config) -> Result<Vec<u
 }
 
 /// Verify PoW (adaptive default config)
-pub fn verify_pow(header: &[u8], nonce: u64, target: &[u8], consensus: &ConsensusConfig) -> Result<bool> {
+pub fn verify_pow(header: &[u8], _nonce: u64, target: &[u8], consensus: &ConsensusConfig) -> Result<bool> {
     if header.is_empty() || target.len() != 32 {
         return Err(BlockchainError::CryptographyError("Invalid PoW args".into()));
     }
-    let mut blob = Vec::with_capacity(header.len() + 8);
-    blob.extend_from_slice(header);
-    blob.extend_from_slice(&nonce.to_le_bytes());
 
     // salt = first 16 bytes of blake3(header)
     let salt = &blake3_hash(header)[..16];
 
-    let pow = argon2d_pow(&blob, salt, &consensus.argon2_config)?;
-    let h   = blake3_hash(&pow);
+    let pow = argon2d_pow(header, salt, &consensus.argon2_config)?;
+    let h   = blake3_hash_block(&pow);
     let mut tgt = [0u8; 32];
     tgt.copy_from_slice(target);
-    Ok(h <= tgt)
+    Ok(crate::blockchain::meets_target(&h, &tgt))
 }
 
 /// Build a 256-bit target from difficulty bits

@@ -135,7 +135,7 @@ impl NumiBlockchain {
             {
                 let mut st = chain_guard.state.write();
                 st.total_blocks = 1; // Genesis is block 1
-                st.best_block_hash = genesis.calculate_hash(None)?;
+                st.best_block_hash = genesis.calculate_hash(Some(&chain_guard.consensus))?;
                 st.cumulative_difficulty = genesis.header.difficulty as u128;
                 
                 // Add genesis mining reward to total supply
@@ -218,7 +218,7 @@ impl NumiBlockchain {
         {
             let mut st = chain.state.write();
             st.total_blocks = 1;
-            st.best_block_hash = genesis_block.calculate_hash(None)?;
+            st.best_block_hash = genesis_block.calculate_hash(Some(&chain.consensus))?;
             st.cumulative_difficulty = genesis_block.header.difficulty as u128;
             if let Some(reward) = genesis_block.transactions.iter().find_map(|tx| {
                 if let TransactionType::MiningReward { amount, .. } = tx.kind { Some(amount) } else { None }
@@ -277,7 +277,7 @@ impl NumiBlockchain {
         self.blocks
             .read()
             .iter()
-            .find(|b| b.calculate_hash(None).ok().map_or(false, |h| &h == hash))
+            .find(|b| b.calculate_hash(Some(&self.consensus)).ok().map_or(false, |h| &h == hash))
             .cloned()
     }
     /// Return up to `count` headers starting after `start_hash` (empty = genesis)
@@ -361,7 +361,7 @@ impl NumiBlockchain {
         {
             let mut st = self.state.write();
             st.total_blocks += 1;
-            st.best_block_hash = block.calculate_hash(None)?;
+            st.best_block_hash = block.calculate_hash(Some(&self.consensus))?;
             st.cumulative_difficulty += block.header.difficulty as u128;
             // mint
             if let Some(reward) = block.transactions.iter().find_map(|tx| {

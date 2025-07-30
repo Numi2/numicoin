@@ -241,6 +241,10 @@ impl BlockchainStorage {
     }
     
     pub fn new_with_encryption<P: AsRef<Path>>(path: P, encryption_key: Option<EncryptionKey>) -> Result<Self> {
+        // Ensure the database directory exists before trying to create the lock file.
+        std::fs::create_dir_all(path.as_ref())
+            .map_err(|e| BlockchainError::StorageError(format!("Failed to create data directory: {e}")))?;
+
         let lock_path = path.as_ref().join(".lock");
         let lock_file = File::create(&lock_path).map_err(|e| BlockchainError::StorageError(format!("Failed to create lock file: {e}")))?;
         lock_file.try_lock_exclusive().map_err(|_| BlockchainError::StorageError("Database is already in use".to_string()))?;
